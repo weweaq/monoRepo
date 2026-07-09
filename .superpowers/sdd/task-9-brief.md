@@ -1,3 +1,14 @@
+### Task 9: MarvisReader
+
+**Files:**
+- Create: `profile/io/marvis_reader.py`
+
+**Interfaces:**
+- Produces: `MarvisReader` class implementing `BaseReader`
+
+- [ ] **Step 1: Write marvis_reader.py**
+
+```python
 import shutil
 import sqlite3
 import tempfile
@@ -36,7 +47,7 @@ class MarvisReader(BaseReader):
         try:
             conn = sqlite3.connect(str(tmp))
             cur = conn.cursor()
-            cur.execute("SELECT * FROM messages WHERE role='user' ORDER BY created_at")
+            cur.execute("SELECT * FROM messages ORDER BY timestamp")
             rows = cur.fetchall()
             column_names = [desc[0] for desc in cur.description]
             for row in rows:
@@ -56,14 +67,16 @@ class MarvisReader(BaseReader):
         return records
 
     def _parse_row(self, row: dict) -> ChatRecord | None:
-        ts = row.get("created_at")
-        content = row.get("content", "")
+        ts = row.get("timestamp")
+        content = row.get("content", "") or row.get("text", "") or row.get("message", "")
         if not content:
             return None
 
-        if isinstance(ts, str):
+        if isinstance(ts, (int, float)):
+            t = datetime.fromtimestamp(ts / 1000 if ts > 1e12 else ts)
+        elif isinstance(ts, str):
             try:
-                t = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                t = datetime.fromtimestamp(int(ts) / 1000 if int(ts) > 1e12 else int(ts))
             except (ValueError, OSError):
                 return None
         else:
@@ -74,3 +87,17 @@ class MarvisReader(BaseReader):
             content=str(content),
             source=self.source_name,
         )
+```
+
+- [ ] **Step 2: Verify import + is_available**
+
+```powershell
+python -c "from profile.io.marvis_reader import MarvisReader; r = MarvisReader(); print('available:', r.is_available())"
+```
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add profile/io/marvis_reader.py
+git commit -m "feat: add MarvisReader for SQLite chat data"
+```
