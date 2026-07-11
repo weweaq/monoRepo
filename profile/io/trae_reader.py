@@ -5,7 +5,10 @@ from datetime import datetime
 from profile.config import TRAE_MEMORY_DIR
 from profile.db.store import upsert_raw_data
 from profile.io.base import BaseReader
+from profile.log import get_logger, log_error
 from profile.models import ChatRecord
+
+logger = get_logger("io.trae_reader")
 
 
 class TraeReader(BaseReader):
@@ -21,7 +24,7 @@ class TraeReader(BaseReader):
 
     def ingest(self) -> int:
         if not self.is_available():
-            print("[skip] trae 数据源不可用")
+            logger.warning("trae 数据源不可用", extra={"extra": {"path": str(TRAE_MEMORY_DIR)}})
             return 0
 
         count = 0
@@ -35,7 +38,9 @@ class TraeReader(BaseReader):
                         try:
                             data = json.loads(line)
                         except json.JSONDecodeError:
-                            print(f"[warn] trae: skip bad JSON line in {filepath}")
+                            logger.warning("跳过无效 JSON 行", extra={
+                                "extra": {"file": filepath}
+                            })
                             continue
 
                         ts = data.get("message_summary_time", "")
@@ -54,9 +59,13 @@ class TraeReader(BaseReader):
                         )
                         count += 1
             except OSError as e:
-                print(f"[warn] trae: cannot read {filepath}: {e}")
+                log_error(logger, f"无法读取文件 {filepath}", exc=e, context={
+                    "file": filepath,
+                })
 
-        print(f"[ok] trae 入库 {count} 条")
+        logger.info("trae 入库完成", extra={
+            "extra": {"count": count, "source": "trae"}
+        })
         return count
 
     def read(self) -> list[ChatRecord]:
@@ -74,9 +83,13 @@ class TraeReader(BaseReader):
                             if record:
                                 records.append(record)
                         except json.JSONDecodeError:
-                            print(f"[warn] trae: skip bad JSON line in {filepath}")
+                            logger.warning("跳过无效 JSON 行", extra={
+                                "extra": {"file": filepath}
+                            })
             except OSError as e:
-                print(f"[warn] trae: cannot read {filepath}: {e}")
+                log_error(logger, f"无法读取文件 {filepath}", exc=e, context={
+                    "file": filepath,
+                })
         return records
 
     def _to_record(self, data: dict) -> ChatRecord | None:

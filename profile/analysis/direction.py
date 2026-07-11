@@ -11,7 +11,10 @@ from collections import Counter
 from profile.config import LLM_FALLBACK_TO_RULES
 from profile.llm.client import LLMClient
 from profile.llm.prompts import TRAE_PROFILE_PROMPT, TRAE_PROFILE_SYSTEM
+from profile.log import get_logger
 from profile.models import ChatRecord
+
+logger = get_logger("analysis.direction")
 
 AGENT_KEYWORDS = ["agent", "智能体", "mcp", "langgraph", "multi-agent", "tool", "function calling"]
 MEMORY_KEYWORDS = ["memory", "记忆", "vector", "embedding", "rag", "knowledge graph"]
@@ -55,7 +58,7 @@ def analyze_llm(intents: list[dict], claimed: dict, client: LLMClient | None = N
     client = client or LLMClient()
     if not client.is_available():
         if LLM_FALLBACK_TO_RULES:
-            print("[warn] LLM 不可用，方向分析回退到规则版")
+            logger.warning("LLM 不可用，方向分析回退到规则版")
             return analyze(_intents_to_records(intents), claimed)
         raise RuntimeError("LLM 不可用且未开启降级")
 

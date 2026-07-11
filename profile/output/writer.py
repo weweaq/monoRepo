@@ -8,6 +8,9 @@ from datetime import datetime
 from pathlib import Path
 
 from profile.config import OBSIDIAN_OUTPUT_DIR
+from profile.log import get_logger
+
+logger = get_logger("output.writer")
 
 
 def write_channel(profile: dict, source: str, date_str: str | None = None) -> tuple[Path, Path]:
@@ -30,7 +33,9 @@ def write_channel(profile: dict, source: str, date_str: str | None = None) -> tu
     md_path.write_text("\n".join(lines), encoding="utf-8")
     json_path.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    print(f"[ok] {source} 画像已输出: {md_path.name} + {json_path.name}")
+    logger.info("画像已输出", extra={
+        "extra": {"source": source, "md": md_path.name, "json": json_path.name}
+    })
     return md_path, json_path
 
 
@@ -80,7 +85,9 @@ def write_global(profile: dict, date_str: str | None = None) -> tuple[Path, Path
     md_path.write_text("\n".join(lines), encoding="utf-8")
     json_path.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    print(f"[ok] 综合画像已输出: {md_path.name} + {json_path.name}")
+    logger.info("综合画像已输出", extra={
+        "extra": {"md": md_path.name, "json": json_path.name}
+    })
     return md_path, json_path
 
 

@@ -8,7 +8,10 @@ from pathlib import Path
 from profile.config import MARVIS_DATA_DIR
 from profile.db.store import upsert_raw_data
 from profile.io.base import BaseReader
+from profile.log import get_logger, log_error
 from profile.models import ChatRecord
+
+logger = get_logger("io.marvis_reader")
 
 
 class MarvisReader(BaseReader):
@@ -21,7 +24,9 @@ class MarvisReader(BaseReader):
 
     def ingest(self) -> int:
         if not self.is_available():
-            print("[skip] marvis 数据源不可用")
+            logger.warning("marvis 数据源不可用", extra={
+                "extra": {"path": str(MARVIS_DATA_DIR)}
+            })
             return 0
 
         rows = self._read_rows()
@@ -49,7 +54,9 @@ class MarvisReader(BaseReader):
             )
             count += 1
 
-        print(f"[ok] marvis 入库 {count} 条")
+        logger.info("marvis 入库完成", extra={
+            "extra": {"count": count, "source": "marvis"}
+        })
         return count
 
     def read(self) -> list[ChatRecord]:
@@ -69,7 +76,10 @@ class MarvisReader(BaseReader):
         try:
             shutil.copy2(str(src), str(tmp))
         except OSError as e:
-            print(f"[error] marvis: cannot copy data.db (close Marvis first): {e}")
+            log_error(logger, "无法复制 data.db（请先关闭 Marvis）", exc=e, context={
+                "src": str(src),
+                "tmp": str(tmp),
+            })
             return []
 
         rows = []
@@ -83,7 +93,9 @@ class MarvisReader(BaseReader):
                 rows.append(dict(zip(column_names, row)))
             conn.close()
         except sqlite3.Error as e:
-            print(f"[error] marvis: SQLite error: {e}")
+            log_error(logger, "marvis SQLite 读取失败", exc=e, context={
+                "db_path": str(tmp),
+            })
         finally:
             try:
                 tmp.unlink(missing_ok=True)

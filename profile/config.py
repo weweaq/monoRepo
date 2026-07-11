@@ -8,6 +8,7 @@ MARVIS_DATA_DIR = Path("C:/Users/17734/AppData/Roaming/Tencent/Marvis/User/2E513
 OBSIDIAN_OUTPUT_DIR = Path("d:/AAAmyPrj/gitee/obsidian/我的文档/AI使用/画像产出")
 
 DB_PATH = PROJECT_ROOT / "data" / "profile.db"
+LOG_DIR = PROJECT_ROOT / "logs"
 
 
 def ensure_dirs() -> None:

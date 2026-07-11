@@ -10,7 +10,10 @@ from datetime import datetime
 from profile.config import LLM_FALLBACK_TO_RULES
 from profile.llm.client import LLMClient
 from profile.llm.prompts import TRAE_PROFILE_PROMPT, TRAE_PROFILE_SYSTEM
+from profile.log import get_logger
 from profile.models import ChatRecord
+
+logger = get_logger("analysis.decision")
 
 RESEARCH_KEYWORDS = ["搜索", "查找", "调研", "了解", "阅读", "查看", "研究", "浏览", "查询", "检索"]
 BUILD_KEYWORDS = ["写", "创建", "实现", "安装", "运行", "修改", "部署", "构建", "开发", "编码", "配置", "搭建"]
@@ -60,7 +63,7 @@ def analyze_llm(intents: list[dict], client: LLMClient | None = None) -> dict:
     client = client or LLMClient()
     if not client.is_available():
         if LLM_FALLBACK_TO_RULES:
-            print("[warn] LLM 不可用，决策分析回退到规则版")
+            logger.warning("LLM 不可用，决策分析回退到规则版")
             return analyze(_intents_to_records(intents))
         raise RuntimeError("LLM 不可用且未开启降级")
 

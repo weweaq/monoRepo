@@ -11,7 +11,10 @@ from datetime import datetime
 from profile.config import LLM_FALLBACK_TO_RULES
 from profile.llm.client import LLMClient
 from profile.llm.prompts import MARVIS_PROFILE_PROMPT, MARVIS_PROFILE_SYSTEM
+from profile.log import get_logger
 from profile.models import ChatRecord
+
+logger = get_logger("analysis.topic")
 
 TECH_KEYWORDS = ["python", "代码", "报错", "api", "数据库", "前端", "后端", "模型", "llm", "agent", "docker"]
 TOOL_KEYWORDS = ["obsidian", "飞书", "notion", "cursor", "trae", "vscode", "github", "git", "cli"]
@@ -48,7 +51,7 @@ def analyze_llm(intents: list[dict], client: LLMClient | None = None) -> dict:
     client = client or LLMClient()
     if not client.is_available():
         if LLM_FALLBACK_TO_RULES:
-            print("[warn] LLM 不可用，主题分析回退到规则版")
+            logger.warning("LLM 不可用，主题分析回退到规则版")
             return analyze(_intents_to_records(intents))
         raise RuntimeError("LLM 不可用且未开启降级")
 
