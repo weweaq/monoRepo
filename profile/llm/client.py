@@ -226,9 +226,12 @@ def _record_llm_call(model, system_prompt, user_prompt, response, usage,
             success=1 if success else 0,
             error_message=error_message,
         )
-    except Exception:
-        # 埋点失败不影响主流程
-        pass
+    except Exception as e:
+        # 埋点失败不影响主流程，但记录 warning 以便排查
+        import logging
+        logging.getLogger("profile.llm.client").warning(
+            f"LLM 调用埋点失败: {e}"
+        )
 
 
 class JsonParseError(RuntimeError):

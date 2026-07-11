@@ -42,9 +42,17 @@ def insert_task_run(task_type: str, status: str, params_json=None,
         conn.close()
 
 
+_ALLOWED_TASK_RUN_COLUMNS = {"status", "steps_json", "current_step", "params_json",
+                             "result_json", "log_dir", "error_message",
+                             "started_at", "finished_at"}
+
+
 def update_task_run(task_id: int, **kwargs) -> None:
     if not kwargs:
         return
+    for k in kwargs:
+        if k not in _ALLOWED_TASK_RUN_COLUMNS:
+            raise ValueError(f"非法列名: {k}")
     sets = []
     vals = []
     for k, v in kwargs.items():

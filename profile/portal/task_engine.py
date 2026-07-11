@@ -60,6 +60,7 @@ class PortalLogHandler(logging.Handler):
         self._queues: dict[int, deque] = {}
         self._active: set[int] = set()
         self._lock = threading.Lock()
+        self._seq_counter = 0  # 全局递增序列号，避免 deque 溢出后索引偏移
 
     def attach(self, task_id: int) -> None:
         with self._lock:
@@ -71,12 +72,12 @@ class PortalLogHandler(logging.Handler):
         with self._lock:
             self._active.discard(task_id)
 
-    def get_logs(self, task_id: int, after_idx: int = 0) -> list[dict]:
+    def get_logs(self, task_id: int, after_seq: int = 0) -> list[dict]:
         with self._lock:
             q = self._queues.get(task_id)
             if q is None:
                 return []
-            return list(q)[after_idx:]
+            return [e for e in q if e["seq"] > after_seq]
 
     def emit(self, record: logging.LogRecord) -> None:
         # 只处理 profile.* 命名空间
@@ -92,6 +93,8 @@ class PortalLogHandler(logging.Handler):
         if extra:
             entry["extra"] = extra if isinstance(extra, dict) else str(extra)
         with self._lock:
+            entry["seq"] = self._seq_counter
+            self._seq_counter += 1
             for task_id in self._active:
                 q = self._queues.get(task_id)
                 if q is not None:
@@ -266,8 +269,8 @@ class TaskRunner:
             return True
         return False
 
-    def get_logs(self, task_id: int, after_idx: int = 0) -> list[dict]:
-        return self._log_handler.get_logs(task_id, after_idx)
+    def get_logs(self, task_id: int, after_seq: int = 0) -> list[dict]:
+        return self._log_handler.get_logs(task_id, after_seq)
 
     def is_busy(self) -> bool:
         return self._current_task_id is not None

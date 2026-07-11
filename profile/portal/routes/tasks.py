@@ -61,21 +61,23 @@ async def stream_logs(task_id: int):
     runner = get_runner()
 
     async def event_stream():
-        idx = 0
+        after_seq = 0
         while True:
-            logs = runner.get_logs(task_id, after_idx=idx)
+            logs = runner.get_logs(task_id, after_seq=after_seq)
             for log in logs:
-                idx += 1
                 yield f"data: {json.dumps(log, ensure_ascii=False)}\n\n"
+            if logs:
+                after_seq = logs[-1]["seq"]
 
             # 检查任务是否已结束
             task = get_task_run(task_id)
             if task and task["status"] in ("done", "failed", "cancelled"):
                 # 推送剩余日志
-                remaining = runner.get_logs(task_id, after_idx=idx)
+                remaining = runner.get_logs(task_id, after_seq=after_seq)
                 for log in remaining:
-                    idx += 1
                     yield f"data: {json.dumps(log, ensure_ascii=False)}\n\n"
+                if remaining:
+                    after_seq = remaining[-1]["seq"]
                 yield f"data: {json.dumps({'event': 'done', 'status': task['status']}, ensure_ascii=False)}\n\n"
                 break
 
