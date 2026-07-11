@@ -25,7 +25,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--days", type=int, default=7, help="统计最近 N 天")
     args = parser.parse_args(argv)
 
-    setup(log_dir=LOG_DIR / "refresh_all")
+    setup(log_dir=LOG_DIR)
     t_start = time.monotonic()
     logger.info("刷新流水线启动", extra={
         "extra": {"days": args.days}

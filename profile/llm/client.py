@@ -59,6 +59,14 @@ class LLMClient:
                 "temperature": effective_temperature,
             }
         })
+        # DEBUG 级记录完整请求内容，仅落盘不刷控制台
+        if system_prompt:
+            logger.debug("LLM 请求 system_prompt 全文", extra={
+                "extra": {"system_prompt": system_prompt}
+            })
+        logger.debug("LLM 请求 prompt 全文", extra={
+            "extra": {"prompt": prompt}
+        })
 
         req_data = json.dumps(data).encode("utf-8")
         req = urllib.request.Request(
@@ -90,6 +98,10 @@ class LLMClient:
                             "total_tokens": usage.get("total_tokens"),
                             "finish_reason": body["choices"][0].get("finish_reason"),
                         }
+                    })
+                    # DEBUG 级记录完整响应内容，仅落盘不刷控制台
+                    logger.debug("LLM 响应全文", extra={
+                        "extra": {"response": content}
                     })
                     return content.strip()
                 raise RuntimeError(f"LLM 响应格式异常: {body}")

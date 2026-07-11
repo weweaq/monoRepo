@@ -25,7 +25,7 @@ READERS = {
 def main(argv: list[str] | None = None) -> int:
     if argv is None:
         argv = sys.argv[1:]
-    setup(log_dir=LOG_DIR / "ingest")
+    setup(log_dir=LOG_DIR)
     init_db()
 
     if argv:

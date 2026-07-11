@@ -94,38 +94,46 @@ _LOG_DIR: Path | None = None
 _INITIALIZED = False
 
 
-def setup(log_dir: Path | None = None, level: int = logging.DEBUG) -> None:
+def setup(log_dir: Path | None = None, level: int = logging.DEBUG, console_level: int = logging.INFO) -> None:
     """初始化日志系统。
 
+    符合 AGENTS.md 规范：每次运行日志写入独立目录 logs/YYYY-MM-DD-HHmmss/，
+    不会覆盖历史运行日志，全量持久化。
+
     Args:
-        log_dir: 日志目录，默认创建 logs/YYYY-MM-DD-HHmmss/
-        level: 根 logger 级别
+        log_dir: 日志基目录（默认 logs/），实际会在其下创建 YYYY-MM-DD-HHmmss/ 子目录
+        level: 文件 handler 级别（默认 DEBUG，记录最详细信息）
+        console_level: 控制台 handler 级别（默认 INFO，避免 DEBUG 刷屏）
     """
     global _LOG_DIR, _INITIALIZED
     if _INITIALIZED:
         return
     _INITIALIZED = True
 
-    if log_dir is None:
-        now = datetime.now()
-        log_dir = Path("logs") / now.strftime("%Y-%m-%d-%H%M%S")
-    _LOG_DIR = Path(log_dir)
+    base = Path(log_dir) if log_dir else Path("logs")
+    stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
+    # 每次运行独立目录，同秒多次运行追加 -2 -3 避免覆盖
+    _LOG_DIR = base / stamp
+    suffix = 2
+    while _LOG_DIR.exists():
+        _LOG_DIR = base / f"{stamp}-{suffix}"
+        suffix += 1
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     root = logging.getLogger("profile")
     root.setLevel(level)
     root.handlers.clear()
 
-    # JSONL 文件 handler
+    # JSONL 文件 handler（全量持久化，含 DEBUG）
     fh = logging.FileHandler(_LOG_DIR / "run.jsonl", encoding="utf-8")
     fh.setLevel(level)
     fh.setFormatter(JsonlFormatter())
     fh.addFilter(_ContextFilter())
     root.addHandler(fh)
 
-    # 控制台 handler（简洁格式，方便人工看）
+    # 控制台 handler（简洁格式，方便人工看，默认 INFO 不刷 DEBUG）
     ch = logging.StreamHandler(sys.stderr)
-    ch.setLevel(logging.INFO)
+    ch.setLevel(console_level)
     ch.setFormatter(logging.Formatter("[%(levelname)s] %(name)s: %(message)s"))
     ch.addFilter(_ContextFilter())
     root.addHandler(ch)

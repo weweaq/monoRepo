@@ -18,7 +18,7 @@ logger = get_logger("cli.extract_intents")
 
 def main(argv: list[str] | None = None) -> int:
     argv = argv or sys.argv[1:]
-    setup(log_dir=LOG_DIR / "extract_intents")
+    setup(log_dir=LOG_DIR)
     init_db()
 
     source = argv[0] if argv else None
