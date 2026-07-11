@@ -8,6 +8,7 @@ from profile.config import (
     LLM_TIMEOUT, LLM_MAX_TOKENS, LLM_TEMPERATURE
 )
 from profile.log import get_logger, log_error
+from profile.portal.task_engine import get_current_task_run_id, get_current_step
 
 logger = get_logger("llm.client")
 
@@ -103,6 +104,16 @@ class LLMClient:
                     logger.debug("LLM 响应全文", extra={
                         "extra": {"response": content}
                     })
+                    # 记录到 llm_calls 表
+                    _record_llm_call(
+                        model=self.model,
+                        system_prompt=system_prompt,
+                        user_prompt=prompt,
+                        response=content,
+                        usage=usage,
+                        elapsed_ms=elapsed_ms,
+                        success=True,
+                    )
                     return content.strip()
                 raise RuntimeError(f"LLM 响应格式异常: {body}")
         except urllib.error.HTTPError as e:
@@ -115,6 +126,16 @@ class LLMClient:
                 "elapsed_ms": elapsed_ms,
                 "response_body": error_body[:500],
             })
+            _record_llm_call(
+                model=self.model,
+                system_prompt=system_prompt,
+                user_prompt=prompt,
+                response=None,
+                usage={},
+                elapsed_ms=elapsed_ms,
+                success=False,
+                error_message=f"HTTP {e.code}: {error_body[:200]}",
+            )
             raise RuntimeError(f"LLM API HTTP {e.code}: {error_body}") from e
         except urllib.error.URLError as e:
             elapsed_ms = round((time.monotonic() - t0) * 1000)
@@ -123,6 +144,16 @@ class LLMClient:
                 "model": self.model,
                 "elapsed_ms": elapsed_ms,
             })
+            _record_llm_call(
+                model=self.model,
+                system_prompt=system_prompt,
+                user_prompt=prompt,
+                response=None,
+                usage={},
+                elapsed_ms=elapsed_ms,
+                success=False,
+                error_message=f"网络错误: {e}",
+            )
             raise RuntimeError(f"LLM API 网络错误: {e}") from e
 
     def chat_json(self, prompt: str, system_prompt: str = None) -> dict:
@@ -174,6 +205,30 @@ class LLMClient:
             "extra": {"response_preview": text[:200], "response_length": len(text)}
         })
         return None
+
+
+def _record_llm_call(model, system_prompt, user_prompt, response, usage,
+                     elapsed_ms, success, error_message=None):
+    """记录 LLM 调用到 llm_calls 表。"""
+    try:
+        from profile.portal.db_store import insert_llm_call
+        insert_llm_call(
+            task_run_id=get_current_task_run_id(),
+            step=get_current_step(),
+            model=model,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            response=response,
+            prompt_tokens=usage.get("prompt_tokens") if usage else None,
+            completion_tokens=usage.get("completion_tokens") if usage else None,
+            total_tokens=usage.get("total_tokens") if usage else None,
+            elapsed_ms=elapsed_ms,
+            success=1 if success else 0,
+            error_message=error_message,
+        )
+    except Exception:
+        # 埋点失败不影响主流程
+        pass
 
 
 class JsonParseError(RuntimeError):
