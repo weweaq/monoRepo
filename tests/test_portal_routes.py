@@ -122,3 +122,24 @@ def test_get_llm_call_not_found():
     client = TestClient(app)
     resp = client.get("/api/llm/calls/99999")
     assert resp.status_code == 404
+
+
+def test_list_profiles():
+    client = TestClient(app)
+    resp = client.get("/api/profiles")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "items" in data
+    assert "total" in data
+
+
+def test_get_profile_not_found():
+    client = TestClient(app)
+    resp = client.get("/api/profiles/nonexistent-file.md")
+    assert resp.status_code == 404
+
+
+def test_get_profile_path_traversal_blocked():
+    client = TestClient(app)
+    resp = client.get("/api/profiles/..%2F..%2Fetc%2Fpasswd")
+    assert resp.status_code in (400, 404)
