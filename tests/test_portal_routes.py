@@ -75,3 +75,35 @@ def test_get_nonexistent_task():
     client = TestClient(app)
     resp = client.get("/api/tasks/99999")
     assert resp.status_code == 404
+
+
+def test_list_raw_data():
+    client = TestClient(app)
+    resp = client.get("/api/data/raw")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "items" in data
+    assert "total" in data
+
+
+def test_list_raw_data_with_source_filter():
+    client = TestClient(app)
+    resp = client.get("/api/data/raw?source=trae")
+    assert resp.status_code == 200
+    data = resp.json()
+    for item in data["items"]:
+        assert item["source"] == "trae"
+
+
+def test_get_raw_data_not_found():
+    client = TestClient(app)
+    resp = client.get("/api/data/raw/99999")
+    assert resp.status_code == 404
+
+
+def test_list_intents():
+    client = TestClient(app)
+    resp = client.get("/api/data/intents")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "items" in data
