@@ -67,7 +67,15 @@ def analyze_llm(intents: list[dict], claimed: dict, client: LLMClient | None = N
         primary_direction=claimed.get("主", "Agent"),
         secondary_direction=claimed.get("次", "Memory"),
     )
-    result = client.chat_json(prompt, system_prompt=TRAE_PROFILE_SYSTEM)
+    try:
+        result = client.chat_json(prompt, system_prompt=TRAE_PROFILE_SYSTEM)
+    except Exception as e:
+        if LLM_FALLBACK_TO_RULES:
+            logger.warning("LLM 调用失败，方向分析回退到规则版", extra={
+                "extra": {"error": str(e)}
+            })
+            return analyze(_intents_to_records(intents), claimed)
+        raise
     return {
         "status": "ok",
         "claimed_direction": claimed,

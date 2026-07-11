@@ -159,10 +159,9 @@ class IntentExtractor:
         return "\n".join(lines)
 
     def _parse_batch_response(self, raw: str, expected_count: int) -> list[dict | None]:
-        try:
-            data = self.client._extract_json(raw)
-        except Exception as e:
-            log_error(logger, "无法解析批量 LLM 响应", exc=e, context={
+        data = self.client._extract_json(raw)
+        if data is None:
+            log_error(logger, "无法解析批量 LLM 响应", context={
                 "response_preview": raw[:300],
                 "expected_count": expected_count,
             })

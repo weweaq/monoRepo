@@ -103,25 +103,30 @@ class LLMClient:
         """
         发送聊天请求，期望返回 JSON。
         会尝试从响应中提取 JSON（处理 markdown code block 包裹的情况）。
-        失败时抛出 Exception。
+        失败时抛出 JsonParseError。
         """
         raw = self.chat(prompt, system_prompt=system_prompt)
-        return self._extract_json(raw)
+        result = self._extract_json(raw)
+        if result is None:
+            raise JsonParseError(f"无法从 LLM 响应中提取 JSON: {raw[:200]}")
+        return result
 
-    def _extract_json(self, text: str) -> dict:
-        """从 LLM 响应中提取 JSON，处理 markdown 包裹"""
+    def _extract_json(self, text: str) -> dict | None:
+        """从 LLM 响应中提取 JSON，处理 markdown 包裹。失败返回 None。"""
         import re
+        if not text or not text.strip():
+            return None
         # 尝试直接解析
         try:
             return json.loads(text)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, TypeError):
             pass
         # 尝试从 ```json ... ``` 中提取
         match = re.search(r'```(?:json)?\s*(.*?)```', text, re.DOTALL)
         if match:
             try:
                 return json.loads(match.group(1).strip())
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, TypeError):
                 pass
         # 尝试找到第一个 { 和最后一个 } 之间的内容
         first = text.find('{')
@@ -129,7 +134,10 @@ class LLMClient:
         if first != -1 and last != -1 and last > first:
             try:
                 return json.loads(text[first:last+1])
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, TypeError):
                 pass
-        log_error(logger, "无法从 LLM 响应中提取 JSON", context={"response_preview": text[:200]})
-        raise RuntimeError(f"无法从 LLM 响应中提取 JSON: {text[:200]}")
+        return None
+
+
+class JsonParseError(RuntimeError):
+    """LLM 响应无法解析为 JSON。"""

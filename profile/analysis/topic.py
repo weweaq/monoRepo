@@ -58,7 +58,15 @@ def analyze_llm(intents: list[dict], client: LLMClient | None = None) -> dict:
     prompt = MARVIS_PROFILE_PROMPT.format(
         intents_json=json.dumps(intents, ensure_ascii=False, indent=2),
     )
-    result = client.chat_json(prompt, system_prompt=MARVIS_PROFILE_SYSTEM)
+    try:
+        result = client.chat_json(prompt, system_prompt=MARVIS_PROFILE_SYSTEM)
+    except Exception as e:
+        if LLM_FALLBACK_TO_RULES:
+            logger.warning("LLM 调用失败，主题分析回退到规则版", extra={
+                "extra": {"error": str(e)}
+            })
+            return analyze(_intents_to_records(intents))
+        raise
     daily = result.get("daily_needs", {})
     interaction = result.get("interaction_pattern", {})
     return {
