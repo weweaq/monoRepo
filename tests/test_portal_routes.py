@@ -18,3 +18,39 @@ def test_dashboard_endpoint_exists():
     assert "recent_tasks" in data
     assert "data_overview" in data
     assert "llm_overview" in data
+
+
+def test_dashboard_returns_all_six_keys():
+    """Dashboard API should return all 6 aggregation keys"""
+    client = TestClient(app)
+    resp = client.get("/api/dashboard")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "current_task" in data
+    assert "recent_tasks" in data
+    assert "data_overview" in data
+    assert "llm_overview" in data
+    assert "latest_profile" in data
+    assert "latest_changes" in data
+
+
+def test_dashboard_data_overview_is_list():
+    """data_overview should be a list of {source, count} dicts"""
+    client = TestClient(app)
+    resp = client.get("/api/dashboard")
+    data = resp.json()
+    assert isinstance(data["data_overview"], list)
+    for item in data["data_overview"]:
+        assert "source" in item
+        assert "count" in item
+
+
+def test_dashboard_llm_overview_has_stats():
+    """llm_overview should have total_calls, total_tokens, success_rate"""
+    client = TestClient(app)
+    resp = client.get("/api/dashboard")
+    data = resp.json()
+    llm = data["llm_overview"]
+    assert "total_calls" in llm
+    assert "total_tokens" in llm
+    assert "success_rate" in llm
