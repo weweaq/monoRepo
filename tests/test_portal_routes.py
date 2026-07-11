@@ -107,3 +107,18 @@ def test_list_intents():
     assert resp.status_code == 200
     data = resp.json()
     assert "items" in data
+
+
+def test_list_llm_calls():
+    client = TestClient(app)
+    resp = client.get("/api/llm/calls")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "items" in data
+    assert "total" in data
+
+
+def test_get_llm_call_not_found():
+    client = TestClient(app)
+    resp = client.get("/api/llm/calls/99999")
+    assert resp.status_code == 404
