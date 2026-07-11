@@ -23,12 +23,24 @@ class TraeReader(BaseReader):
         return len(files) > 0
 
     def ingest(self) -> int:
+        logger.info("开始 trae 数据入库", extra={
+            "extra": {"source_dir": str(TRAE_MEMORY_DIR)}
+        })
+
         if not self.is_available():
             logger.warning("trae 数据源不可用", extra={"extra": {"path": str(TRAE_MEMORY_DIR)}})
             return 0
 
-        count = 0
-        for filepath in glob.glob(str(TRAE_MEMORY_DIR / "*" / "*" / "session_memory_*.jsonl")):
+        filepaths = glob.glob(str(TRAE_MEMORY_DIR / "*" / "*" / "session_memory_*.jsonl"))
+        logger.info("发现文件", extra={
+            "extra": {"file_count": len(filepaths), "files": [str(Path(f).name) for f in filepaths[:10]]}
+        })
+
+        total_count = 0
+        total_skipped = 0
+        for filepath in filepaths:
+            file_count = 0
+            file_skipped = 0
             try:
                 with open(filepath, "r", encoding="utf-8") as f:
                     for line in f:
@@ -38,13 +50,15 @@ class TraeReader(BaseReader):
                         try:
                             data = json.loads(line)
                         except json.JSONDecodeError:
+                            file_skipped += 1
                             logger.warning("跳过无效 JSON 行", extra={
-                                "extra": {"file": filepath}
+                                "extra": {"file": filepath, "line_preview": line[:100]}
                             })
                             continue
 
                         ts = data.get("message_summary_time", "")
                         if not ts:
+                            file_skipped += 1
                             continue
 
                         upsert_raw_data(
@@ -57,16 +71,32 @@ class TraeReader(BaseReader):
                             timestamp=ts,
                             raw_json=data,
                         )
-                        count += 1
+                        file_count += 1
             except OSError as e:
                 log_error(logger, f"无法读取文件 {filepath}", exc=e, context={
                     "file": filepath,
                 })
 
+            total_count += file_count
+            total_skipped += file_skipped
+            if file_count > 0 or file_skipped > 0:
+                logger.info("文件处理完成", extra={
+                    "extra": {
+                        "file": filepath,
+                        "ingested": file_count,
+                        "skipped": file_skipped,
+                    }
+                })
+
         logger.info("trae 入库完成", extra={
-            "extra": {"count": count, "source": "trae"}
+            "extra": {
+                "source": "trae",
+                "total_ingested": total_count,
+                "total_skipped": total_skipped,
+                "file_count": len(filepaths),
+            }
         })
-        return count
+        return total_count
 
     def read(self) -> list[ChatRecord]:
         records = []
@@ -90,6 +120,9 @@ class TraeReader(BaseReader):
                 log_error(logger, f"无法读取文件 {filepath}", exc=e, context={
                     "file": filepath,
                 })
+        logger.info("trae 读取完成", extra={
+            "extra": {"records_count": len(records)}
+        })
         return records
 
     def _to_record(self, data: dict) -> ChatRecord | None:

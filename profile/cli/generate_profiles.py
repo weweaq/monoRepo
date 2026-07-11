@@ -73,16 +73,24 @@ def _intents_to_records(intents: list[dict]) -> list[ChatRecord]:
 
 def generate_channel(source: str, intents: list[dict], raw_rows: list[dict],
                      client: LLMClient, period_start: str, period_end: str) -> dict:
-    if intents and client.is_available():
-        records = _intents_to_records(intents)
-        use_llm = True
-    else:
-        records = _raw_to_records(raw_rows)
-        use_llm = False
-        if not intents:
-            logger.warning("无意图数据，回退到规则分析", extra={
-                "extra": {"source": source}
-            })
+    use_llm = bool(intents) and client.is_available()
+    records = _intents_to_records(intents) if use_llm else _raw_to_records(raw_rows)
+
+    logger.info("开始 channel 画像生成", extra={
+        "extra": {
+            "source": source,
+            "mode": "llm" if use_llm else "rule",
+            "intents_count": len(intents),
+            "raw_rows_count": len(raw_rows),
+            "records_count": len(records),
+            "period": f"{period_start} ~ {period_end}",
+        }
+    })
+
+    if not use_llm and not intents:
+        logger.warning("无意图数据，回退到规则分析", extra={
+            "extra": {"source": source}
+        })
 
     if source == "trae":
         if use_llm:
@@ -113,7 +121,18 @@ def generate_channel(source: str, intents: list[dict], raw_rows: list[dict],
         }
 
     # 输出 md + json
-    write_channel(profile, source)
+    md_path, json_path = write_channel(profile, source)
+    logger.info("channel 画像生成完成", extra={
+        "extra": {
+            "source": source,
+            "mode": "llm" if use_llm else "rule",
+            "md_file": str(md_path),
+            "json_file": str(json_path),
+            "md_size_bytes": md_path.stat().st_size if md_path.exists() else 0,
+            "json_size_bytes": json_path.stat().st_size if json_path.exists() else 0,
+            "profile_keys": list(profile.keys()),
+        }
+    })
     return profile
 
 
@@ -127,14 +146,27 @@ def main(argv: list[str] | None = None) -> int:
     client = LLMClient()
 
     period_start, period_end = _period(args)
-    logger.info("生成画像周期", extra={
-        "extra": {"start": period_start, "end": period_end}
+    logger.info("画像生成启动", extra={
+        "extra": {
+            "period_start": period_start,
+            "period_end": period_end,
+            "days": args.days,
+            "llm_available": client.is_available(),
+            "llm_model": client.model,
+        }
     })
 
     channel_profiles = {}
     for source in ["trae", "marvis"]:
         intents = query_intents(source=source, start_date=period_start, end_date=period_end)
         raw_rows = query_raw_data(source=source, start_date=period_start, end_date=period_end)
+        logger.info("数据查询完成", extra={
+            "extra": {
+                "source": source,
+                "intents_count": len(intents),
+                "raw_rows_count": len(raw_rows),
+            }
+        })
         if not intents and not raw_rows:
             logger.info("无数据，跳过", extra={"extra": {"source": source}})
             continue
@@ -145,9 +177,24 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     # 生成综合画像
+    logger.info("开始生成综合画像", extra={
+        "extra": {
+            "channels": list(channel_profiles.keys()),
+            "channel_count": len(channel_profiles),
+        }
+    })
     global_profile = aggregator.build(channel_profiles, period_start=period_start, period_end=period_end, client=client)
-    write_global(global_profile)
+    md_path, json_path = write_global(global_profile)
 
+    logger.info("画像生成全部完成", extra={
+        "extra": {
+            "channels_generated": list(channel_profiles.keys()),
+            "global_md": str(md_path),
+            "global_json": str(json_path),
+            "global_md_size": md_path.stat().st_size if md_path.exists() else 0,
+            "global_json_size": json_path.stat().st_size if json_path.exists() else 0,
+        }
+    })
     return 0
 
 

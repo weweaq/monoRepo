@@ -21,6 +21,9 @@ DISCUSS_KEYWORDS = ["讨论", "分析", "确认", "询问", "审查", "评估", 
 
 
 def analyze(records: list[ChatRecord]) -> dict:
+    logger.info("决策分析（规则版）", extra={
+        "extra": {"records_count": len(records)}
+    })
     actionable = [r for r in records if r.actions]
     if len(actionable) < 1:
         return {"status": "样本不足", "count": len(actionable)}
@@ -61,6 +64,10 @@ def analyze(records: list[ChatRecord]) -> dict:
 
 def analyze_llm(intents: list[dict], client: LLMClient | None = None) -> dict:
     client = client or LLMClient()
+    logger.info("决策分析（LLM版）开始", extra={
+        "extra": {"intents_count": len(intents)}
+    })
+
     if not client.is_available():
         if LLM_FALLBACK_TO_RULES:
             logger.warning("LLM 不可用，决策分析回退到规则版")
@@ -84,7 +91,7 @@ def analyze_llm(intents: list[dict], client: LLMClient | None = None) -> dict:
             return analyze(_intents_to_records(intents))
         raise
     decision = result.get("decision_pattern", {})
-    return {
+    output = {
         "status": "ok",
         "处理路径分布": {
             "调研类": decision.get("research_ratio", "0"),
@@ -95,6 +102,15 @@ def analyze_llm(intents: list[dict], client: LLMClient | None = None) -> dict:
         "想法到动手间隔": decision.get("idea_to_action_gap", "暂无"),
         "raw": result,
     }
+    logger.info("决策分析（LLM版）完成", extra={
+        "extra": {
+            "pattern": decision.get("pattern"),
+            "research_ratio": decision.get("research_ratio"),
+            "build_ratio": decision.get("build_ratio"),
+            "discuss_ratio": decision.get("discuss_ratio"),
+        }
+    })
+    return output
 
 
 def _idea_to_action_gap(records: list[ChatRecord]) -> str | None:

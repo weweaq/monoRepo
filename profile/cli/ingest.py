@@ -8,11 +8,11 @@
 
 import sys
 
+from profile.config import LOG_DIR
 from profile.db.init_db import init_db
 from profile.io.trae_reader import TraeReader
 from profile.io.marvis_reader import MarvisReader
 from profile.log import get_logger, setup
-from profile.config import LOG_DIR
 
 logger = get_logger("cli.ingest")
 
@@ -34,15 +34,23 @@ def main(argv: list[str] | None = None) -> int:
         names = list(READERS.keys())
 
     if not names:
-        logger.error("无效的数据源名称", context={"argv": argv})
+        logger.error("无效的数据源名称", context={"argv": argv, "available": list(READERS.keys())})
         return 1
 
-    total = 0
+    logger.info("入库启动", extra={
+        "extra": {"sources": names, "source_count": len(names)}
+    })
+
+    results = {}
     for name in names:
         reader = READERS[name]()
-        total += reader.ingest()
+        count = reader.ingest()
+        results[name] = count
 
-    logger.info("全部入库完成", extra={"extra": {"total": total}})
+    total = sum(results.values())
+    logger.info("全部入库完成", extra={
+        "extra": {"total": total, "per_source": results}
+    })
     return 0
 
 

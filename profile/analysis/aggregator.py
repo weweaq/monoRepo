@@ -17,15 +17,32 @@ def build(channel_profiles: dict, period_start: str, period_end: str, client: LL
     """融合各 channel 画像为综合画像，返回 dict（不写库）。"""
     client = client or LLMClient()
 
+    logger.info("开始融合综合画像", extra={
+        "extra": {
+            "channels": list(channel_profiles.keys()),
+            "channel_count": len(channel_profiles),
+            "period": f"{period_start} ~ {period_end}",
+            "llm_available": client.is_available(),
+            "fallback_enabled": LLM_FALLBACK_TO_RULES,
+        }
+    })
+
     if client.is_available():
         result = _build_llm(channel_profiles, client)
+        mode = "llm"
     elif LLM_FALLBACK_TO_RULES:
         logger.warning("LLM 不可用，综合画像回退到规则拼接")
         result = _build_rule(channel_profiles)
+        mode = "rule"
     else:
         raise RuntimeError("LLM 不可用且未开启降级")
 
-    logger.info("综合画像生成完成")
+    logger.info("综合画像生成完成", extra={
+        "extra": {
+            "mode": mode,
+            "result_keys": list(result.keys()) if isinstance(result, dict) else None,
+        }
+    })
     return result
 
 

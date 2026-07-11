@@ -22,6 +22,9 @@ LIFE_KEYWORDS = ["生活", "健康", "日程", "提醒", "计划", "家庭", "�
 
 
 def analyze(records: list[ChatRecord]) -> dict:
+    logger.info("主题分析（规则版）", extra={
+        "extra": {"records_count": len(records)}
+    })
     if len(records) < 1:
         return {"status": "样本不足", "count": len(records)}
 
@@ -49,6 +52,10 @@ def analyze(records: list[ChatRecord]) -> dict:
 
 def analyze_llm(intents: list[dict], client: LLMClient | None = None) -> dict:
     client = client or LLMClient()
+    logger.info("主题分析（LLM版）开始", extra={
+        "extra": {"intents_count": len(intents)}
+    })
+
     if not client.is_available():
         if LLM_FALLBACK_TO_RULES:
             logger.warning("LLM 不可用，主题分析回退到规则版")
@@ -69,7 +76,7 @@ def analyze_llm(intents: list[dict], client: LLMClient | None = None) -> dict:
         raise
     daily = result.get("daily_needs", {})
     interaction = result.get("interaction_pattern", {})
-    return {
+    output = {
         "status": "ok",
         "主题分布": daily.get("need_categories", {}),
         "主要诉求": daily.get("top_needs", []),
@@ -78,6 +85,14 @@ def analyze_llm(intents: list[dict], client: LLMClient | None = None) -> dict:
         "关键发现": result.get("key_findings", []),
         "raw": result,
     }
+    logger.info("主题分析（LLM版）完成", extra={
+        "extra": {
+            "need_categories": daily.get("need_categories"),
+            "complexity": interaction.get("complexity_level"),
+            "key_findings_count": len(result.get("key_findings", [])),
+        }
+    })
+    return output
 
 
 def _tokenize(records: list[ChatRecord]) -> list[str]:

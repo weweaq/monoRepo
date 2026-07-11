@@ -34,7 +34,13 @@ def write_channel(profile: dict, source: str, date_str: str | None = None) -> tu
     json_path.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8")
 
     logger.info("画像已输出", extra={
-        "extra": {"source": source, "md": md_path.name, "json": json_path.name}
+        "extra": {
+            "source": source,
+            "md_file": md_path.name,
+            "json_file": json_path.name,
+            "md_size_bytes": md_path.stat().st_size,
+            "json_size_bytes": json_path.stat().st_size,
+        }
     })
     return md_path, json_path
 
@@ -86,7 +92,13 @@ def write_global(profile: dict, date_str: str | None = None) -> tuple[Path, Path
     json_path.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8")
 
     logger.info("综合画像已输出", extra={
-        "extra": {"md": md_path.name, "json": json_path.name}
+        "extra": {
+            "md_file": md_path.name,
+            "json_file": json_path.name,
+            "md_size_bytes": md_path.stat().st_size,
+            "json_size_bytes": json_path.stat().st_size,
+            "profile_keys": list(profile.keys()),
+        }
     })
     return md_path, json_path
 

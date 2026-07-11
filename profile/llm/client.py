@@ -1,4 +1,5 @@
 import json
+import time
 import urllib.request
 import urllib.error
 
@@ -36,22 +37,26 @@ class LLMClient:
             messages.append({"role": "system", "content": system_prompt})
         messages.append({"role": "user", "content": prompt})
 
+        effective_max_tokens = max_tokens or LLM_MAX_TOKENS
+        effective_temperature = temperature if temperature is not None else LLM_TEMPERATURE
+
         data = {
             "model": self.model,
             "messages": messages,
-            "max_tokens": max_tokens or LLM_MAX_TOKENS,
-            "temperature": temperature if temperature is not None else LLM_TEMPERATURE,
+            "max_tokens": effective_max_tokens,
+            "temperature": effective_temperature,
             "stream": False,
         }
 
-        logger.debug("LLM request", extra={
+        logger.info("LLM 请求发出", extra={
             "extra": {
                 "model": self.model,
                 "api_url": self.api_url,
+                "messages_count": len(messages),
                 "prompt_length": len(prompt),
                 "system_prompt_length": len(system_prompt) if system_prompt else 0,
-                "max_tokens": max_tokens or LLM_MAX_TOKENS,
-                "temperature": temperature if temperature is not None else LLM_TEMPERATURE,
+                "max_tokens": effective_max_tokens,
+                "temperature": effective_temperature,
             }
         })
 
@@ -66,36 +71,45 @@ class LLMClient:
             method="POST",
         )
 
+        t0 = time.monotonic()
         try:
             with urllib.request.urlopen(req, timeout=LLM_TIMEOUT) as resp:
+                elapsed_ms = round((time.monotonic() - t0) * 1000)
                 body = json.loads(resp.read().decode("utf-8"))
                 if "choices" in body and len(body["choices"]) > 0:
                     content = body["choices"][0].get("message", {}).get("content", "")
                     usage = body.get("usage", {})
-                    logger.info("LLM response ok", extra={
+                    logger.info("LLM 响应成功", extra={
                         "extra": {
                             "model": self.model,
-                            "content_length": len(content),
+                            "elapsed_ms": elapsed_ms,
+                            "response_length": len(content),
+                            "response_preview": content[:100] if content else "",
                             "prompt_tokens": usage.get("prompt_tokens"),
                             "completion_tokens": usage.get("completion_tokens"),
                             "total_tokens": usage.get("total_tokens"),
+                            "finish_reason": body["choices"][0].get("finish_reason"),
                         }
                     })
                     return content.strip()
                 raise RuntimeError(f"LLM 响应格式异常: {body}")
         except urllib.error.HTTPError as e:
+            elapsed_ms = round((time.monotonic() - t0) * 1000)
             error_body = e.read().decode("utf-8", errors="replace")
             log_error(logger, f"LLM API HTTP {e.code}", exc=e, context={
                 "api_url": self.api_url,
                 "model": self.model,
                 "http_code": e.code,
+                "elapsed_ms": elapsed_ms,
                 "response_body": error_body[:500],
             })
             raise RuntimeError(f"LLM API HTTP {e.code}: {error_body}") from e
         except urllib.error.URLError as e:
+            elapsed_ms = round((time.monotonic() - t0) * 1000)
             log_error(logger, "LLM API 网络错误", exc=e, context={
                 "api_url": self.api_url,
                 "model": self.model,
+                "elapsed_ms": elapsed_ms,
             })
             raise RuntimeError(f"LLM API 网络错误: {e}") from e
 
@@ -109,12 +123,20 @@ class LLMClient:
         result = self._extract_json(raw)
         if result is None:
             raise JsonParseError(f"无法从 LLM 响应中提取 JSON: {raw[:200]}")
+        logger.info("JSON 解析成功", extra={
+            "extra": {
+                "result_type": type(result).__name__,
+                "result_keys": list(result.keys()) if isinstance(result, dict) else None,
+                "raw_response_length": len(raw),
+            }
+        })
         return result
 
     def _extract_json(self, text: str) -> dict | None:
         """从 LLM 响应中提取 JSON，处理 markdown 包裹。失败返回 None。"""
         import re
         if not text or not text.strip():
+            logger.warning("LLM 响应为空，无法提取 JSON")
             return None
         # 尝试直接解析
         try:
@@ -136,6 +158,9 @@ class LLMClient:
                 return json.loads(text[first:last+1])
             except (json.JSONDecodeError, TypeError):
                 pass
+        logger.warning("JSON 提取失败", extra={
+            "extra": {"response_preview": text[:200], "response_length": len(text)}
+        })
         return None
 
 

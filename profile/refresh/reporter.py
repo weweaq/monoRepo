@@ -29,6 +29,20 @@ def write_change_report(changes: list[dict]) -> Path | None:
         "changed": "[变化]",
     }
 
+    # 统计变化类型
+    type_counts = {}
+    for c in changes:
+        ct = c.get("change_type", "unknown")
+        type_counts[ct] = type_counts.get(ct, 0) + 1
+
+    logger.info("生成变化报告", extra={
+        "extra": {
+            "total_changes": len(changes),
+            "type_counts": type_counts,
+            "affected_profiles": list(set(c.get("profile_type", "") for c in changes)),
+        }
+    })
+
     lines = [
         f"# 个人画像变化报告 · {today}",
         "",

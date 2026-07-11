@@ -48,11 +48,24 @@ def get_connection() -> sqlite3.Connection:
 
 
 def init_db() -> None:
+    from profile.log import get_logger
+    logger = get_logger("db.init_db")
+    logger.info("初始化数据库", extra={"extra": {"db_path": str(DB_PATH)}})
     ensure_dirs()
     conn = get_connection()
     try:
         conn.executescript(_SCHEMA)
         conn.commit()
+        # 检查现有数据量
+        raw_count = conn.execute("SELECT COUNT(*) FROM raw_data").fetchone()[0]
+        intent_count = conn.execute("SELECT COUNT(*) FROM llm_intents").fetchone()[0]
+        logger.info("数据库就绪", extra={
+            "extra": {
+                "db_path": str(DB_PATH),
+                "raw_data_count": raw_count,
+                "llm_intents_count": intent_count,
+            }
+        })
     finally:
         conn.close()
 

@@ -22,6 +22,9 @@ MEMORY_KEYWORDS = ["memory", "记忆", "vector", "embedding", "rag", "knowledge 
 
 def analyze(records: list[ChatRecord], claimed: dict) -> dict:
     """规则版方向分析。"""
+    logger.info("方向分析（规则版）", extra={
+        "extra": {"records_count": len(records), "claimed": claimed}
+    })
     if len(records) < 1:
         return {"status": "样本不足", "count": len(records)}
 
@@ -44,18 +47,31 @@ def analyze(records: list[ChatRecord], claimed: dict) -> dict:
     words = _tokenize(records)
     top_words = Counter(words).most_common(10)
 
-    return {
+    result = {
         "status": "ok",
         "声称方向": claimed,
         "实际TOP10主题": [(w, c) for w, c in top_words],
         "方向提及占比": {"Agent相关": agent_pct, "Memory相关": memory_pct, "其他": other_pct},
         "漂移度判断": f"{drift}（Agent方向占比{agent_pct}%）",
     }
+    logger.info("方向分析（规则版）完成", extra={
+        "extra": {
+            "agent_pct": agent_pct,
+            "memory_pct": memory_pct,
+            "drift": drift,
+            "top_words": top_words[:5],
+        }
+    })
+    return result
 
 
 def analyze_llm(intents: list[dict], claimed: dict, client: LLMClient | None = None) -> dict:
     """LLM 版方向分析。"""
     client = client or LLMClient()
+    logger.info("方向分析（LLM版）开始", extra={
+        "extra": {"intents_count": len(intents), "claimed": claimed}
+    })
+
     if not client.is_available():
         if LLM_FALLBACK_TO_RULES:
             logger.warning("LLM 不可用，方向分析回退到规则版")
@@ -76,17 +92,28 @@ def analyze_llm(intents: list[dict], claimed: dict, client: LLMClient | None = N
             })
             return analyze(_intents_to_records(intents), claimed)
         raise
-    return {
+
+    direction_analysis = result.get("direction_analysis", {})
+    output = {
         "status": "ok",
         "claimed_direction": claimed,
-        "actual_top_topics": result.get("direction_analysis", {}).get("actual_top_topics", []),
-        "direction_alignment": result.get("direction_analysis", {}).get("direction_alignment", "未知"),
-        "drift_description": result.get("direction_analysis", {}).get("drift_description", ""),
-        "agent_ratio": result.get("direction_analysis", {}).get("agent_ratio", "0"),
-        "memory_ratio": result.get("direction_analysis", {}).get("memory_ratio", "0"),
+        "actual_top_topics": direction_analysis.get("actual_top_topics", []),
+        "direction_alignment": direction_analysis.get("direction_alignment", "未知"),
+        "drift_description": direction_analysis.get("drift_description", ""),
+        "agent_ratio": direction_analysis.get("agent_ratio", "0"),
+        "memory_ratio": direction_analysis.get("memory_ratio", "0"),
         "key_findings": result.get("key_findings", []),
         "raw": result,
     }
+    logger.info("方向分析（LLM版）完成", extra={
+        "extra": {
+            "alignment": direction_analysis.get("direction_alignment"),
+            "agent_ratio": direction_analysis.get("agent_ratio"),
+            "memory_ratio": direction_analysis.get("memory_ratio"),
+            "key_findings_count": len(result.get("key_findings", [])),
+        }
+    })
+    return output
 
 
 def _tokenize(records: list[ChatRecord]) -> list[str]:
