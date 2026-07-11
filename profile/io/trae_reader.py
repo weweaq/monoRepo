@@ -1,6 +1,7 @@
 import glob
 import json
 from datetime import datetime
+from pathlib import Path
 
 from profile.config import TRAE_MEMORY_DIR
 from profile.db.store import upsert_raw_data
