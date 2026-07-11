@@ -6,3 +6,8 @@ dependencies = ["fastapi>=0.100", "uvicorn>=0.20"]
 
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
+
+[dependency-groups]
+dev = [
+    "httpx2>=2.0.0",
+]
