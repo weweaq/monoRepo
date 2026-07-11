@@ -38,6 +38,42 @@ CREATE TABLE IF NOT EXISTS llm_intents (
     extracted_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (raw_data_id) REFERENCES raw_data(id)
 );
+
+-- Portal: 任务运行记录
+CREATE TABLE IF NOT EXISTS task_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    steps_json TEXT,
+    current_step TEXT,
+    params_json TEXT,
+    result_json TEXT,
+    log_dir TEXT,
+    error_message TEXT,
+    started_at DATETIME NOT NULL,
+    finished_at DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Portal: LLM 调用记录
+CREATE TABLE IF NOT EXISTS llm_calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    task_run_id INTEGER,
+    step TEXT,
+    model TEXT NOT NULL,
+    system_prompt TEXT,
+    user_prompt TEXT,
+    response TEXT,
+    prompt_tokens INTEGER,
+    completion_tokens INTEGER,
+    total_tokens INTEGER,
+    elapsed_ms INTEGER,
+    success INTEGER NOT NULL DEFAULT 1,
+    error_message TEXT,
+    called_at DATETIME NOT NULL,
+    finished_at DATETIME,
+    FOREIGN KEY (task_run_id) REFERENCES task_runs(id)
+);
 """
 
 
