@@ -54,3 +54,24 @@ def test_dashboard_llm_overview_has_stats():
     assert "total_calls" in llm
     assert "total_tokens" in llm
     assert "success_rate" in llm
+
+
+def test_list_tasks():
+    client = TestClient(app)
+    resp = client.get("/api/tasks")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "items" in data
+    assert "total" in data
+
+
+def test_create_invalid_task_type():
+    client = TestClient(app)
+    resp = client.post("/api/tasks", json={"task_type": "invalid", "params": {}})
+    assert resp.status_code == 400
+
+
+def test_get_nonexistent_task():
+    client = TestClient(app)
+    resp = client.get("/api/tasks/99999")
+    assert resp.status_code == 404
