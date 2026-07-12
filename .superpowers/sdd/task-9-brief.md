@@ -1,103 +1,73 @@
-### Task 9: MarvisReader
+﻿### Task 9: LLM API
 
 **Files:**
-- Create: `profile/io/marvis_reader.py`
+- Create: `profile/portal/routes/llm.py`
+- Test: `tests/test_portal_routes.py` (追加 llm 测试)
 
 **Interfaces:**
-- Produces: `MarvisReader` class implementing `BaseReader`
+- Consumes: `profile.portal.db_store.query_llm_calls`, `get_llm_call`
+- Produces: `GET /api/llm/calls`, `GET /api/llm/calls/{id}`
 
-- [ ] **Step 1: Write marvis_reader.py**
+- [ ] **Step 1: 实现 llm.py**
+
+创建 `profile/portal/routes/llm.py`：
 
 ```python
-import shutil
-import sqlite3
-import tempfile
-from datetime import datetime
-from pathlib import Path
+"""LLM API: llm_calls 查询。"""
 
-from profile.config import MARVIS_DATA_DIR
-from profile.io.base import BaseReader
-from profile.models import ChatRecord
+from fastapi import APIRouter, HTTPException
+
+from profile.portal.db_store import query_llm_calls, get_llm_call
+
+router = APIRouter()
 
 
-class MarvisReader(BaseReader):
-    @property
-    def source_name(self) -> str:
-        return "marvis"
+@router.get("/llm/calls")
+def list_llm_calls(page: int = 1, page_size: int = 20,
+                   step: str = None, model: str = None, success: int = None):
+    return query_llm_calls(page=page, page_size=page_size, step=step, model=model, success=success)
 
-    def is_available(self) -> bool:
-        db_path = MARVIS_DATA_DIR / "data.db"
-        return db_path.exists()
 
-    def read(self) -> list[ChatRecord]:
-        src = MARVIS_DATA_DIR / "data.db"
-        if not src.exists():
-            return []
-
-        tmp_dir = Path(tempfile.gettempdir())
-        tmp = tmp_dir / "marvis_data_copy.db"
-        try:
-            shutil.copy2(str(src), str(tmp))
-        except OSError as e:
-            import sys
-            print(f"[error] marvis: cannot copy data.db (close Marvis first): {e}", file=sys.stderr)
-            return []
-
-        records = []
-        try:
-            conn = sqlite3.connect(str(tmp))
-            cur = conn.cursor()
-            cur.execute("SELECT * FROM messages ORDER BY timestamp")
-            rows = cur.fetchall()
-            column_names = [desc[0] for desc in cur.description]
-            for row in rows:
-                record = self._parse_row(dict(zip(column_names, row)))
-                if record:
-                    records.append(record)
-            conn.close()
-        except sqlite3.Error as e:
-            import sys
-            print(f"[error] marvis: SQLite error: {e}", file=sys.stderr)
-        finally:
-            try:
-                tmp.unlink(missing_ok=True)
-            except OSError:
-                pass
-
-        return records
-
-    def _parse_row(self, row: dict) -> ChatRecord | None:
-        ts = row.get("timestamp")
-        content = row.get("content", "") or row.get("text", "") or row.get("message", "")
-        if not content:
-            return None
-
-        if isinstance(ts, (int, float)):
-            t = datetime.fromtimestamp(ts / 1000 if ts > 1e12 else ts)
-        elif isinstance(ts, str):
-            try:
-                t = datetime.fromtimestamp(int(ts) / 1000 if int(ts) > 1e12 else int(ts))
-            except (ValueError, OSError):
-                return None
-        else:
-            return None
-
-        return ChatRecord(
-            time=t,
-            content=str(content),
-            source=self.source_name,
-        )
+@router.get("/llm/calls/{call_id}")
+def get_llm_call_detail(call_id: int):
+    row = get_llm_call(call_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="LLM 调用记录不存在")
+    return row
 ```
 
-- [ ] **Step 2: Verify import + is_available**
+- [ ] **Step 2: 追加 llm API 测试**
 
-```powershell
-python -c "from profile.io.marvis_reader import MarvisReader; r = MarvisReader(); print('available:', r.is_available())"
+在 `tests/test_portal_routes.py` 追加：
+
+```python
+def test_list_llm_calls():
+    client = TestClient(app)
+    resp = client.get("/api/llm/calls")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "items" in data
+    assert "total" in data
+
+
+def test_get_llm_call_not_found():
+    client = TestClient(app)
+    resp = client.get("/api/llm/calls/99999")
+    assert resp.status_code == 404
 ```
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: 运行测试验证通过**
+
+Run: `cd D:\AAAmyprj\github\myrepos\checkSelf; .venv\Scripts\python -m pytest tests/test_portal_routes.py -v`
+Expected: 所有测试 PASS
+
+- [ ] **Step 4: 提交**
 
 ```bash
-git add profile/io/marvis_reader.py
-git commit -m "feat: add MarvisReader for SQLite chat data"
+git add profile/portal/routes/llm.py tests/test_portal_routes.py
+git commit -m "feat(portal): LLM API for llm_calls query"
 ```
+
+---
+
+### Task 10: Profiles API

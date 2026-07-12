@@ -61,7 +61,7 @@ def _build_rule(channel_profiles: dict) -> dict:
         summary = profile.get("summary") or profile.get("漂移度判断") or str(profile)[:60]
         summaries.append(f"- {source}: {summary}")
 
-    return {
+    result = {
         "direction_truth": {"description": "当前未启用 LLM，方向真实度待语义融合后评估。"},
         "knowledge_interest": {"description": "当前未启用 LLM，兴趣光谱待语义融合后评估。"},
         "activity_pattern": _extract_activity(channel_profiles),
@@ -70,6 +70,12 @@ def _build_rule(channel_profiles: dict) -> dict:
         "summary": "\n".join(summaries),
         "suggestions": ["配置 LLM 后重新生成可获得更准确的综合画像。"],
     }
+
+    content = channel_profiles.get("content_consumption")
+    if content:
+        result["knowledge_interest"] = content.get("knowledge_interest", {})
+        result["emotion_aesthetic"] = content.get("emotion_aesthetic", {})
+    return result
 
 
 def _extract_activity(channel_profiles: dict) -> dict:

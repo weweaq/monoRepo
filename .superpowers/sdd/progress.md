@@ -1,12 +1,26 @@
-﻿Task 1: complete (commits 39c36d8..dd50ddd, scaffolding only, review clean)
-Task 2: complete (commits dd50ddd..1a5e625, config+models, review clean)
-Task 3: complete (commits 1a5e625..67ca0e2, BaseReader ABC, review clean)
-Task 4: complete (commit 16d390e, activity analysis, 5/5 tests pass, 3 plan bugs fixed: MIN_SAMPLE_SIZE 3→2, window tie-breaking >→>=, window-end label +3→+2)
-Task 5: complete (commit 955337e, direction analysis, 4/4 tests pass, MIN_SAMPLE_SIZE 10→1 fix, full suite 9/9)
-Task 6: complete (commit 70161e0, decision analysis, 4/4 tests pass, MIN_SAMPLE_SIZE→1, _idea_to_action_gap rewritten, full suite 13/13)
-Task 7: complete (commit e46e22d, topic analysis, 3/3 tests pass, MIN_SAMPLE_SIZE→1, full suite 16/16)
-Task 8: complete (commit 75e3204, TraeReader, is_available()=True)
-Task 9: complete (commit 63b54c4, MarvisReader, is_available()=True)
-Task 10: complete (commit 180248a, writer.py)
-Task 11: complete (commit 0f5d136, 3 CLI entry points)
-Task 12: complete (integration verified: 16/16 tests pass, CLI imports OK, 11 commits)
+﻿# Portal SDD Progress
+Task 1: complete (commits b04fca9..c420732, DB schema + deps, review clean)
+Task 2: complete (commits c420732..69b1a22, db_store CRUD, review clean)
+Task 3: complete (commits 69b1a22..615674d, LLM tracking via contextvars, review clean)
+Task 4: complete (commits 615674d..5d46a20, TaskRunner, review clean)
+Task 5: complete (commits 5d46a20..3a3bbda..94f5c85, FastAPI skeleton + Python version fix, review clean after fix)
+Task 6: complete (commits 94f5c85..fe4e604..6696895, dashboard API + tests, review clean after fix)
+Task 7: complete (commits 6696895..6898fc9, tasks API + SSE, review clean)
+Task 8: complete (commits 6898fc9..2026ae7, data API, review clean)
+Task 9: complete (commits 2026ae7..09d9b20, LLM API, review clean)
+Task 10: complete (commits 09d9b20..bded417, profiles API, review clean)
+Task 11: complete (commits bded417..1028631, frontend index.html, review skipped - single HTML file, manually verified all APIs, fixed undefined loadTaskDetail reference)
+Final review: complete (b04fca9..1028631, 20 files +2566 lines, verdict: needs fixes)
+Fix commit: 66cda8b (SSE seq-based log indexing, LLM tracking error logging, test isolation, column whitelist, uv.lock sync)
+
+## Deferred items (from final review, non-blocking for merge)
+- Important #2: Data API memory pagination -> should use SQL LIMIT/OFFSET
+- Important #3: refresh_all step tracking -> 5 steps are dead code, simplify or split
+- Important #5: list_intents missing model filter
+- Minor #8: FastAPI on_event deprecation -> use lifespan
+- Minor #9: Dashboard progress bar hardcoded 60%
+- Minor #10: webbrowser.open before uvicorn ready
+- Minor #11: called_at == finished_at in llm_calls
+- Minor #12: Missing indexes on llm_calls
+- Minor #15: Frontend missing date range filter
+- Minor #16: SSE no client disconnect detection

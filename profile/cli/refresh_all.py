@@ -11,6 +11,7 @@ import time
 from profile.cli import generate_profiles, ingest
 from profile.config import LOG_DIR
 from profile.db.init_db import init_db
+from profile.io.registry import channel_reader_names
 from profile.llm.client import LLMClient
 from profile.log import get_logger, setup
 from profile.output.writer import load_latest_json
@@ -23,6 +24,7 @@ logger = get_logger("cli.refresh_all")
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--days", type=int, default=7, help="统计最近 N 天")
+    parser.add_argument("--refresh", action="store_true", help="实时重拉各数据源（刷新本地缓存）")
     args = parser.parse_args(argv)
 
     setup(log_dir=LOG_DIR)
@@ -36,7 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     # 1. 读取旧画像（从 json 文件）
     logger.info("步骤1/5: 读取旧画像")
     old_profiles = {}
-    for source in ["trae", "marvis"]:
+    for source in [*channel_reader_names(), "content_consumption"]:
         old = load_latest_json(f"个人画像-{source}")
         if old:
             old_profiles[source] = old
@@ -56,8 +58,8 @@ def main(argv: list[str] | None = None) -> int:
     })
 
     # 2. 增量入库
-    logger.info("步骤2/5: 增量入库")
-    ingest.main([])
+    logger.info("步骤2/5: 增量入库", extra={"extra": {"refresh": args.refresh}})
+    ingest.main(["--refresh"] if args.refresh else [])
 
     # 3. 提取意图（如果 LLM 配置了）
     logger.info("步骤3/5: 提取意图")
@@ -75,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
     # 5. diff：从新生成的 json 对比上次 json
     logger.info("步骤5/5: 生成变化报告")
     new_profiles = {}
-    for source in ["trae", "marvis"]:
+    for source in [*channel_reader_names(), "content_consumption"]:
         new = load_latest_json(f"个人画像-{source}")
         if new:
             new_profiles[source] = new

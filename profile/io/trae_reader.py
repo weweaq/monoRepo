@@ -17,6 +17,14 @@ class TraeReader(BaseReader):
     def source_name(self) -> str:
         return "trae"
 
+    @property
+    def analysis_type(self) -> str:
+        return "agentic"
+
+    @property
+    def profile_target(self) -> str:
+        return "channel"
+
     def is_available(self) -> bool:
         if not TRAE_MEMORY_DIR.exists():
             return False

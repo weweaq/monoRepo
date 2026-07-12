@@ -1,127 +1,142 @@
-### Task 7: 诉求主题分析 + 测试
+﻿### Task 7: Tasks API + SSE
 
 **Files:**
-- Create: `profile/analysis/topic.py`
-- Create: `tests/test_topic.py`
+- Create: `profile/portal/routes/tasks.py`
+- Test: `tests/test_portal_routes.py` (追加 tasks 测试)
 
 **Interfaces:**
-- Produces: `analyze(records: list[ChatRecord]) -> dict`
+- Consumes: `profile.portal.task_engine.get_runner`, `profile.portal.db_store.query_task_runs`, `get_task_run`
+- Produces: `GET /api/tasks`, `GET /api/tasks/{id}`, `POST /api/tasks`, `DELETE /api/tasks/{id}`, `GET /api/tasks/{id}/logs`
 
-TDD. Code in step 3 is authoritative. Fix bugs that cause test failures.
+- [ ] **Step 1: 实现 tasks.py**
 
-- [ ] **Step 1: Write failing tests**
-
-```python
-from datetime import datetime
-from profile.analysis.topic import analyze
-from profile.models import ChatRecord
-
-
-def test_analyze_empty_returns_status():
-    result = analyze([])
-    assert result["status"] == "样本不足"
-
-
-def test_analyze_returns_top_words():
-    records = [
-        ChatRecord(time=datetime(2026, 7, 1, 12, 0), content="DeepFace部署遇到问题", source="marvis"),
-        ChatRecord(time=datetime(2026, 7, 1, 13, 0), content="DeepFace模型转换报错", source="marvis"),
-        ChatRecord(time=datetime(2026, 7, 1, 14, 0), content="数据库查询优化", source="marvis"),
-    ]
-    result = analyze(records)
-    assert result["status"] == "ok"
-    assert len(result["主要诉求TOP10"]) > 0
-
-
-def test_analyze_categorizes():
-    records = [
-        ChatRecord(time=datetime(2026, 7, 1, 12, 0), content="python报错怎么解决", source="marvis"),
-        ChatRecord(time=datetime(2026, 7, 1, 13, 0), content="这个工具怎么用", source="marvis"),
-    ]
-    result = analyze(records)
-    assert "诉求分类" in result
-    assert "技术问题" in result["诉求分类"]
-```
-
-- [ ] **Step 2: Run tests, expect FAIL**
-
-```powershell
-python -m pytest tests/test_topic.py -v
-```
-
-- [ ] **Step 3: Implement topic.py**
+创建 `profile/portal/routes/tasks.py`：
 
 ```python
-import re
-from collections import Counter
+"""Tasks API: 任务 CRUD + SSE 日志流。"""
 
-from profile.models import ChatRecord
+import asyncio
+import json
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
 
+from profile.portal.task_engine import get_runner
+from profile.portal.db_store import query_task_runs, get_task_run
 
-TECH_KEYWORDS = ["报错", "错误", "部署", "配置", "代码", "api", "数据库", "python", "bug",
-                 "安装", "运行", "编译", "调试", "接口", "服务", "内存", "性能"]
-TOOL_KEYWORDS = ["怎么用", "如何使用", "设置", "快捷键", "插件", "工具", "命令", "配置项"]
-LIFE_KEYWORDS = ["天气", "吃什么", "作息", "时间", "提醒", "购物", "日程"]
-
-MIN_SAMPLE_SIZE = 5
-STOPWORDS = {"的", "了", "在", "是", "我", "有", "和", "就", "不", "人", "都", "一",
-             "一个", "上", "也", "很", "到", "说", "要", "去", "你", "会", "着",
-             "没有", "看", "好", "自己", "这", "这个", "那个", "什么", "怎么",
-             "如何", "可以", "还是", "但是", "让", "用", "做", "能", "想",
-             "知道", "觉得", "应该", "需要", "吗", "呢", "吧", "啊"}
+router = APIRouter()
 
 
-def analyze(records: list[ChatRecord]) -> dict:
-    if len(records) < MIN_SAMPLE_SIZE:
-        return {"status": "样本不足", "count": len(records)}
+class TaskCreateRequest(BaseModel):
+    task_type: str
+    params: dict = {}
 
-    words = []
-    for r in records:
-        for w in re.findall(r"[\u4e00-\u9fff]{2,}|[a-zA-Z]+", r.content):
-            if w.lower() not in STOPWORDS and len(w) >= 2:
-                words.append(w.lower())
 
-    word_counts = Counter(words)
-    top10 = word_counts.most_common(10)
+VALID_TASK_TYPES = {"refresh_all", "ingest", "ingest_single", "extract_intents", "generate_profiles"}
 
-    tech = tool = life = 0
-    combined = " ".join(words)
-    for kw in TECH_KEYWORDS:
-        tech += combined.count(kw)
-    for kw in TOOL_KEYWORDS:
-        tool += combined.count(kw)
-    for kw in LIFE_KEYWORDS:
-        life += combined.count(kw)
 
-    total = tech + tool + life
-    if total == 0:
-        return {
-            "status": "ok",
-            "主要诉求TOP10": [(w, c) for w, c in top10],
-            "诉求分类": {"其他": 100},
-        }
+@router.get("/tasks")
+def list_tasks(page: int = 1, page_size: int = 20,
+               status: str = None, task_type: str = None):
+    return query_task_runs(page=page, page_size=page_size, status=status, task_type=task_type)
 
-    return {
-        "status": "ok",
-        "主要诉求TOP10": [(w, c) for w, c in top10],
-        "诉求分类": {
-            "技术问题": round(tech / total * 100, 1),
-            "工具使用": round(tool / total * 100, 1),
-            "生活诉求": round(life / total * 100, 1),
-            "其他": round((total - tech - tool - life) / total * 100, 1),
-        },
-    }
+
+@router.get("/tasks/{task_id}")
+def get_task(task_id: int):
+    row = get_task_run(task_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return row
+
+
+@router.post("/tasks")
+def create_task(req: TaskCreateRequest):
+    if req.task_type not in VALID_TASK_TYPES:
+        raise HTTPException(status_code=400, detail=f"无效的任务类型: {req.task_type}")
+
+    runner = get_runner()
+    task_id = runner.start_task(req.task_type, req.params)
+    if task_id is None:
+        raise HTTPException(status_code=409, detail="已有任务在运行中")
+    return {"id": task_id, "status": "started"}
+
+
+@router.delete("/tasks/{task_id}")
+def cancel_task(task_id: int):
+    runner = get_runner()
+    success = runner.cancel(task_id)
+    if not success:
+        raise HTTPException(status_code=400, detail="无法取消（任务可能已结束或不匹配）")
+    return {"id": task_id, "status": "cancelling"}
+
+
+@router.get("/tasks/{task_id}/logs")
+async def stream_logs(task_id: int):
+    """SSE 流：实时推送任务日志。"""
+    runner = get_runner()
+
+    async def event_stream():
+        idx = 0
+        while True:
+            logs = runner.get_logs(task_id, after_idx=idx)
+            for log in logs:
+                idx += 1
+                yield f"data: {json.dumps(log, ensure_ascii=False)}\n\n"
+
+            # 检查任务是否已结束
+            task = get_task_run(task_id)
+            if task and task["status"] in ("done", "failed", "cancelled"):
+                # 推送剩余日志
+                remaining = runner.get_logs(task_id, after_idx=idx)
+                for log in remaining:
+                    idx += 1
+                    yield f"data: {json.dumps(log, ensure_ascii=False)}\n\n"
+                yield f"data: {json.dumps({'event': 'done', 'status': task['status']}, ensure_ascii=False)}\n\n"
+                break
+
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 ```
 
-- [ ] **Step 4: Run tests, expect 3 PASSED**
+- [ ] **Step 2: 追加 tasks API 测试到 test_portal_routes.py**
 
-```powershell
-python -m pytest tests/test_topic.py -v
+在 `tests/test_portal_routes.py` 追加：
+
+```python
+def test_list_tasks():
+    client = TestClient(app)
+    resp = client.get("/api/tasks")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "items" in data
+    assert "total" in data
+
+
+def test_create_invalid_task_type():
+    client = TestClient(app)
+    resp = client.post("/api/tasks", json={"task_type": "invalid", "params": {}})
+    assert resp.status_code == 400
+
+
+def test_get_nonexistent_task():
+    client = TestClient(app)
+    resp = client.get("/api/tasks/99999")
+    assert resp.status_code == 404
 ```
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 3: 运行测试验证通过**
+
+Run: `cd D:\AAAmyprj\github\myrepos\checkSelf; .venv\Scripts\python -m pytest tests/test_portal_routes.py -v`
+Expected: 所有测试 PASS
+
+- [ ] **Step 4: 提交**
 
 ```bash
-git add profile/analysis/topic.py tests/test_topic.py
-git commit -m "feat: add topic/demand analysis with tests"
+git add profile/portal/routes/tasks.py tests/test_portal_routes.py
+git commit -m "feat(portal): tasks API with CRUD and SSE log streaming"
 ```
+
+---
+
+### Task 8: Data API

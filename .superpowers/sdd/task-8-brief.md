@@ -1,84 +1,114 @@
-### Task 8: TraeReader
+﻿### Task 8: Data API
 
 **Files:**
-- Create: `profile/io/trae_reader.py`
+- Create: `profile/portal/routes/data.py`
+- Test: `tests/test_portal_routes.py` (追加 data 测试)
 
 **Interfaces:**
-- Produces: `TraeReader` class implementing `BaseReader`
+- Consumes: `profile.db.store.query_raw_data`, `profile.db.store.query_intents`, `profile.db.init_db.get_connection`
+- Produces: `GET /api/data/raw`, `GET /api/data/raw/{id}`, `GET /api/data/intents`
 
-- [ ] **Step 1: Write trae_reader.py**
+- [ ] **Step 1: 实现 data.py**
+
+创建 `profile/portal/routes/data.py`：
 
 ```python
-import glob
-import json
-from datetime import datetime
+"""Data API: raw_data 和 llm_intents 浏览。"""
 
-from profile.config import TRAE_MEMORY_DIR
-from profile.io.base import BaseReader
-from profile.models import ChatRecord
+from fastapi import APIRouter, HTTPException
+
+from profile.db.init_db import get_connection
+from profile.db.store import query_raw_data, query_intents
+
+router = APIRouter()
 
 
-class TraeReader(BaseReader):
-    @property
-    def source_name(self) -> str:
-        return "trae"
+@router.get("/data/raw")
+def list_raw_data(page: int = 1, page_size: int = 20,
+                  source: str = None, start_date: str = None, end_date: str = None):
+    all_rows = query_raw_data(source=source, start_date=start_date, end_date=end_date)
+    total = len(all_rows)
+    start = (page - 1) * page_size
+    end = start + page_size
+    items = all_rows[start:end]
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
 
-    def is_available(self) -> bool:
-        if not TRAE_MEMORY_DIR.exists():
-            return False
-        files = glob.glob(str(TRAE_MEMORY_DIR / "*" / "*" / "session_memory_*.jsonl"), recursive=False)
-        return len(files) > 0
 
-    def read(self) -> list[ChatRecord]:
-        records = []
-        pattern = str(TRAE_MEMORY_DIR / "*" / "*" / "session_memory_*.jsonl")
-        for filepath in glob.glob(pattern):
-            try:
-                with open(filepath, "r", encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            data = json.loads(line)
-                            record = self._parse_record(data)
-                            if record:
-                                records.append(record)
-                        except json.JSONDecodeError:
-                            import sys
-                            print(f"[warn] trae: skip bad JSON line in {filepath}", file=sys.stderr)
-            except OSError as e:
-                import sys
-                print(f"[warn] trae: cannot read {filepath}: {e}", file=sys.stderr)
-        return records
+@router.get("/data/raw/{raw_id}")
+def get_raw_data(raw_id: int):
+    conn = get_connection()
+    try:
+        row = conn.execute("SELECT * FROM raw_data WHERE id = ?", (raw_id,)).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="记录不存在")
+    return dict(row)
 
-    def _parse_record(self, data: dict) -> ChatRecord | None:
-        time_str = data.get("message_summary_time", "")
-        if not time_str:
-            return None
-        try:
-            t = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            return None
-        return ChatRecord(
-            time=t,
-            content=data.get("intent", ""),
-            actions=data.get("actions", []),
-            outcome=data.get("outcome", ""),
-            learned=data.get("learned", []),
-            source=self.source_name,
-        )
+
+@router.get("/data/intents")
+def list_intents(page: int = 1, page_size: int = 20,
+                 source: str = None, category: str = None):
+    all_rows = query_intents(source=source)
+    # 按 category 筛选
+    if category:
+        all_rows = [r for r in all_rows if r.get("intent_category") == category]
+    total = len(all_rows)
+    start = (page - 1) * page_size
+    end = start + page_size
+    items = all_rows[start:end]
+    return {"items": items, "total": total, "page": page, "page_size": page_size}
 ```
 
-- [ ] **Step 2: Verify import + is_available**
+- [ ] **Step 2: 追加 data API 测试**
 
-```powershell
-python -c "from profile.io.trae_reader import TraeReader; r = TraeReader(); print('available:', r.is_available())"
+在 `tests/test_portal_routes.py` 追加：
+
+```python
+def test_list_raw_data():
+    client = TestClient(app)
+    resp = client.get("/api/data/raw")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "items" in data
+    assert "total" in data
+
+
+def test_list_raw_data_with_source_filter():
+    client = TestClient(app)
+    resp = client.get("/api/data/raw?source=trae")
+    assert resp.status_code == 200
+    data = resp.json()
+    for item in data["items"]:
+        assert item["source"] == "trae"
+
+
+def test_get_raw_data_not_found():
+    client = TestClient(app)
+    resp = client.get("/api/data/raw/99999")
+    assert resp.status_code == 404
+
+
+def test_list_intents():
+    client = TestClient(app)
+    resp = client.get("/api/data/intents")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "items" in data
 ```
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: 运行测试验证通过**
+
+Run: `cd D:\AAAmyprj\github\myrepos\checkSelf; .venv\Scripts\python -m pytest tests/test_portal_routes.py -v`
+Expected: 所有测试 PASS
+
+- [ ] **Step 4: 提交**
 
 ```bash
-git add profile/io/trae_reader.py
-git commit -m "feat: add TraeReader for session memory JSONL"
+git add profile/portal/routes/data.py tests/test_portal_routes.py
+git commit -m "feat(portal): data API for raw_data and llm_intents browsing"
 ```
+
+---
+
+### Task 9: LLM API

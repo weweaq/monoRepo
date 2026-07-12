@@ -19,6 +19,14 @@ class MarvisReader(BaseReader):
     def source_name(self) -> str:
         return "marvis"
 
+    @property
+    def analysis_type(self) -> str:
+        return "topic"
+
+    @property
+    def profile_target(self) -> str:
+        return "channel"
+
     def is_available(self) -> bool:
         return (MARVIS_DATA_DIR / "data.db").exists()
 

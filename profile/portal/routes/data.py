@@ -10,8 +10,9 @@ router = APIRouter()
 
 @router.get("/data/raw")
 def list_raw_data(page: int = 1, page_size: int = 20,
-                  source: str = None, start_date: str = None, end_date: str = None):
-    all_rows = query_raw_data(source=source, start_date=start_date, end_date=end_date)
+                  source: str = None, start_date: str = None, end_date: str = None,
+                  q: str = None):
+    all_rows = query_raw_data(source=source, start_date=start_date, end_date=end_date, q=q)
     total = len(all_rows)
     start = (page - 1) * page_size
     end = start + page_size
@@ -33,8 +34,8 @@ def get_raw_data(raw_id: int):
 
 @router.get("/data/intents")
 def list_intents(page: int = 1, page_size: int = 20,
-                 source: str = None, category: str = None):
-    all_rows = query_intents(source=source)
+                 source: str = None, category: str = None, q: str = None):
+    all_rows = query_intents(source=source, q=q)
     # 按 category 筛选
     if category:
         all_rows = [r for r in all_rows if r.get("intent_category") == category]

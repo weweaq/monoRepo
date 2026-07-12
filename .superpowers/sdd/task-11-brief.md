@@ -1,315 +1,516 @@
-### Task 11: CLI 入口
+﻿### Task 11: 前端 index.html
 
 **Files:**
-- Create: `profile/cli/analyze_trae.py`
-- Create: `profile/cli/analyze_marvis.py`
-- Create: `profile/cli/generate.py`
+- Modify: `profile/portal/static/index.html` (替换占位内容)
 
 **Interfaces:**
-- Produces: 三个 CLI 入口，输出 Markdown 到 Obsidian
+- Consumes: 所有 `/api/*` 端点
+- Produces: 完整的 4 视图单页应用
 
-- [ ] **Step 1: Write analyze_trae.py** (see code below)
-- [ ] **Step 2: Write analyze_marvis.py**
-- [ ] **Step 3: Write generate.py**
-- [ ] **Step 4: Verify imports**
-- [ ] **Step 5: Commit**
+**注意:** 此 Task 不写自动化测试，通过手动验证。
 
-### analyze_trae.py
+- [ ] **Step 1: 实现完整的 index.html**
 
-```python
-"""trae 聊天记录分析，输出 trae画像报告.md"""
-from datetime import datetime
+将 `profile/portal/static/index.html` 替换为完整的单页应用。文件内容较长，包含：
+- 顶部导航栏（Dashboard / 数据库 / LLM / 画像）
+- Dashboard 视图：当前任务卡片 + 操作按钮组 + 数据概览卡片
+- 数据库浏览视图：tab 切换 + 分页表格 + 详情展开
+- LLM 交互视图：筛选 + 列表 + prompt/response 展开
+- 画像产出视图：时间线 + 结构化卡片 + 变化报告 diff 表格
 
-from profile.io.trae_reader import TraeReader
-from profile.analysis.direction import analyze as analyze_direction
-from profile.analysis.activity import analyze as analyze_activity
-from profile.analysis.decision import analyze as analyze_decision
-from profile.output.writer import write_report, format_report
-from profile.config import CLAIMED_DIRECTION
+核心 HTML 结构和 Alpine.js 逻辑：
 
+```html
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>checkSelf Portal</title>
+    <script defer src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, "PingFang SC", "Segoe UI", sans-serif; background: #f5f5f5; color: #333; }
+        .nav { background: #1a1a2e; padding: 12px 24px; display: flex; gap: 24px; align-items: center; }
+        .nav h1 { color: #fff; font-size: 18px; margin-right: auto; }
+        .nav button { background: transparent; border: none; color: #aaa; cursor: pointer; font-size: 14px; padding: 6px 12px; border-radius: 6px; }
+        .nav button.active, .nav button:hover { color: #fff; background: rgba(255,255,255,0.1); }
+        .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+        .card { background: #fff; border-radius: 12px; padding: 20px; margin-bottom: 16px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+        .card h2 { font-size: 16px; margin-bottom: 12px; color: #1a1a2e; }
+        .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px; }
+        .stat { text-align: center; }
+        .stat .num { font-size: 28px; font-weight: 600; color: #4B3FE3; }
+        .stat .label { font-size: 12px; color: #999; margin-top: 4px; }
+        .btn { background: #4B3FE3; color: #fff; border: none; padding: 8px 20px; border-radius: 8px; cursor: pointer; font-size: 14px; }
+        .btn:hover { background: #3C2ECA; }
+        .btn-secondary { background: #e0e0e0; color: #333; }
+        .btn-danger { background: #E8463A; }
+        .btn-sm { padding: 4px 12px; font-size: 12px; }
+        .progress { height: 8px; background: #e0e0e0; border-radius: 4px; margin: 8px 0; overflow: hidden; }
+        .progress-bar { height: 100%; background: #4B3FE3; transition: width 0.3s; }
+        .log-box { background: #1a1a2e; color: #0f0; padding: 12px; border-radius: 8px; font-family: "JetBrains Mono", monospace; font-size: 12px; max-height: 300px; overflow-y: auto; }
+        .log-box div { padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.05); }
+        table { width: 100%; border-collapse: collapse; font-size: 13px; }
+        th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid #eee; }
+        th { background: #f9f9f9; font-weight: 600; color: #666; }
+        tr:hover { background: #f5f5ff; cursor: pointer; }
+        .tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; }
+        .tag-new { background: #dcfce7; color: #166534; }
+        .tag-increased { background: #dcfce7; color: #166534; }
+        .tag-decreased { background: #fee2e2; color: #991b1b; }
+        .tag-disappeared { background: #f3f4f6; color: #6b7280; }
+        .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; }
+        .badge-done { background: #dcfce7; color: #166534; }
+        .badge-failed { background: #fee2e2; color: #991b1b; }
+        .badge-running { background: #fef3c7; color: #92400e; }
+        .badge-cancelled { background: #f3f4f6; color: #6b7280; }
+        .pagination { display: flex; gap: 8px; align-items: center; margin-top: 12px; }
+        pre { white-space: pre-wrap; word-break: break-all; background: #f9f9f9; padding: 12px; border-radius: 8px; font-size: 12px; overflow-x: auto; }
+        .detail-panel { background: #f9f9ff; border-radius: 8px; padding: 16px; margin-top: 12px; }
+        .dim-card { background: #f9f9ff; border-left: 3px solid #4B3FE3; padding: 12px 16px; border-radius: 0 8px 8px 0; margin-bottom: 12px; }
+        .dim-card h3 { font-size: 14px; color: #4B3FE3; margin-bottom: 8px; }
+        [x-cloak] { display: none !important; }
+    </style>
+</head>
+<body x-data="portalApp()" x-init="init()">
+    <!-- 导航栏 -->
+    <div class="nav">
+        <h1>checkSelf Portal</h1>
+        <button :class="{active: view==='dashboard'}" @click="view='dashboard'">Dashboard</button>
+        <button :class="{active: view==='data'}" @click="view='data'; loadData()">数据库</button>
+        <button :class="{active: view==='llm'}" @click="view='llm'; loadLLM()">LLM 交互</button>
+        <button :class="{active: view==='profiles'}" @click="view='profiles'; loadProfiles()">画像产出</button>
+    </div>
 
-def main():
-    reader = TraeReader()
-    if not reader.is_available():
-        print("[error] trae 数据源不可用")
-        return
+    <!-- Dashboard 视图 -->
+    <div class="container" x-show="view==='dashboard'" x-cloak>
+        <!-- 工作流进展 -->
+        <div class="card">
+            <h2>工作流进展</h2>
+            <template x-if="dash.current_task">
+                <div>
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <span x-text="dash.current_task.task_type"></span>
+                        <span class="badge badge-running" x-text="dash.current_task.status"></span>
+                    </div>
+                    <p x-text="dash.current_task.current_step" style="color:#666; margin:8px 0;"></p>
+                    <div class="progress"><div class="progress-bar" style="width:60%"></div></div>
+                    <button class="btn btn-danger btn-sm" @click="cancelTask(dash.current_task.id)">取消</button>
+                </div>
+            </template>
+            <template x-if="!dash.current_task">
+                <div>
+                    <p style="color:#999; margin-bottom:12px;">无运行中的任务</p>
+                    <div style="display:flex; gap:8px; flex-wrap:wrap;">
+                        <button class="btn" @click="startTask('refresh_all', {days:7})">立即刷新</button>
+                        <button class="btn btn-secondary btn-sm" @click="startTask('ingest', {})">入库</button>
+                        <button class="btn btn-secondary btn-sm" @click="startTask('extract_intents', {})">意图提取</button>
+                        <button class="btn btn-secondary btn-sm" @click="startTask('generate_profiles', {days:7})">生成画像</button>
+                    </div>
+                </div>
+            </template>
+        </div>
 
-    records = reader.read()
-    print(f"读取 trae 记录: {len(records)} 条")
+        <!-- 最近任务 -->
+        <div class="card" x-show="dash.recent_tasks && dash.recent_tasks.length > 0">
+            <h2>最近任务</h2>
+            <table>
+                <thead><tr><th>ID</th><th>类型</th><th>状态</th><th>开始时间</th><th>结束时间</th></tr></thead>
+                <tbody>
+                    <template x-for="t in dash.recent_tasks" :key="t.id">
+                        <tr @click="view='tasks_detail'; loadTaskDetail(t.id)">
+                            <td x-text="t.id"></td>
+                            <td x-text="t.task_type"></td>
+                            <td><span class="badge" :class="'badge-'+t.status" x-text="t.status"></span></td>
+                            <td x-text="t.started_at"></td>
+                            <td x-text="t.finished_at"></td>
+                        </tr>
+                    </template>
+                </tbody>
+            </table>
+        </div>
 
-    dir_result = analyze_direction(records, CLAIMED_DIRECTION)
-    act_result = analyze_activity(records)
-    dec_result = analyze_decision(records)
+        <!-- 数据概览 -->
+        <div class="card">
+            <h2>数据概览</h2>
+            <div class="grid">
+                <template x-for="d in dash.data_overview" :key="d.source">
+                    <div class="stat">
+                        <div class="num" x-text="d.count"></div>
+                        <div class="label" x-text="d.source"></div>
+                    </div>
+                </template>
+            </div>
+        </div>
 
-    sections = [
-        ("方向真实度", _format_direction(dir_result)),
-        ("活跃时段", _format_activity(act_result)),
-        ("决策行动模式", _format_decision(dec_result)),
-    ]
+        <!-- LLM 概览 + 最新画像 -->
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
+            <div class="card">
+                <h2>LLM 调用</h2>
+                <div class="grid">
+                    <div class="stat"><div class="num" x-text="dash.llm_overview?.total_calls || 0"></div><div class="label">总调用</div></div>
+                    <div class="stat"><div class="num" x-text="dash.llm_overview?.total_tokens || 0"></div><div class="label">总 tokens</div></div>
+                    <div class="stat"><div class="num" x-text="((dash.llm_overview?.success_rate || 1)*100).toFixed(0)+'%'"></div><div class="label">成功率</div></div>
+                </div>
+            </div>
+            <div class="card">
+                <h2>最新画像</h2>
+                <template x-if="dash.latest_profile">
+                    <div>
+                        <p style="font-size:14px; margin-bottom:8px;" x-text="dash.latest_profile.summary"></p>
+                        <p style="font-size:12px; color:#999;">方向对齐度: <span x-text="dash.latest_profile.direction_alignment"></span></p>
+                        <p style="font-size:12px; color:#999;" x-text="'日期: '+dash.latest_profile.date"></p>
+                    </div>
+                </template>
+                <template x-if="!dash.latest_profile"><p style="color:#999;">暂无画像</p></template>
+            </div>
+        </div>
 
-    md = format_report(sections, "trae 画像报告")
-    path = write_report("trae画像报告.md", md)
-    print(f"已生成: {path}")
+        <!-- 最新变化报告 -->
+        <div class="card" x-show="dash.latest_changes">
+            <h2>最新变化报告</h2>
+            <template x-if="dash.latest_changes">
+                <div style="display:flex; gap:16px;">
+                    <div class="stat"><div class="num" x-text="dash.latest_changes.new"></div><div class="label">新增</div></div>
+                    <div class="stat"><div class="num" x-text="dash.latest_changes.increased"></div><div class="label">上升</div></div>
+                    <div class="stat"><div class="num" x-text="dash.latest_changes.decreased"></div><div class="label">下降</div></div>
+                    <div class="stat"><div class="num" x-text="dash.latest_changes.disappeared"></div><div class="label">消失</div></div>
+                </div>
+            </template>
+        </div>
+    </div>
 
+    <!-- 数据库浏览视图 -->
+    <div class="container" x-show="view==='data'" x-cloak>
+        <div class="card">
+            <div style="display:flex; gap:12px; margin-bottom:16px; align-items:center;">
+                <h2>数据库浏览</h2>
+                <div style="display:flex; gap:4px;">
+                    <button class="btn btn-sm" :class="dataTab==='raw' ? '' : 'btn-secondary'" @click="dataTab='raw'; loadData()">raw_data</button>
+                    <button class="btn btn-sm" :class="dataTab==='intents' ? '' : 'btn-secondary'" @click="dataTab='intents'; loadData()">llm_intents</button>
+                </div>
+            </div>
+            <div style="display:flex; gap:8px; margin-bottom:12px;">
+                <select x-model="dataFilter.source" @change="loadData()" style="padding:4px 8px; border-radius:6px; border:1px solid #ddd;">
+                    <option value="">全部来源</option>
+                    <option value="trae">trae</option>
+                    <option value="marvis">marvis</option>
+                    <option value="bilibili">bilibili</option>
+                    <option value="netease">netease</option>
+                </select>
+            </div>
+            <table>
+                <thead>
+                    <template x-if="dataTab==='raw'"><tr><th>ID</th><th>来源</th><th>内容</th><th>时间</th></tr></template>
+                    <template x-if="dataTab==='intents'"><tr><th>ID</th><th>分类</th><th>摘要</th><th>模型</th><th>时间</th></tr></template>
+                </thead>
+                <tbody>
+                    <template x-for="item in dataItems" :key="item.id">
+                        <tr @click="selectedData=item">
+                            <template x-if="dataTab==='raw'">
+                                <td colspan="4" style="padding:0;">
+                                    <div style="display:flex; gap:12px; padding:8px 12px;">
+                                        <span x-text="item.id" style="min-width:40px;"></span>
+                                        <span x-text="item.source" style="min-width:60px;"></span>
+                                        <span x-text="item.content?.substring(0,60)" style="flex:1;"></span>
+                                        <span x-text="item.timestamp" style="min-width:140px; color:#999;"></span>
+                                    </div>
+                                </td>
+                            </template>
+                            <template x-if="dataTab==='intents'">
+                                <td colspan="5" style="padding:0;">
+                                    <div style="display:flex; gap:12px; padding:8px 12px;">
+                                        <span x-text="item.id" style="min-width:40px;"></span>
+                                        <span x-text="item.intent_category" style="min-width:80px;"></span>
+                                        <span x-text="item.intent_summary?.substring(0,50)" style="flex:1;"></span>
+                                        <span x-text="item.llm_model" style="min-width:100px; color:#999;"></span>
+                                        <span x-text="item.extracted_at" style="min-width:140px; color:#999;"></span>
+                                    </div>
+                                </td>
+                            </template>
+                        </tr>
+                    </template>
+                </tbody>
+            </table>
+            <div class="pagination">
+                <button class="btn btn-secondary btn-sm" @click="dataPage--; loadData()" x-show="dataPage>1">上一页</button>
+                <span x-text="'第 '+dataPage+' 页 / 共 '+Math.ceil(dataTotal/20)+' 页'" style="font-size:13px; color:#666;"></span>
+                <button class="btn btn-secondary btn-sm" @click="dataPage++; loadData()" x-show="dataPage*20 < dataTotal">下一页</button>
+            </div>
+            <template x-if="selectedData">
+                <div class="detail-panel">
+                    <h3>详情</h3>
+                    <pre x-text="JSON.stringify(selectedData, null, 2)"></pre>
+                    <button class="btn btn-secondary btn-sm" @click="selectedData=null" style="margin-top:8px;">关闭</button>
+                </div>
+            </template>
+        </div>
+    </div>
 
-def _format_direction(r: dict) -> str:
-    if r.get("status") == "样本不足":
-        return f"数据不足（{r.get('count', 0)} 条记录），待积累。"
-    lines = [
-        f"- 漂移度：{r['漂移度判断']}",
-        f"- 方向占比：{r['方向提及占比']}",
-        f"- 实际 TOP10 主题：",
-    ]
-    for word, count in r.get("实际TOP10主题", []):
-        lines.append(f"  - {word}（{count}次）")
-    lines.append(f"- 每周趋势：{r.get('每周趋势', '暂无')}")
-    return "\n".join(lines)
+    <!-- LLM 交互视图 -->
+    <div class="container" x-show="view==='llm'" x-cloak>
+        <div class="card">
+            <h2>LLM 交互</h2>
+            <div style="display:flex; gap:8px; margin-bottom:12px;">
+                <select x-model="llmFilter.step" @change="loadLLM()" style="padding:4px 8px; border-radius:6px; border:1px solid #ddd;">
+                    <option value="">全部步骤</option>
+                    <option value="intent_extract">意图提取</option>
+                    <option value="profile_trae">trae画像</option>
+                    <option value="profile_marvis">marvis画像</option>
+                    <option value="profile_global">综合画像</option>
+                </select>
+                <select x-model="llmFilter.success" @change="loadLLM()" style="padding:4px 8px; border-radius:6px; border:1px solid #ddd;">
+                    <option value="">全部</option>
+                    <option value="1">成功</option>
+                    <option value="0">失败</option>
+                </select>
+            </div>
+            <table>
+                <thead><tr><th>ID</th><th>步骤</th><th>模型</th><th>耗时</th><th>Tokens</th><th>状态</th></tr></thead>
+                <tbody>
+                    <template x-for="c in llmItems" :key="c.id">
+                        <tr @click="selectedLLM = (selectedLLM?.id === c.id) ? null : c">
+                            <td x-text="c.id"></td>
+                            <td x-text="c.step"></td>
+                            <td x-text="c.model"></td>
+                            <td x-text="c.elapsed_ms ? c.elapsed_ms+'ms' : '-'"></td>
+                            <td x-text="c.total_tokens || '-'"></td>
+                            <td><span class="badge" :class="c.success ? 'badge-done' : 'badge-failed'" x-text="c.success ? '成功' : '失败'"></span></td>
+                        </tr>
+                    </template>
+                </tbody>
+            </table>
+            <div class="pagination">
+                <button class="btn btn-secondary btn-sm" @click="llmPage--; loadLLM()" x-show="llmPage>1">上一页</button>
+                <span x-text="'第 '+llmPage+' 页 / 共 '+Math.ceil(llmTotal/20)+' 页'" style="font-size:13px; color:#666;"></span>
+                <button class="btn btn-secondary btn-sm" @click="llmPage++; loadLLM()" x-show="llmPage*20 < llmTotal">下一页</button>
+            </div>
+            <template x-if="selectedLLM">
+                <div class="detail-panel">
+                    <h3>调用详情 #<span x-text="selectedLLM.id"></span></h3>
+                    <details style="margin-bottom:8px;"><summary style="cursor:pointer; font-weight:500;">System Prompt</summary><pre x-text="selectedLLM.system_prompt"></pre></details>
+                    <details style="margin-bottom:8px;"><summary style="cursor:pointer; font-weight:500;">User Prompt</summary><pre x-text="selectedLLM.user_prompt"></pre></details>
+                    <p style="font-weight:500; margin-bottom:4px;">Response</p>
+                    <pre x-text="selectedLLM.response"></pre>
+                    <template x-if="selectedLLM.error_message"><p style="color:#E8463A; margin-top:8px;" x-text="'Error: '+selectedLLM.error_message"></p></template>
+                    <button class="btn btn-secondary btn-sm" @click="selectedLLM=null" style="margin-top:8px;">关闭</button>
+                </div>
+            </template>
+        </div>
+    </div>
 
+    <!-- 画像产出视图 -->
+    <div class="container" x-show="view==='profiles'" x-cloak>
+        <div class="card">
+            <h2>画像产出</h2>
+            <div style="display:flex; gap:8px; margin-bottom:12px;">
+                <button class="btn btn-sm" :class="profileViewMode==='structured' ? '' : 'btn-secondary'" @click="profileViewMode='structured'">结构化</button>
+                <button class="btn btn-sm" :class="profileViewMode==='json' ? '' : 'btn-secondary'" @click="profileViewMode='json'">原始 JSON</button>
+            </div>
+            <table>
+                <thead><tr><th>文件名</th><th>类型</th><th>日期</th><th>大小</th></tr></thead>
+                <tbody>
+                    <template x-for="p in profileItems" :key="p.filename">
+                        <tr @click="loadProfileDetail(p.filename)">
+                            <td x-text="p.filename"></td>
+                            <td x-text="p.type"></td>
+                            <td x-text="p.date"></td>
+                            <td x-text="(p.size/1024).toFixed(1)+'KB'"></td>
+                        </tr>
+                    </template>
+                </tbody>
+            </table>
+            <template x-if="selectedProfile">
+                <div class="detail-panel">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+                        <h3 x-text="selectedProfile.filename"></h3>
+                        <button class="btn btn-secondary btn-sm" @click="selectedProfile=null">关闭</button>
+                    </div>
+                    <template x-if="profileViewMode==='json'">
+                        <pre x-text="JSON.stringify(selectedProfile.data, null, 2)"></pre>
+                    </template>
+                    <template x-if="profileViewMode==='structured'">
+                        <div>
+                            <template x-if="selectedProfile.data?.direction_truth">
+                                <div class="dim-card">
+                                    <h3>方向真实度</h3>
+                                    <p><strong>声称方向:</strong> <span x-text="selectedProfile.data.direction_truth.claimed"></span></p>
+                                    <p><strong>实际关注:</strong> <span x-text="selectedProfile.data.direction_truth.actual_focus"></span></p>
+                                    <p><strong>对齐度:</strong> <span x-text="selectedProfile.data.direction_truth.alignment"></span></p>
+                                    <p x-text="selectedProfile.data.direction_truth.description"></p>
+                                </div>
+                            </template>
+                            <template x-if="selectedProfile.data?.knowledge_interest">
+                                <div class="dim-card">
+                                    <h3>知识兴趣光谱</h3>
+                                    <p x-text="selectedProfile.data.knowledge_interest.description"></p>
+                                </div>
+                            </template>
+                            <template x-if="selectedProfile.data?.activity_pattern">
+                                <div class="dim-card">
+                                    <h3>作息精力模式</h3>
+                                    <p><strong>高效时段:</strong> <span x-text="selectedProfile.data.activity_pattern.peak_hours"></span></p>
+                                    <p><strong>日均:</strong> <span x-text="selectedProfile.data.activity_pattern.daily_avg"></span></p>
+                                </div>
+                            </template>
+                            <template x-if="selectedProfile.data?.decision_style">
+                                <div class="dim-card">
+                                    <h3>决策行动模式</h3>
+                                    <p x-text="selectedProfile.data.decision_style.description"></p>
+                                </div>
+                            </template>
+                            <template x-if="selectedProfile.data?.emotional_tendency">
+                                <div class="dim-card">
+                                    <h3>情绪审美倾向</h3>
+                                    <p x-text="selectedProfile.data.emotional_tendency.description"></p>
+                                </div>
+                            </template>
+                            <template x-if="selectedProfile.data?.summary">
+                                <div class="dim-card">
+                                    <h3>总结</h3>
+                                    <p x-text="selectedProfile.data.summary"></p>
+                                </div>
+                            </template>
+                            <template x-if="selectedProfile.data?.suggestions">
+                                <div class="dim-card">
+                                    <h3>建议</h3>
+                                    <ul>
+                                        <template x-for="s in selectedProfile.data.suggestions" :key="s">
+                                            <li x-text="s"></li>
+                                        </template>
+                                    </ul>
+                                </div>
+                            </template>
+                            <template x-if="selectedProfile.format==='markdown'">
+                                <div x-html="marked.parse(selectedProfile.data)"></div>
+                            </template>
+                        </div>
+                    </template>
+                </div>
+            </template>
+        </div>
+    </div>
 
-def _format_activity(r: dict) -> str:
-    if r.get("status") == "样本不足":
-        return f"数据不足（{r.get('count', 0)} 条记录），待积累。"
-    return "\n".join([
-        f"- 峰值时段：{r['峰值时段']}",
-        f"- 低谷时段：{r['低谷时段']}",
-        f"- 日均活跃次数：{r['日均活跃次数']}",
-        f"- 总记录数：{r['总记录数']}",
-    ])
+    <script>
+        function portalApp() {
+            return {
+                view: 'dashboard',
+                dash: {},
+                // data
+                dataTab: 'raw',
+                dataItems: [],
+                dataTotal: 0,
+                dataPage: 1,
+                dataFilter: { source: '' },
+                selectedData: null,
+                // llm
+                llmItems: [],
+                llmTotal: 0,
+                llmPage: 1,
+                llmFilter: { step: '', success: '' },
+                selectedLLM: null,
+                // profiles
+                profileItems: [],
+                selectedProfile: null,
+                profileViewMode: 'structured',
+                // task
+                currentEventSource: null,
 
+                async init() {
+                    await this.loadDashboard();
+                    // 轮询
+                    setInterval(() => {
+                        if (this.view === 'dashboard' && !this.dash.current_task) {
+                            this.loadDashboard();
+                        }
+                    }, 10000);
+                },
 
-def _format_decision(r: dict) -> str:
-    if r.get("status") == "样本不足":
-        return f"数据不足（{r.get('count', 0)} 条记录），待积累。"
-    dist = r.get("处理路径分布", {})
-    return "\n".join([
-        f"- 调研类：{dist.get('调研类', 0)}%",
-        f"- 动手类：{dist.get('动手类', 0)}%",
-        f"- 讨论类：{dist.get('讨论类', 0)}%",
-        f"- 模式：{r.get('模式判断', '未知')}",
-        f"- 想法到动手间隔：{r.get('想法到动手间隔', '暂无')}",
-    ])
+                async loadDashboard() {
+                    const resp = await fetch('/api/dashboard');
+                    this.dash = await resp.json();
+                },
 
+                async startTask(taskType, params) {
+                    const resp = await fetch('/api/tasks', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ task_type: taskType, params }),
+                    });
+                    if (resp.ok) {
+                        const data = await resp.json();
+                        alert('任务已启动: #' + data.id);
+                        this.loadDashboard();
+                    } else if (resp.status === 409) {
+                        alert('已有任务在运行中');
+                    } else {
+                        alert('启动失败: ' + resp.statusText);
+                    }
+                },
 
-if __name__ == "__main__":
-    main()
+                async cancelTask(taskId) {
+                    await fetch('/api/tasks/' + taskId, { method: 'DELETE' });
+                    this.loadDashboard();
+                },
+
+                async loadData() {
+                    const params = new URLSearchParams({ page: this.dataPage, page_size: 20 });
+                    if (this.dataFilter.source) params.set('source', this.dataFilter.source);
+                    const endpoint = this.dataTab === 'raw' ? '/api/data/raw' : '/api/data/intents';
+                    const resp = await fetch(endpoint + '?' + params);
+                    const data = await resp.json();
+                    this.dataItems = data.items || [];
+                    this.dataTotal = data.total || 0;
+                },
+
+                async loadLLM() {
+                    const params = new URLSearchParams({ page: this.llmPage, page_size: 20 });
+                    if (this.llmFilter.step) params.set('step', this.llmFilter.step);
+                    if (this.llmFilter.success !== '') params.set('success', this.llmFilter.success);
+                    const resp = await fetch('/api/llm/calls?' + params);
+                    const data = await resp.json();
+                    this.llmItems = data.items || [];
+                    this.llmTotal = data.total || 0;
+                },
+
+                async loadProfiles() {
+                    const resp = await fetch('/api/profiles');
+                    const data = await resp.json();
+                    this.profileItems = data.items || [];
+                },
+
+                async loadProfileDetail(filename) {
+                    const resp = await fetch('/api/profiles/' + encodeURIComponent(filename));
+                    this.selectedProfile = await resp.json();
+                },
+            };
+        }
+    </script>
+</body>
+</html>
 ```
 
-### analyze_marvis.py
+- [ ] **Step 2: 手动验证 — 启动 portal**
 
-```python
-"""marvis 聊天记录分析，输出 marvis画像报告.md"""
-from profile.io.marvis_reader import MarvisReader
-from profile.analysis.topic import analyze as analyze_topic
-from profile.analysis.activity import analyze as analyze_activity
-from profile.output.writer import write_report, format_report
+Run: `cd D:\AAAmyprj\github\myrepos\checkSelf; .venv\Scripts\python -m profile.portal.app`
+Expected: 浏览器自动打开 `http://127.0.0.1:8000`，显示 Dashboard 页面
 
+验证项：
+1. Dashboard 页面显示数据概览（4 个数据源条数）
+2. 点击"数据库"tab，能看到 raw_data 表数据
+3. 点击"LLM 交互"tab，能看到 llm_calls 记录
+4. 点击"画像产出"tab，能看到画像文件列表
+5. 点击"立即刷新"按钮，任务启动并显示运行状态
 
-def main():
-    reader = MarvisReader()
-    if not reader.is_available():
-        print("[error] marvis 数据源不可用")
-        return
-
-    records = reader.read()
-    print(f"读取 marvis 记录: {len(records)} 条")
-
-    topic_result = analyze_topic(records)
-    act_result = analyze_activity(records)
-
-    sections = [
-        ("日常诉求", _format_topic(topic_result)),
-        ("活跃时段", _format_activity(act_result)),
-    ]
-
-    md = format_report(sections, "marvis 画像报告")
-    path = write_report("marvis画像报告.md", md)
-    print(f"已生成: {path}")
-
-
-def _format_topic(r: dict) -> str:
-    if r.get("status") == "样本不足":
-        return f"数据不足（{r.get('count', 0)} 条记录），待积累。"
-    lines = ["### TOP10 诉求主题"]
-    for word, count in r.get("主要诉求TOP10", []):
-        lines.append(f"- {word}（{count}次）")
-    cat = r.get("诉求分类", {})
-    lines.append("### 诉求分类")
-    for k, v in cat.items():
-        lines.append(f"- {k}：{v}%")
-    return "\n".join(lines)
-
-
-def _format_activity(r: dict) -> str:
-    if r.get("status") == "样本不足":
-        return f"数据不足（{r.get('count', 0)} 条记录），待积累。"
-    return "\n".join([
-        f"- 峰值时段：{r['峰值时段']}",
-        f"- 低谷时段：{r['低谷时段']}",
-        f"- 日均活跃次数：{r['日均活跃次数']}",
-        f"- 总记录数：{r['总记录数']}",
-    ])
-
-
-if __name__ == "__main__":
-    main()
-```
-
-### generate.py
-
-```python
-"""合并 trae + marvis 分析，生成 个人画像-v0.1.md"""
-from datetime import datetime
-
-from profile.io.trae_reader import TraeReader
-from profile.io.marvis_reader import MarvisReader
-from profile.analysis.direction import analyze as analyze_direction
-from profile.analysis.activity import analyze as analyze_activity
-from profile.analysis.decision import analyze as analyze_decision
-from profile.analysis.topic import analyze as analyze_topic
-from profile.output.writer import write_report
-from profile.config import CLAIMED_DIRECTION
-
-
-def main():
-    trae = TraeReader()
-    marvis = MarvisReader()
-
-    trae_records = trae.read() if trae.is_available() else []
-    marvis_records = marvis.read() if marvis.is_available() else []
-    print(f"trae: {len(trae_records)} 条, marvis: {len(marvis_records)} 条")
-
-    all_records = trae_records + marvis_records
-
-    dir_result = analyze_direction(trae_records, CLAIMED_DIRECTION) if trae_records else {"status": "样本不足"}
-    dec_result = analyze_decision(trae_records) if trae_records else {"status": "样本不足"}
-    act_result = analyze_activity(all_records) if all_records else {"status": "样本不足"}
-    topic_result = analyze_topic(marvis_records) if marvis_records else {"status": "样本不足"}
-
-    today = datetime.now().strftime("%Y-%m-%d")
-    md = _build_markdown(today, trae_records, marvis_records,
-                         dir_result, dec_result, act_result, topic_result)
-
-    path = write_report("个人画像-v0.1.md", md)
-    print(f"已生成: {path}")
-
-
-def _build_markdown(today, trae_records, marvis_records,
-                    dir_result, dec_result, act_result, topic_result):
-    lines = [
-        f"## 个人画像 v0.1 · {today}",
-        "",
-        "> 自动生成，请勿手动编辑",
-        "",
-        "### 数据概况",
-        "",
-        _format_overview(trae_records, marvis_records),
-        "",
-        "### 方向真实度",
-        "",
-        _no_data(dir_result)
-        if dir_result.get("status") == "样本不足"
-        else _format_direction(dir_result),
-        "",
-        "### 决策行动模式",
-        "",
-        _no_data(dec_result)
-        if dec_result.get("status") == "样本不足"
-        else _format_decision(dec_result),
-        "",
-        "### 活跃时段",
-        "",
-        _no_data(act_result)
-        if act_result.get("status") == "样本不足"
-        else _format_activity(act_result),
-        "",
-        "### 日常诉求（marvis）",
-        "",
-        _no_data(topic_result)
-        if topic_result.get("status") == "样本不足"
-        else _format_topic(topic_result),
-        "",
-    ]
-    return "\n".join(lines)
-
-
-def _no_data(r: dict) -> str:
-    return f"> *数据不足（{r.get('count', 0)} 条记录），待积累。*"
-
-
-def _format_overview(trae_records, marvis_records):
-    lines = [
-        f"- 数据来源：trae（{len(trae_records)}条）+ marvis（{len(marvis_records)}条）",
-        f"- 生成时间：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-    ]
-    if trae_records:
-        dates = {r.time.date() for r in trae_records}
-        lines.append(f"- trae 时间范围：{min(dates)} 至 {max(dates)}")
-    if marvis_records:
-        dates = {r.time.date() for r in marvis_records}
-        lines.append(f"- marvis 时间范围：{min(dates)} 至 {max(dates)}")
-    return "\n".join(lines)
-
-
-def _format_direction(r: dict) -> str:
-    lines = [
-        f"- 声称方向：{r.get('声称方向', {})}",
-        f"- 漂移度：{r.get('漂移度判断', '未知')}",
-        f"- 方向占比：{r.get('方向提及占比', {})}",
-        f"- 实际 TOP10 主题：",
-    ]
-    for word, count in r.get("实际TOP10主题", []):
-        lines.append(f"  - {word}（{count}次）")
-    return "\n".join(lines)
-
-
-def _format_activity(r: dict) -> str:
-    return "\n".join([
-        f"- 峰值时段：{r.get('峰值时段', '未知')}",
-        f"- 低谷时段：{r.get('低谷时段', '未知')}",
-        f"- 日均活跃次数：{r.get('日均活跃次数', '?')}",
-        f"- 总记录数：{r.get('总记录数', '?')} / 天数：{r.get('天数', '?')}",
-    ])
-
-
-def _format_decision(r: dict) -> str:
-    dist = r.get("处理路径分布", {})
-    return "\n".join([
-        f"- 调研类：{dist.get('调研类', 0)}%",
-        f"- 动手类：{dist.get('动手类', 0)}%",
-        f"- 讨论类：{dist.get('讨论类', 0)}%",
-        f"- 模式：{r.get('模式判断', '未知')}",
-        f"- 想法到动手间隔：{r.get('想法到动手间隔', '暂无')}",
-    ])
-
-
-def _format_topic(r: dict) -> str:
-    lines = []
-    top = r.get("主要诉求TOP10", [])
-    if top:
-        lines.append("**TOP10 诉求主题**")
-        for word, count in top:
-            lines.append(f"- {word}（{count}次）")
-    cat = r.get("诉求分类", {})
-    if cat:
-        lines.append("**诉求分类**")
-        for k, v in cat.items():
-            lines.append(f"- {k}：{v}%")
-    return "\n".join(lines)
-
-
-if __name__ == "__main__":
-    main()
-```
-
-- [ ] **Verify imports**
-
-```powershell
-python -c "from profile.cli import analyze_trae, analyze_marvis, generate; print('OK')"
-```
-
-- [ ] **Commit**
+- [ ] **Step 3: 提交**
 
 ```bash
-git add profile/cli/analyze_trae.py profile/cli/analyze_marvis.py profile/cli/generate.py
-git commit -m "feat: add CLI entry points for trae, marvis, and combined report"
+git add profile/portal/static/index.html
+git commit -m "feat(portal): complete frontend with 4 views - dashboard, data, LLM, profiles"
 ```
+
+---
+
+## Self-Review 检查

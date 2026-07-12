@@ -112,7 +112,7 @@ TASK_STEPS = {
         ("生成变化报告", lambda: _noop_step()),
     ],
     "ingest": [
-        ("数据入库", lambda: _run_cli("profile.cli.ingest", [])),
+        ("数据入库", lambda source: _run_cli("profile.cli.ingest", [source] if source else [])),
     ],
     "ingest_single": [
         ("入库", lambda source: _run_cli("profile.cli.ingest", [source])),
@@ -206,6 +206,8 @@ class TaskRunner:
 
                 try:
                     if task_type == "ingest_single":
+                        result = step_fn(params.get("source", ""))
+                    elif task_type == "ingest":
                         result = step_fn(params.get("source", ""))
                     elif task_type == "refresh_all":
                         if idx == 0:

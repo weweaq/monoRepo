@@ -17,6 +17,28 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
+
+_LEVEL_NAMES = {
+    "DEBUG": logging.DEBUG,
+    "INFO": logging.INFO,
+    "WARNING": logging.WARNING,
+    "WARN": logging.WARNING,
+    "ERROR": logging.ERROR,
+    "CRITICAL": logging.CRITICAL,
+}
+
+
+def _env_level(name: str, default: int) -> int:
+    """从环境变量读取日志级别，支持数字或名称。"""
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return _LEVEL_NAMES.get(raw.strip().upper(), default)
+
+
 # 敏感字段名模式（小写匹配）
 _SENSITIVE_KEY_PATTERNS = re.compile(
     r"(api_key|apikey|api[-_]?secret|token|password|passwd|secret|email|phone|mobile|authorization)",
@@ -94,11 +116,16 @@ _LOG_DIR: Path | None = None
 _INITIALIZED = False
 
 
-def setup(log_dir: Path | None = None, level: int = logging.DEBUG, console_level: int = logging.INFO) -> None:
+def setup(log_dir: Path | None = None, level: int | None = None, console_level: int | None = None) -> None:
     """初始化日志系统。
 
     符合 AGENTS.md 规范：每次运行日志写入独立目录 logs/YYYY-MM-DD-HHmmss/，
     不会覆盖历史运行日志，全量持久化。
+
+    级别参数优先级：显式参数 > 环境变量 > 默认值。
+    - `level` (文件 handler) 默认 DEBUG，可用 `PROFILE_LOG_LEVEL` 覆盖
+    - `console_level` (控制台 handler) 默认 INFO，可用 `PROFILE_CONSOLE_LEVEL`
+      或 `PROFILE_VERBOSE=1` 覆盖（VERBOSE 会把控制台也升到 DEBUG）
 
     Args:
         log_dir: 日志基目录（默认 logs/），实际会在其下创建 YYYY-MM-DD-HHmmss/ 子目录
@@ -109,6 +136,11 @@ def setup(log_dir: Path | None = None, level: int = logging.DEBUG, console_level
     if _INITIALIZED:
         return
     _INITIALIZED = True
+
+    effective_level = level if level is not None else _env_level("PROFILE_LOG_LEVEL", logging.DEBUG)
+    effective_console = console_level if console_level is not None else _env_level("PROFILE_CONSOLE_LEVEL", logging.INFO)
+    if os.getenv("PROFILE_VERBOSE", "").lower() in ("1", "true", "yes", "on"):
+        effective_console = logging.DEBUG
 
     base = Path(log_dir) if log_dir else Path("logs")
     stamp = datetime.now().strftime("%Y-%m-%d-%H%M%S")
@@ -121,19 +153,19 @@ def setup(log_dir: Path | None = None, level: int = logging.DEBUG, console_level
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
 
     root = logging.getLogger("profile")
-    root.setLevel(level)
+    root.setLevel(effective_level)
     root.handlers.clear()
 
     # JSONL 文件 handler（全量持久化，含 DEBUG）
     fh = logging.FileHandler(_LOG_DIR / "run.jsonl", encoding="utf-8")
-    fh.setLevel(level)
+    fh.setLevel(effective_level)
     fh.setFormatter(JsonlFormatter())
     fh.addFilter(_ContextFilter())
     root.addHandler(fh)
 
     # 控制台 handler（简洁格式，方便人工看，默认 INFO 不刷 DEBUG）
     ch = logging.StreamHandler(sys.stderr)
-    ch.setLevel(console_level)
+    ch.setLevel(effective_console)
     ch.setFormatter(logging.Formatter("[%(levelname)s] %(name)s: %(message)s"))
     ch.addFilter(_ContextFilter())
     root.addHandler(ch)

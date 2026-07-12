@@ -9,9 +9,11 @@ import argparse
 from datetime import datetime, timedelta
 
 from profile.analysis import activity, aggregator, decision, direction, topic
+from profile.analysis import knowledge_interest, emotion_aesthetic
 from profile.config import CLAIMED_DIRECTION, LOG_DIR
 from profile.db.init_db import init_db
 from profile.db.store import query_intents, query_raw_data
+from profile.io.registry import get_reader, channel_reader_names
 from profile.llm.client import LLMClient
 from profile.log import get_logger, setup
 from profile.models import ChatRecord
@@ -76,9 +78,15 @@ def generate_channel(source: str, intents: list[dict], raw_rows: list[dict],
     use_llm = bool(intents) and client.is_available()
     records = _intents_to_records(intents) if use_llm else _raw_to_records(raw_rows)
 
+    analysis_type = "topic"
+    reader = get_reader(source)
+    if reader is not None:
+        analysis_type = reader.analysis_type
+
     logger.info("开始 channel 画像生成", extra={
         "extra": {
             "source": source,
+            "analysis_type": analysis_type,
             "mode": "llm" if use_llm else "rule",
             "intents_count": len(intents),
             "raw_rows_count": len(raw_rows),
@@ -92,7 +100,7 @@ def generate_channel(source: str, intents: list[dict], raw_rows: list[dict],
             "extra": {"source": source}
         })
 
-    if source == "trae":
+    if analysis_type == "agentic":
         if use_llm:
             direction_result = direction.analyze_llm(intents, CLAIMED_DIRECTION, client=client)
             decision_result = decision.analyze_llm(intents, client=client)
@@ -136,6 +144,35 @@ def generate_channel(source: str, intents: list[dict], raw_rows: list[dict],
     return profile
 
 
+def build_content_consumption(client: LLMClient, period_start: str, period_end: str) -> dict | None:
+    ki = knowledge_interest.from_db()
+    ea = emotion_aesthetic.from_db()
+    if ki.get("status") != "ok" and ea.get("status") != "ok":
+        logger.warning("无内容消费数据，跳过内容消费画像", extra={
+            "extra": {"ki_status": ki.get("status"), "ea_status": ea.get("status")}
+        })
+        return None
+
+    logger.info("开始内容消费画像生成", extra={
+        "extra": {"ki_status": ki.get("status"), "ea_status": ea.get("status")}
+    })
+    profile = {
+        "source": "content_consumption",
+        "period": {"start": period_start, "end": period_end},
+        "knowledge_interest": ki,
+        "emotion_aesthetic": ea,
+    }
+    md_path, json_path = write_channel(profile, "content_consumption")
+    logger.info("内容消费画像生成完成", extra={
+        "extra": {
+            "md_file": str(md_path),
+            "json_file": str(json_path),
+            "md_size_bytes": md_path.stat().st_size if md_path.exists() else 0,
+        }
+    })
+    return profile
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--days", type=int, default=7, help="统计最近 N 天")
@@ -157,7 +194,7 @@ def main(argv: list[str] | None = None) -> int:
     })
 
     channel_profiles = {}
-    for source in ["trae", "marvis"]:
+    for source in channel_reader_names():
         intents = query_intents(source=source, start_date=period_start, end_date=period_end)
         raw_rows = query_raw_data(source=source, start_date=period_start, end_date=period_end)
         logger.info("数据查询完成", extra={
@@ -171,6 +208,11 @@ def main(argv: list[str] | None = None) -> int:
             logger.info("无数据，跳过", extra={"extra": {"source": source}})
             continue
         channel_profiles[source] = generate_channel(source, intents, raw_rows, client, period_start, period_end)
+
+    # 内容消费画像（bilibili 兴趣 + 网易云复听/审美），直接读 raw_data
+    content_profile = build_content_consumption(client, period_start, period_end)
+    if content_profile:
+        channel_profiles["content_consumption"] = content_profile
 
     if not channel_profiles:
         logger.warning("无任何 channel 数据，跳过综合画像")

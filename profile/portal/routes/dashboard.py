@@ -35,6 +35,10 @@ def get_dashboard() -> dict:
                 "task_type": t["task_type"],
                 "status": t["status"],
                 "current_step": t.get("current_step"),
+                "steps_json": t.get("steps_json"),
+                "started_at": t.get("started_at"),
+                "finished_at": t.get("finished_at"),
+                "error_message": t.get("error_message"),
             }
 
     # 2. 最近5次历史任务
