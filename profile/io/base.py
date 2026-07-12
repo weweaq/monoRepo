@@ -41,3 +41,21 @@ class BaseReader(ABC):
         - 'none'：仅入库，不进入画像
         """
         return "channel"
+
+    @property
+    def consumption_slot(self) -> str | None:
+        """profile_target == 'consumption' 时，在 content_consumption 画像中填充的键。
+
+        - bilibili -> 'knowledge_interest'
+        - netease  -> 'emotion_aesthetic'
+        返回 None 表示不参与合成消费画像（默认）。
+        """
+        return None
+
+    def analyze_consumption(self) -> dict | None:
+        """生成该源在 content_consumption 画像中的子画像（由 consumption_slot 决定键）。
+
+        默认 None（不参与）。consumption 型源应实现此方法，直接读取自身 raw_data 并产出子画像，
+        使 build_content_consumption 能自动遍历接入，无需中央硬编码，且 IO 层不反向依赖 analysis 层。
+        """
+        return None

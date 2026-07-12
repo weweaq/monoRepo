@@ -9,13 +9,12 @@ import argparse
 from datetime import datetime, timedelta
 
 from profile.analysis import activity, aggregator, decision, direction, topic
-from profile.analysis import knowledge_interest, emotion_aesthetic
 from profile.config import CLAIMED_DIRECTION, LOG_DIR
 from profile.db.init_db import init_db
 from profile.db.store import query_intents, query_raw_data
-from profile.io.registry import get_reader, channel_reader_names
+from profile.io.registry import get_reader, channel_reader_names, consumption_reader_names
 from profile.llm.client import LLMClient
-from profile.log import get_logger, setup
+from profile.log import get_logger, setup, log_error
 from profile.models import ChatRecord
 from profile.output.writer import write_channel, write_global
 
@@ -145,23 +144,34 @@ def generate_channel(source: str, intents: list[dict], raw_rows: list[dict],
 
 
 def build_content_consumption(client: LLMClient, period_start: str, period_end: str) -> dict | None:
-    ki = knowledge_interest.from_db()
-    ea = emotion_aesthetic.from_db()
-    if ki.get("status") != "ok" and ea.get("status") != "ok":
-        logger.warning("无内容消费数据，跳过内容消费画像", extra={
-            "extra": {"ki_status": ki.get("status"), "ea_status": ea.get("status")}
-        })
-        return None
-
-    logger.info("开始内容消费画像生成", extra={
-        "extra": {"ki_status": ki.get("status"), "ea_status": ea.get("status")}
-    })
-    profile = {
+    # 遍历所有 consumption 型 reader，按其 consumption_slot 自动接入，不再硬编码 bilibili/netease。
+    profile: dict = {
         "source": "content_consumption",
         "period": {"start": period_start, "end": period_end},
-        "knowledge_interest": ki,
-        "emotion_aesthetic": ea,
     }
+    any_ok = False
+    for name in consumption_reader_names():
+        reader = get_reader(name)
+        if reader is None:
+            continue
+        slot = reader.consumption_slot
+        if not slot:
+            continue
+        try:
+            result = reader.analyze_consumption()
+        except Exception as e:
+            log_error(logger, f"{name} 消费画像分析失败", exc=e, context={})
+            continue
+        if result and result.get("status") == "ok":
+            any_ok = True
+        profile[slot] = result
+
+    slots = [k for k in profile if k not in ("source", "period")]
+    if not any_ok:
+        logger.warning("无内容消费数据，跳过内容消费画像", extra={"extra": {"slots": slots}})
+        return None
+
+    logger.info("开始内容消费画像生成", extra={"extra": {"slots": slots}})
     md_path, json_path = write_channel(profile, "content_consumption")
     logger.info("内容消费画像生成完成", extra={
         "extra": {
@@ -209,7 +219,7 @@ def main(argv: list[str] | None = None) -> int:
             continue
         channel_profiles[source] = generate_channel(source, intents, raw_rows, client, period_start, period_end)
 
-    # 内容消费画像（bilibili 兴趣 + 网易云复听/审美），直接读 raw_data
+    # 内容消费画像（由各 consumption 型 reader 的 analyze_consumption 自动聚合），直接读 raw_data
     content_profile = build_content_consumption(client, period_start, period_end)
     if content_profile:
         channel_profiles["content_consumption"] = content_profile

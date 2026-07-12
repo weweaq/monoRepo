@@ -32,6 +32,7 @@ import os
 import subprocess
 import time
 import urllib.request
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -107,6 +108,38 @@ class BilibiliReader(BaseReader):
     @property
     def profile_target(self) -> str:
         return "consumption"
+
+    @property
+    def consumption_slot(self) -> str:
+        return "knowledge_interest"
+
+    def analyze_consumption(self) -> dict:
+        """知识兴趣光谱（内容消费画像维度之一），逻辑内联自 analysis.knowledge_interest。
+
+        数据来源：本源观看历史（raw_data.source=self.source_name）。用 classify 对标题做本地关键词分类。
+        """
+        rows = query_raw_data(source=self.source_name)
+        logger.info("知识兴趣分析（bilibili）", extra={"extra": {"raw_count": len(rows)}})
+        if not rows:
+            return {"status": "无 bilibili 数据", "count": 0}
+        cats = Counter()
+        untitled = 0
+        for r in rows:
+            rj = r.get("raw_json") or {}
+            title = rj.get("title") or r.get("content") or ""
+            if not title:
+                untitled += 1
+                continue
+            cats[classify(title)] += 1
+        total = sum(cats.values())
+        dist = {k: round(v / total * 100, 1) for k, v in cats.most_common()}
+        return {
+            "status": "ok",
+            "样本量": total,
+            "无标题条数": untitled,
+            "兴趣分类分布": dist,
+            "TOP兴趣": cats.most_common(5),
+        }
 
     def is_available(self) -> bool:
         return which("bili") is not None
