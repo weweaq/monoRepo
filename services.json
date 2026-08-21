@@ -1,0 +1,63 @@
+{
+  "bind_host": "127.0.0.1",
+  "bind_port": 8787,
+  "token": "dev-console-local",
+  "log_dir": "logs",
+  "services": [
+    {
+      "id": "langtrack",
+      "name": "langTrack (WithLangGraph)",
+      "ports": [8000],
+      "cwd": "D:\\AAAmyPrj\\github\\myrepos\\WithLangGraph",
+      "env": { "PYTHONPATH": "D:\\AAAmyPrj\\github\\myrepos\\WithLangGraph\\src" },
+      "interpreter": "D:\\AAAmyPrj\\github\\myrepos\\WithLangGraph\\.venv\\Scripts\\python.exe",
+      "args": ["-m", "gacore.langTrack", "--host", "127.0.0.1", "--port", "8000"],
+      "match": ["gacore.langTrack"],
+      "notes": "接收手机上报事件的 HTTP 服务；需要 .venv 已建好且配置 .env"
+    },
+    {
+      "id": "gacore",
+      "name": "gacore (QQ Bot + Scheduler)",
+      "ports": [],
+      "cwd": "D:\\AAAmyPrj\\github\\myrepos\\WithLangGraph",
+      "env": { "PYTHONPATH": "D:\\AAAmyPrj\\github\\myrepos\\WithLangGraph\\src" },
+      "interpreter": "D:\\softwares\\miniconda\\envs\\py12\\python.exe",
+      "args": ["D:\\AAAmyPrj\\github\\myrepos\\WithLangGraph\\start.py"],
+      "match": ["WithLangGraph\\start.py"],
+      "notes": "QQ 机器人 + 定时调度；无 HTTP 端口，仅靠命令行特征判定存活；需要 .env 配置 LLM Key"
+    },
+    {
+      "id": "py-wei",
+      "name": "WeiTrack (collector + dashboard)",
+      "ports": [5555],
+      "cwd": "D:\\AAAmyPrj\\github\\myrepos\\py-wei",
+      "env": {},
+      "interpreter": "D:\\softwares\\miniconda\\pythonw.exe",
+      "args": ["-m", "weitrack"],
+      "match": ["-m weitrack"],
+      "notes": "活动追踪采集器，内置数据看板 :5555"
+    },
+    {
+      "id": "opencode",
+      "name": "opencode serve",
+      "ports": [4096],
+      "cwd": "",
+      "env": {},
+      "interpreter": "C:\\Users\\17734\\AppData\\Roaming\\npm\\opencode.cmd",
+      "args": ["serve", "--hostname", "127.0.0.1", "--port", "4096"],
+      "match": ["opencode"],
+      "notes": "只读 127.0.0.1（与原 0.0.0.0 局域网脚本不同，统一面板不暴露外网）；未设密码"
+    },
+    {
+      "id": "app-apk",
+      "name": "weiCheckApp APK 分发 (serve_apk)",
+      "ports": [8080],
+      "cwd": "D:\\AAAmyPrj\\github\\myrepos\\weiCheckApp",
+      "env": {},
+      "interpreter": "D:\\softwares\\miniconda\\python.exe",
+      "args": ["D:\\AAAmyPrj\\github\\myrepos\\weiCheckApp\\deploy\\serve_apk.py", "--port", "8080"],
+      "match": ["serve_apk.py"],
+      "notes": "局域网 APK 分发服务（仅起分发进程，不自动构建；网页可点'立即构建'触发 assembleDebug）；默认 --dir 为 app/build/outputs/apk/debug，未构建 APK 时进程会立即退出；绑定 0.0.0.0:8080 供手机访问"
+    }
+  ]
+}
