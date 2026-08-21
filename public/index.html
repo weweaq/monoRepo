@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Dev Console · 本地服务控制台</title>
+<style>
+  :root { --bg:#0f1419; --card:#1a212b; --border:#2a3441; --green:#3fb950; --red:#f85149; --text:#e6edf3; --muted:#8b949e; --accent:#58a6ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,Segoe UI,Roboto,"Microsoft YaHei",sans-serif; }
+  header { padding:18px 24px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; }
+  header h1 { font-size:18px; margin:0; font-weight:600; }
+  header .addr { color:var(--muted); font-size:13px; font-family:ui-monospace,Menlo,Consolas,monospace; }
+  main { padding:24px; display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:16px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:16px; }
+  .card .top { display:flex; align-items:center; gap:10px; }
+  .dot { width:10px; height:10px; border-radius:50%; background:var(--red); flex:none; }
+  .dot.on { background:var(--green); }
+  .card .name { font-weight:600; font-size:15px; }
+  .card .meta { color:var(--muted); font-size:12px; margin:10px 0 14px; font-family:ui-monospace,Menlo,Consolas,monospace; min-height:16px; }
+  .actions { display:flex; gap:8px; }
+  button { flex:1; padding:8px 0; border:1px solid var(--border); border-radius:7px; background:#21262d; color:var(--text); cursor:pointer; font-size:13px; }
+  button:hover:not(:disabled) { border-color:var(--accent); }
+  button.stop { color:var(--red); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  #banner { margin:0 24px; padding:10px 14px; border-radius:8px; display:none; font-size:13px; }
+  #banner.err { background:#3d1518; color:#ffb3ae; border:1px solid #5c1f24; }
+  #banner.ok { background:#10261a; color:#9be3b0; border:1px solid #1c3d2a; }
+  #toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:#21262d; border:1px solid var(--border); padding:10px 18px; border-radius:8px; font-size:13px; opacity:0; transition:opacity .25s; pointer-events:none; }
+  #toast.show { opacity:1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Dev Console · 本地服务控制台</h1>
+  <span class="addr" id="addr">127.0.0.1:8787</span>
+</header>
+<div id="banner"></div>
+<main id="grid"></main>
+<div id="toast"></div>
+
+<script>
+const TOKEN_KEY = "devConsoleToken";
+let token = localStorage.getItem(TOKEN_KEY) || "";
+
+function getToken() {
+  if (!token) {
+    const v = prompt("输入控制台 Token（默认 dev-console-local）：", "dev-console-local");
+    if (v === null) return null;
+    token = v;
+    localStorage.setItem(TOKEN_KEY, token);
+  }
+  return token;
+}
+
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.classList.remove("show"), 2600);
+}
+
+function banner(type, msg) {
+  const b = document.getElementById("banner");
+  if (!msg) { b.style.display = "none"; return; }
+  b.className = type;
+  b.textContent = msg;
+  b.style.display = "block";
+}
+
+async function apiStatus() {
+  const r = await fetch("/api/status", { cache: "no-store" });
+  if (!r.ok) throw new Error("status " + r.status);
+  return r.json();
+}
+
+async function apiAction(path, id) {
+  const tk = getToken();
+  if (tk === null) return;
+  const r = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-DevConsole-Token": tk },
+    body: JSON.stringify({ service: id }),
+  });
+  let data = {};
+  try { data = await r.json(); } catch (e) {}
+  if (r.status === 401) {
+    token = "";
+    localStorage.removeItem(TOKEN_KEY);
+    banner("err", "Token 错误，请重试");
+    return;
+  }
+  toast((data.ok ? "✓ " : "✗ ") + (data.message || r.status));
+}
+
+let busy = false;
+function render(list) {
+  const grid = document.getElementById("grid");
+  grid.innerHTML = "";
+  list.forEach(s => {
+    const card = document.createElement("div");
+    card.className = "card";
+    const meta = s.running
+      ? "● 运行中 · PID " + (s.pid ?? "?") + (s.ports && s.ports.length ? " · :" + s.ports.join(", :") : "")
+      : "○ 已停止";
+    card.innerHTML =
+      '<div class="top"><span class="dot ' + (s.running ? "on" : "") + '"></span>' +
+      '<span class="name"></span></div>' +
+      '<div class="meta"></div>' +
+      '<div class="actions">' +
+      '<button class="start">启动</button>' +
+      '<button class="stop">停止</button></div>';
+    card.querySelector(".name").textContent = s.name;
+    card.querySelector(".meta").textContent = meta;
+    const startBtn = card.querySelector(".start");
+    const stopBtn = card.querySelector(".stop");
+    startBtn.disabled = busy;
+    stopBtn.disabled = busy;
+    startBtn.onclick = async () => {
+      busy = true; render(await safeStatus() || list);
+      await apiAction("/api/start", s.id);
+      busy = false; refresh();
+    };
+    stopBtn.onclick = async () => {
+      busy = true; render(await safeStatus() || list);
+      await apiAction("/api/stop", s.id);
+      busy = false; refresh();
+    };
+    grid.appendChild(card);
+  });
+}
+
+async function safeStatus() {
+  try { return (await apiStatus()).services; } catch (e) { return null; }
+}
+
+async function refresh() {
+  try {
+    const data = await apiStatus();
+    banner("");
+    render(data.services);
+  } catch (e) {
+    banner("err", "无法连接后端（127.0.0.1:8787 是否未启动？）");
+  }
+}
+
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>
