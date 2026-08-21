@@ -28,14 +28,25 @@
     },
     {
       "id": "py-wei",
-      "name": "WeiTrack (collector + dashboard)",
+      "name": "WeiTrack 采集器 (collector)",
+      "ports": [],
+      "cwd": "D:\\AAAmyPrj\\github\\myrepos\\py-wei",
+      "env": {},
+      "interpreter": "D:\\softwares\\miniconda\\pythonw.exe",
+      "args": ["-m", "weitrack", "--no-dashboard"],
+      "match": ["-m weitrack"],
+      "notes": "活动追踪采集器（--no-dashboard 纯采集，不占用 5555）；自带单实例互斥锁，重复启动会自动退出"
+    },
+    {
+      "id": "py-wei-web",
+      "name": "WeiTrack 数据看板 (dashboard)",
       "ports": [5555],
       "cwd": "D:\\AAAmyPrj\\github\\myrepos\\py-wei",
       "env": {},
       "interpreter": "D:\\softwares\\miniconda\\pythonw.exe",
-      "args": ["-m", "weitrack"],
-      "match": ["-m weitrack"],
-      "notes": "活动追踪采集器，内置数据看板 :5555"
+      "args": ["web/app.py"],
+      "match": ["web/app"],
+      "notes": "独立 Flask 看板 :5555，与采集器分开启停（采集器 --no-dashboard 后不再内嵌看板）"
     },
     {
       "id": "opencode",
@@ -43,10 +54,10 @@
       "ports": [4096],
       "cwd": "",
       "env": {},
-      "interpreter": "C:\\Users\\17734\\AppData\\Roaming\\npm\\opencode.cmd",
+      "interpreter": "C:\\Users\\17734\\AppData\\Roaming\\npm\\node_modules\\opencode-ai\\bin\\opencode.exe",
       "args": ["serve", "--hostname", "127.0.0.1", "--port", "4096"],
       "match": ["opencode"],
-      "notes": "只读 127.0.0.1（与原 0.0.0.0 局域网脚本不同，统一面板不暴露外网）；未设密码"
+      "notes": "直连 opencode.exe（不再经 opencode.cmd -> cmd.exe 中转）；只读 127.0.0.1；未设密码"
     },
     {
       "id": "app-apk",

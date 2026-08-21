@@ -22,7 +22,24 @@
   button { flex:1; padding:8px 0; border:1px solid var(--border); border-radius:7px; background:#21262d; color:var(--text); cursor:pointer; font-size:13px; }
   button:hover:not(:disabled) { border-color:var(--accent); }
   button.stop { color:var(--red); }
+  button.log { color:var(--accent); }
+  button.cfg { color:var(--muted); }
   button:disabled { opacity:.45; cursor:not-allowed; }
+  .cfg-body { padding:16px; overflow:auto; display:flex; flex-direction:column; gap:12px; }
+  .cfg-body label { display:flex; flex-direction:column; gap:6px; font-size:12px; color:var(--muted); }
+  .cfg-body input, .cfg-body textarea { background:#0f1419; border:1px solid var(--border); border-radius:6px; color:var(--text); padding:8px 10px; font:12px/1.5 ui-monospace,Menlo,Consolas,monospace; resize:vertical; }
+  .cfg-body input:focus, .cfg-body textarea:focus { outline:none; border-color:var(--accent); }
+  .cfg-actions { display:flex; gap:8px; margin-top:4px; }
+  .cfg-tip { margin:0; font-size:12px; color:var(--muted); line-height:1.6; }
+  .modal { position:fixed; inset:0; background:rgba(0,0,0,.55); display:none; align-items:center; justify-content:center; z-index:50; }
+  .modal.show { display:flex; }
+  .modal-box { width:min(880px,94vw); height:72vh; background:var(--card); border:1px solid var(--border); border-radius:10px; display:flex; flex-direction:column; overflow:hidden; }
+  .modal-head { display:flex; align-items:center; gap:10px; padding:12px 16px; border-bottom:1px solid var(--border); }
+  .modal-head .dot { width:9px; height:9px; }
+  .modal-title { font-weight:600; font-size:14px; flex:none; }
+  .modal-path { color:var(--muted); font-size:12px; font-family:ui-monospace,Menlo,Consolas,monospace; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #logClose { flex:none; width:auto; padding:6px 16px; }
+  #logContent { flex:1; margin:0; padding:12px 16px; overflow:auto; font:12px/1.65 ui-monospace,Menlo,Consolas,monospace; white-space:pre-wrap; word-break:break-all; }
   #banner { margin:0 24px; padding:10px 14px; border-radius:8px; display:none; font-size:13px; }
   #banner.err { background:#3d1518; color:#ffb3ae; border:1px solid #5c1f24; }
   #banner.ok { background:#10261a; color:#9be3b0; border:1px solid #1c3d2a; }
@@ -38,6 +55,48 @@
 <div id="banner"></div>
 <main id="grid"></main>
 <div id="toast"></div>
+<div id="logModal" class="modal">
+  <div class="modal-box">
+    <div class="modal-head">
+      <span class="dot"></span>
+      <span class="modal-title"></span>
+      <span class="modal-path"></span>
+      <button id="logClose">关闭</button>
+    </div>
+    <pre id="logContent"></pre>
+  </div>
+</div>
+<div id="cfgModal" class="modal">
+  <div class="modal-box">
+    <div class="modal-head">
+      <span class="modal-title"></span>
+      <span class="modal-path" style="flex:1"></span>
+      <button id="cfgClose">关闭</button>
+    </div>
+    <div class="cfg-body">
+      <label>解释器 interpreter
+        <input id="cfgInterpreter" type="text" spellcheck="false" />
+      </label>
+      <label>参数 args（JSON 数组）
+        <textarea id="cfgArgs" rows="3" spellcheck="false"></textarea>
+      </label>
+      <label>端口 ports（逗号分隔，如 8080, 8443）
+        <input id="cfgPorts" type="text" spellcheck="false" />
+      </label>
+      <label>工作目录 cwd
+        <input id="cfgCwd" type="text" spellcheck="false" />
+      </label>
+      <label>环境变量 env（JSON 对象）
+        <textarea id="cfgEnv" rows="2" spellcheck="false"></textarea>
+      </label>
+      <div class="cfg-actions">
+        <button id="cfgReset">恢复默认</button>
+        <button id="cfgSave" style="flex:2">保存</button>
+      </div>
+      <p class="cfg-tip">保存即写入 services.local.json（不影响 services.json 模板）。已运行的服务需重启才生效；修改端口会自动同步 args 中的 --port。</p>
+    </div>
+  </div>
+</div>
 
 <script>
 const TOKEN_KEY = "devConsoleToken";
@@ -110,7 +169,9 @@ function render(list) {
       '<div class="meta"></div>' +
       '<div class="actions">' +
       '<button class="start">启动</button>' +
-      '<button class="stop">停止</button></div>';
+      '<button class="stop">停止</button>' +
+      '<button class="log">日志</button>' +
+      '<button class="cfg">配置</button></div>';
     card.querySelector(".name").textContent = s.name;
     card.querySelector(".meta").textContent = meta;
     const startBtn = card.querySelector(".start");
@@ -127,6 +188,8 @@ function render(list) {
       await apiAction("/api/stop", s.id);
       busy = false; refresh();
     };
+    card.querySelector(".log").onclick = () => openLog(s);
+    card.querySelector(".cfg").onclick = () => openConfig(s);
     grid.appendChild(card);
   });
 }
@@ -134,6 +197,142 @@ function render(list) {
 async function safeStatus() {
   try { return (await apiStatus()).services; } catch (e) { return null; }
 }
+
+/* ---- 日志查看 ---- */
+let logTimer = null;
+let logStick = true;  // 用户未主动上翻时保持跟随底部
+
+function openLog(s) {
+  const m = document.getElementById("logModal");
+  m.classList.add("show");
+  m.querySelector(".modal-title").textContent = s.name + " · 运行日志";
+  m.querySelector(".modal-path").textContent = "";
+  document.getElementById("logContent").textContent = "加载中…";
+  const pre = document.getElementById("logContent");
+  pre.onscroll = () => {
+    const nearBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 60;
+    logStick = nearBottom;
+  };
+  pollLog(s.id);
+  clearInterval(logTimer);
+  logTimer = setInterval(() => pollLog(s.id), 2000);
+}
+
+function closeLog() {
+  clearInterval(logTimer);
+  logTimer = null;
+  document.getElementById("logModal").classList.remove("show");
+}
+
+async function pollLog(id) {
+  const m = document.getElementById("logModal");
+  const pre = document.getElementById("logContent");
+  try {
+    const r = await fetch("/api/log?service=" + encodeURIComponent(id) + "&lines=500", { cache: "no-store" });
+    const d = await r.json();
+    if (!d.ok) return;
+    m.querySelector(".modal-path").textContent = d.path || "";
+    m.querySelector(".modal-head .dot").classList.toggle("on", !!d.running);
+    const text = d.content || (d.hint || "（暂无输出）");
+    if (pre.textContent !== text) {
+      const wasStuck = logStick;
+      pre.textContent = text;
+      if (wasStuck) pre.scrollTop = pre.scrollHeight;
+    }
+  } catch (e) { /* 后端暂不可达，保持现状 */ }
+}
+
+document.getElementById("logClose").onclick = closeLog;
+document.getElementById("logModal").addEventListener("click", (e) => {
+  if (e.target === document.getElementById("logModal")) closeLog();
+});
+
+/* ---- 配置编辑 ---- */
+let cfgServices = null;
+let cfgSid = null;
+
+async function loadConfigDefs() {
+  if (!cfgServices) {
+    const d = await (await fetch("/api/config", { cache: "no-store" })).json();
+    cfgServices = d.services;
+  }
+  return cfgServices;
+}
+
+async function openConfig(s) {
+  const defs = await loadConfigDefs();
+  const def = defs.find(x => x.id === s.id);
+  if (!def) return;
+  cfgSid = s.id;
+  document.getElementById("cfgModal").classList.add("show");
+  document.getElementById("cfgModal").querySelector(".modal-title").textContent = def.name + " · 配置";
+  document.getElementById("cfgInterpreter").value = def.interpreter || "";
+  document.getElementById("cfgArgs").value = JSON.stringify(def.args || []);
+  document.getElementById("cfgPorts").value = (def.ports || []).join(", ");
+  document.getElementById("cfgCwd").value = def.cwd || "";
+  document.getElementById("cfgEnv").value = JSON.stringify(def.env || {}, null, 2);
+}
+
+function closeCfg() {
+  document.getElementById("cfgModal").classList.remove("show");
+}
+
+function collectCfgFields() {
+  const fields = {};
+  fields.interpreter = document.getElementById("cfgInterpreter").value.trim();
+  try {
+    fields.args = JSON.parse(document.getElementById("cfgArgs").value || "[]");
+    if (!Array.isArray(fields.args)) throw new Error("not array");
+  } catch (e) { toast("✗ args 必须是 JSON 数组"); return null; }
+  fields.ports = document.getElementById("cfgPorts").value.split(",")
+    .map(x => x.trim()).filter(Boolean).map(Number);
+  fields.cwd = document.getElementById("cfgCwd").value.trim();
+  try {
+    fields.env = JSON.parse(document.getElementById("cfgEnv").value || "{}");
+    if (typeof fields.env !== "object" || Array.isArray(fields.env) || fields.env === null) throw new Error("not obj");
+  } catch (e) { toast("✗ env 必须是 JSON 对象"); return null; }
+  return fields;
+}
+
+async function saveCfg() {
+  const fields = collectCfgFields();
+  if (!fields) return;
+  const tk = getToken();
+  if (tk === null) return;
+  const r = await fetch("/api/config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-DevConsole-Token": tk },
+    body: JSON.stringify({ service: cfgSid, fields }),
+  });
+  const d = await r.json().catch(() => ({}));
+  toast((d.ok ? "✓ " : "✗ ") + (d.message || r.status));
+  cfgServices = null;
+  closeCfg();
+  refresh();
+}
+
+async function resetCfg() {
+  const tk = getToken();
+  if (tk === null) return;
+  if (!confirm("恢复该服务的默认配置？")) return;
+  const r = await fetch("/api/config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-DevConsole-Token": tk },
+    body: JSON.stringify({ service: cfgSid, reset: true }),
+  });
+  const d = await r.json().catch(() => ({}));
+  toast((d.ok ? "✓ " : "✗ ") + (d.message || r.status));
+  cfgServices = null;
+  closeCfg();
+  refresh();
+}
+
+document.getElementById("cfgClose").onclick = closeCfg;
+document.getElementById("cfgSave").onclick = saveCfg;
+document.getElementById("cfgReset").onclick = resetCfg;
+document.getElementById("cfgModal").addEventListener("click", (e) => {
+  if (e.target === document.getElementById("cfgModal")) closeCfg();
+});
 
 async function refresh() {
   try {

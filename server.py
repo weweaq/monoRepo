@@ -14,9 +14,13 @@ import threading
 import time
 from datetime import datetime, timezone, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs
 
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+OVERRIDE_PATH = os.path.join(SCRIPT_DIR, "services.local.json")
+EDITABLE_FIELDS = ("interpreter", "args", "cwd", "env", "ports")
 
 RUN_DIR = None  # current run's log directory, set in main()
 
@@ -42,7 +46,7 @@ def get_processes():
     """Return (pid, cmdline) list, using a short-lived cache to avoid spawning PowerShell per call."""
     global PROC_CACHE, PROC_CACHE_TS
     now = time.monotonic()
-    if PROC_CACHE is not None and (now - PROC_CACHE_TS) < 5.0:
+    if PROC_CACHE is not None and (now - PROC_CACHE_TS) < 10.0:
         return PROC_CACHE
     PROC_CACHE = list_processes()
     PROC_CACHE_TS = now
@@ -55,6 +59,26 @@ def service_log_file(service_id):
         return None
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(service_id))
     return os.path.join(RUN_DIR, "services", safe + ".log")
+
+
+def tail_file(path, n=500):
+    """Return the last up-to-n lines of a UTF-8 text file (binary tail read, no full load)."""
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            block = 8192
+            pos = size
+            data = b""
+            while pos > 0 and data.count(b"\n") <= n:
+                take = min(block, pos)
+                pos -= take
+                f.seek(pos)
+                data = f.read(take) + data
+        text = data.decode("utf-8", errors="replace")
+        return text.splitlines()[-n:]
+    except OSError:
+        return None
 
 
 def now_cst():
@@ -104,9 +128,60 @@ class JsonlLogger:
 
 
 def load_config():
-    path = os.path.join(SCRIPT_DIR, "services.json")
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    """Load services.json and overlay user edits from services.local.json.
+
+    The local file is gitignored and holds only the fields the user edited
+    (interpreter/args/cwd/env/ports), so services.json stays the template and
+    '恢复默认' simply drops the override.
+    """
+    with open(os.path.join(SCRIPT_DIR, "services.json"), "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+    overrides = {}
+    if os.path.isfile(OVERRIDE_PATH):
+        try:
+            with open(OVERRIDE_PATH, "r", encoding="utf-8") as f:
+                overrides = json.load(f) or {}
+        except Exception:
+            overrides = {}
+    for s in cfg.get("services", []):
+        ov = overrides.get(s.get("id"))
+        if isinstance(ov, dict):
+            for k in EDITABLE_FIELDS:
+                if k in ov:
+                    s[k] = ov[k]
+    return cfg
+
+
+def save_service_override(sid, fields, reset=False):
+    """Persist a service's edited fields to services.local.json (or remove them)."""
+    overrides = {}
+    if os.path.isfile(OVERRIDE_PATH):
+        try:
+            with open(OVERRIDE_PATH, "r", encoding="utf-8") as f:
+                overrides = json.load(f) or {}
+        except Exception:
+            overrides = {}
+    if reset or not fields:
+        overrides.pop(sid, None)
+    else:
+        patch = {k: v for k, v in fields.items() if k in EDITABLE_FIELDS}
+        if patch:
+            overrides[sid] = patch
+        else:
+            overrides.pop(sid, None)
+    with open(OVERRIDE_PATH, "w", encoding="utf-8") as f:
+        json.dump(overrides, f, ensure_ascii=False, indent=2)
+
+
+def sync_port_args(args, old_port, new_port):
+    """If args contain '--port <old_port>', rewrite the value to new_port."""
+    if str(old_port) == str(new_port):
+        return args
+    out = list(args)
+    for i, a in enumerate(out):
+        if a == "--port" and i + 1 < len(out) and str(out[i + 1]) == str(old_port):
+            out[i + 1] = str(new_port)
+    return out
 
 
 def list_processes():
@@ -303,6 +378,14 @@ def stop_service(service):
     return True, "stopped %d process(es)" % killed
 
 
+class SingleInstanceHTTPServer(ThreadingHTTPServer):
+    # http.server.HTTPServer sets allow_reuse_address = 1; on Windows that lets a
+    # SECOND instance bind the same port and silently shadow the first (both serve,
+    # requests race between them, logs split). Force it off so the OSError guard in
+    # _main() actually fires and a duplicate launch exits cleanly.
+    allow_reuse_address = False
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "dev-console/1.0"
 
@@ -341,6 +424,12 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/status":
             self._serve_status()
             return
+        if self.path.startswith("/api/log"):
+            self._serve_log()
+            return
+        if self.path == "/api/config":
+            self._serve_config()
+            return
         self._send_json(404, {"ok": False, "message": "not found"})
 
     def _serve_index(self):
@@ -371,13 +460,85 @@ class Handler(BaseHTTPRequestHandler):
             })
         self._send_json(200, {"services": services})
 
+    def _serve_log(self):
+        q = parse_qs(urlparse(self.path).query)
+        sid = (q.get("service") or [""])[0]
+        try:
+            lines = max(1, min(2000, int((q.get("lines") or ["500"])[0])))
+        except ValueError:
+            lines = 500
+        service = next((s for s in CONFIG.get("services", []) if s.get("id") == sid), None)
+        if not service:
+            self._send_json(404, {"ok": False, "message": "unknown service"})
+            return
+        path = service_log_file(sid)
+        running = len(detect_pids(service)) > 0
+        if not path or not os.path.isfile(path):
+            self._send_json(200, {
+                "ok": True, "service": sid, "running": running, "path": path or "",
+                "content": "", "hint": "暂无日志文件（服务未启动或从未输出）",
+            })
+            return
+        tail = tail_file(path, lines)
+        if tail is None:
+            self._send_json(200, {
+                "ok": True, "service": sid, "running": running, "path": path,
+                "content": "", "hint": "日志文件不可读",
+            })
+            return
+        self._send_json(200, {
+            "ok": True, "service": sid, "running": running, "path": path,
+            "content": "\n".join(tail) if tail else "", "hint": "",
+        })
+
+    def _serve_config(self):
+        """Full merged service definitions (template + local overrides) for the editor."""
+        services = []
+        for s in CONFIG.get("services", []):
+            services.append({
+                "id": s.get("id"),
+                "name": s.get("name"),
+                "notes": s.get("notes", ""),
+                "interpreter": s.get("interpreter", ""),
+                "args": s.get("args", []),
+                "cwd": s.get("cwd", ""),
+                "env": s.get("env", {}),
+                "ports": s.get("ports", []),
+            })
+        self._send_json(200, {"services": services})
+
+    def _save_config(self):
+        global CONFIG
+        body = self._read_body()
+        sid = body.get("service")
+        fields = body.get("fields") or {}
+        reset = bool(body.get("reset"))
+        service = next((s for s in CONFIG.get("services", []) if s.get("id") == sid), None)
+        if not service:
+            self._send_json(404, {"ok": False, "message": "unknown service"})
+            return
+        # Editing the port should also rewrite '--port <old>' inside args.
+        if isinstance(fields.get("ports"), list) and fields["ports"]:
+            old = (service.get("ports") or [None])[0]
+            new = fields["ports"][0]
+            if old is not None and str(old) != str(new):
+                args = list(fields.get("args", service.get("args", [])))
+                fields["args"] = sync_port_args(args, old, new)
+        save_service_override(sid, fields, reset=reset)
+        CONFIG = load_config()
+        logger.log("INFO", "config saved", context={"service": sid, "reset": reset})
+        self._send_json(200, {"ok": True, "message": "已保存（重启服务后生效）"})
+
     def do_POST(self):
-        if self.path not in ("/api/start", "/api/stop"):
+        if self.path not in ("/api/start", "/api/stop", "/api/config"):
             self._send_json(404, {"ok": False, "message": "not found"})
             return
         if not self._token_ok():
             logger.log("WARNING", "unauthorized attempt", context={"path": self.path, "remote": self.client_address[0]})
             self._send_json(401, {"ok": False, "message": "unauthorized"})
+            return
+        if self.path == "/api/config":
+            self._save_config()
             return
         body = self._read_body()
         sid = body.get("service")
@@ -392,7 +553,34 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(200, {"ok": ok, "message": msg})
 
 
+def startup_error_log_path():
+    """Errors that happen under pythonw.exe are invisible (no console); write them to a file."""
+    return os.path.join(SCRIPT_DIR, CONFIG.get("log_dir", "logs"), "startup-error.log")
+
+
 def main():
+    global CONFIG, logger
+    try:
+        _main()
+    except Exception:
+        # pythonw has no console, so an unhandled traceback would vanish.
+        # Persist it so double-clicking start.bat can never fail silently.
+        import traceback
+        tb = traceback.format_exc()
+        try:
+            with open(startup_error_log_path(), "a", encoding="utf-8") as f:
+                f.write("\n[%s] dev-console crashed during startup:\n%s\n"
+                        % (now_cst().isoformat(timespec="seconds"), tb))
+        except Exception:
+            pass
+        try:
+            logger.log("ERROR", "startup crashed", error_type="startup")
+        except Exception:
+            pass
+        raise
+
+
+def _main():
     global CONFIG, logger
     CONFIG = load_config()
     log_dir = os.path.join(SCRIPT_DIR, CONFIG.get("log_dir", "logs"))
@@ -425,7 +613,20 @@ def main():
     logger.log("INFO", "dev-console starting",
                context={"bind": "%s:%d" % (bind_host, bind_port), "services": len(CONFIG.get("services", []))})
 
-    server = ThreadingHTTPServer((bind_host, bind_port), Handler)
+    try:
+        server = SingleInstanceHTTPServer((bind_host, bind_port), Handler)
+    except OSError as e:
+        # Single-instance guard: a second launch (double-click start.bat again)
+        # must exit quietly instead of lingering as an invisible zombie.
+        msg = "bind %s:%d failed: %s (another dev-console instance already running?)" % (
+            bind_host, bind_port, e)
+        logger.log("ERROR", "bind failed", context={"bind": "%s:%d" % (bind_host, bind_port), "error": str(e)})
+        try:
+            with open(startup_error_log_path(), "a", encoding="utf-8") as f:
+                f.write("\n[%s] %s\n" % (now_cst().isoformat(timespec="seconds"), msg))
+        except Exception:
+            pass
+        return
     logger.log("INFO", "listening", context={"bind": "%s:%d" % (bind_host, bind_port)})
     try:
         server.serve_forever()
