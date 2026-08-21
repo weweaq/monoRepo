@@ -336,14 +336,14 @@ class Handler(BaseHTTPRequestHandler):
         procs = get_processes()
         for s in CONFIG.get("services", []):
             pids = detect_pids(s, procs)
-        services.append({
-            "id": s.get("id"),
-            "name": s.get("name"),
-            "running": len(pids) > 0,
-            "pid": pids[0] if pids else None,
-            "ports": s.get("ports", []),
-            "log": service_log_file(s.get("id", "")) or "",
-        })
+            services.append({
+                "id": s.get("id"),
+                "name": s.get("name"),
+                "running": len(pids) > 0,
+                "pid": pids[0] if pids else None,
+                "ports": s.get("ports", []),
+                "log": service_log_file(s.get("id", "")) or "",
+            })
         self._send_json(200, {"services": services})
 
     def do_POST(self):
