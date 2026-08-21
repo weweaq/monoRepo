@@ -23,6 +23,20 @@ RUN_DIR = None  # current run's log directory, set in main()
 PROC_CACHE = None
 PROC_CACHE_TS = 0.0
 
+# The server runs under pythonw.exe (no console). Any console-subsystem child
+# (powershell.exe, python.exe, cmd.exe) spawned without CREATE_NO_WINDOW would
+# allocate its OWN console window -> black window flash on every status poll /
+# start / stop. Apply this flag to every child we spawn so all helpers run
+# headless. On non-Windows the flag does not exist and is a no-op.
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
+
+def invalidate_process_cache():
+    """Drop the process-list cache so the next status poll re-scans (after start/stop)."""
+    global PROC_CACHE, PROC_CACHE_TS
+    PROC_CACHE = None
+    PROC_CACHE_TS = 0.0
+
 
 def get_processes():
     """Return (pid, cmdline) list, using a short-lived cache to avoid spawning PowerShell per call."""
@@ -103,6 +117,7 @@ def list_processes():
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps],
             capture_output=True, text=True, timeout=10, encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
         )
     except Exception as e:
         logger.log("ERROR", "list_processes failed", error_type=type(e).__name__,
@@ -176,6 +191,7 @@ def _free_service_ports(service):
         out = subprocess.run(
             ["powershell", "-NoProfile", "-Command", ps],
             capture_output=True, text=True, timeout=10, encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
         )
     except Exception as e:
         logger.log("WARNING", "free ports failed", error_type=type(e).__name__,
@@ -192,6 +208,7 @@ def _free_service_ports(service):
                 ["powershell", "-NoProfile", "-Command",
                  "Stop-Process -Id %d -Force -ErrorAction SilentlyContinue" % pid],
                 capture_output=True, text=True, timeout=10,
+                creationflags=CREATE_NO_WINDOW,
             )
             killed += 1
         except Exception:
@@ -236,6 +253,7 @@ def start_service(service):
             stdout=stdout_fh, stderr=stderr_fh,
         )
         logger.log("INFO", "start issued", context={"service": sid, "cmd": " ".join(cmd), "pid": proc.pid})
+        invalidate_process_cache()  # drop stale status cache so the next poll sees the new process
     except OSError as e:
         if stdout_fh:
             stdout_fh.close()
@@ -274,12 +292,14 @@ def stop_service(service):
                 ["powershell", "-NoProfile", "-Command",
                  "Stop-Process -Id %d -Force -ErrorAction SilentlyContinue" % pid],
                 capture_output=True, text=True, timeout=15,
+                creationflags=CREATE_NO_WINDOW,
             )
             killed += 1
         except Exception as e:
             logger.log("ERROR", "stop pid failed", error_type=type(e).__name__,
                        context={"pid": pid, "error": str(e)})
     logger.log("INFO", "stop issued", context={"service": service.get("id"), "killed": killed})
+    invalidate_process_cache()  # status poll right after stop must re-scan, not reuse the pre-kill list
     return True, "stopped %d process(es)" % killed
 
 
