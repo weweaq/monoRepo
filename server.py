@@ -224,7 +224,12 @@ def start_service(service):
                    context={"service": sid, "error": str(e)})
     # Clear any zombie still holding the port from a previous crash, so bind won't fail.
     _free_service_ports(service)
-    creationflags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    # DETACHED_PROCESS avoids inheriting the parent console, but console-subsystem
+    # interpreters (python.exe, opencode.cmd -> cmd.exe) still allocate their OWN
+    # window. CREATE_NO_WINDOW suppresses that so every service runs headless.
+    creationflags = (getattr(subprocess, "DETACHED_PROCESS", 0)
+                     | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                     | getattr(subprocess, "CREATE_NO_WINDOW", 0))
     try:
         proc = subprocess.Popen(
             cmd, cwd=cwd, env=env, creationflags=creationflags,
