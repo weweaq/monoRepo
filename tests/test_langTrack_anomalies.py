@@ -578,3 +578,63 @@ class TestApplyLabelsV2Rows:
         conn.close()
         assert n == 1
         assert rows == {"dev1": "公司", "dev2": "家"}
+
+
+# ---------------------------------------------------------------------------
+# Task 12：off_schedule 跨天 stay 口径（覆盖日分组）
+# ---------------------------------------------------------------------------
+
+class TestOffScheduleCrossDay:
+    def test_v1_cross_day_work_stay_covers_next_noon(self, tmp_path, anomaly_env):
+        """跨天公司 stay（起始日 08-17，覆盖 08-18 正午）不得在 08-18 误报缺席。
+
+        旧口径按 stays.day（起始日）分组：08-18 组只有当晚家中停留，
+        正午查不到公司 → 误报 off_schedule，与 fact_card 时间线
+        （窗口裁剪后显示"公司 00:00-16:25"）自相矛盾。
+        """
+        path = tmp_path / "lt.db"
+        _v1_db(path)
+        # 08-17（周一）20:00 起的公司停留，跨午夜至 08-18 16:00（覆盖 08-18 正午）
+        _add_stay(path, "dev1", "2026-08-17", 20, 0, 1200, *WORK, WORK_GK)
+        # 08-18 当天确有其他停留（家中 20:00-21:00），保证"当天有停驻"前提成立
+        _add_stay(path, "dev1", "2026-08-18", 20, 0, 60, *HOME, HOME_GK)
+
+        conn = sqlite3.connect(path)
+        etl.detect_anomalies(conn)
+        conn.close()
+
+        rows = [r for r in _kinds(path) if r[1] == "off_schedule" and r[2] == "dev1"]
+        assert rows == [("2026-08-17", "off_schedule", "dev1")]
+
+    def test_v2_cross_day_work_stay_covers_next_noon(self, v2_db, anomaly_env):
+        """v2 同口径：place_id 指向公司的跨天 stay 覆盖次日正午 → 不误报。"""
+        conn = sqlite3.connect(v2_db)
+        work_pid = conn.execute(
+            "SELECT place_id FROM places WHERE device_id='dev1' AND label='公司'"
+        ).fetchone()[0]
+        home_pid = conn.execute(
+            "SELECT place_id FROM places WHERE device_id='dev1' AND label='家'"
+        ).fetchone()[0]
+        start = _ts("2026-08-17", 20, 0)
+        end = _ts("2026-08-18", 16, 0)
+        conn.execute(
+            "INSERT INTO stays(device_id, start_ts, end_ts, duration_ms, center_lat, "
+            "center_lon, min_lat, min_lon, max_lat, max_lon, n_points, radius_m, "
+            "grid_key, place_id, day) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("dev1", start, end, end - start, *WORK, *WORK, *WORK, 3, 10.0, WORK_GK,
+             work_pid, "2026-08-17"),
+        )
+        h0 = _ts("2026-08-18", 20, 0)
+        conn.execute(
+            "INSERT INTO stays(device_id, start_ts, end_ts, duration_ms, center_lat, "
+            "center_lon, min_lat, min_lon, max_lat, max_lon, n_points, radius_m, "
+            "grid_key, place_id, day) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("dev1", h0, h0 + 3600000, 3600000, *HOME, *HOME, *HOME, 3, 10.0, HOME_GK,
+             home_pid, "2026-08-18"),
+        )
+        conn.commit()
+        etl.detect_anomalies(conn)
+        conn.close()
+
+        rows = [r for r in _kinds(v2_db) if r[1] == "off_schedule" and r[2] == "dev1"]
+        assert ("2026-08-18", "off_schedule", "dev1") not in rows

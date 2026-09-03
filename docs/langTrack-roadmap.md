@@ -2304,3 +2304,23 @@ Task 11：三份文档同步 + 真实库**备份后**全量 ETL（v1 + v2 shadow
 ### 遗留
 - A3（人工抽 20 个 stay 核对起止时间）与 A10（有用性访谈）待用户人工执行。
 - report"白天主要在公司（11小时25分）"与 fact_card"停留累计 公司 16.4h"是"白天时段裁剪"与"当日裁剪"两种口径（文案已分别写明"白天"/"停留累计"），是否统一待定。
+
+## 2026-09-04：位置智能增强 Task 12（off_schedule 跨天 stay 口径修正）
+
+### 背景
+计划外追加任务（用户指派"task12"）：09-03 页面同页矛盾——fact_card 时间线显示"公司 00:00-16:25"（跨天 stay 窗口裁剪），而异常表同日报"工作日白天未到公司（正午 13:00 无公司停留）"。根因：`_group_stays_by_day` 按 `stays.day`（起始日）分组，跨天 stay 只出现在起始日组，后续天正午检查查不到它；而 off_schedule 的正午判定本身已是时间相交（`s[0] <= noon <= s[1]`），喂料分组口径错了。
+
+### 改动
+1. **TDD**：`tests/test_langTrack_anomalies.py` 新增 `TestOffScheduleCrossDay` 两用例（v1 grid_key / v2 place_id）：08-17 20:00 起跨午夜至 08-18 16:00 的公司 stay + 08-18 当晚家中停留 → 断言 08-18 不报 off_schedule、08-17 照报。修复前两用例均失败（复现 bug）。
+2. **修复**：`etl.py _group_stays_by_day` 改为按覆盖日分组——每个 stay 计入其覆盖的每个 CST 自然日（半开区间 [当日 00:00, 次日 00:00)，按毫秒边界判定，禁止零宽挂靠）；唯一调用方即 off_schedule 检查，无其他消费者受影响。`detect_anomalies` docstring 同步。
+
+### 验证
+- 新增 2 用例 + 受影响面回归（anomalies/etl_location/fact_card/report_evidence/persona/dashboard/migration/spatial_profile/tools）：**189 passed**。
+- 真实库 ETL 重跑：09-03 off_schedule **消失**（矛盾消除，与时间线一致）；09-01 off_schedule 保留（当天定位点 16:39 才开始，正午确无公司停留，语义正确）；anomalies 总数 7。
+- ruff：etl.py + anomalies 测试与基线逐项一致（12 条全存量，零新增）。
+
+### 口径说明（有意为之，非缺陷）
+09-01→09-03 的跨天 stay 由 4 个稀疏点构成，覆盖日分组后 09-02（全天零定位点）正午也视为"在公司"——这是 stay 构建器"静默桥接"语义的自然推论，异常检测须与事实表一致；稀疏点上报导致的长 stay 虚连续是独立问题，待客户端上报量恢复后再评估（关联待办：weiCheckApp 定位稀疏排查）。
+
+### 待办更新
+- [x] Task 12：off_schedule 跨天 stay 口径修正（覆盖日分组，2+189 用例通过，真实库验证）。

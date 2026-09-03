@@ -1268,7 +1268,8 @@ def detect_anomalies(conn: sqlite3.Connection, lookback_days: int = 7) -> int:
                      且非已确认家/公司（如新出现的医院、商场、陌生住宅区）。
     - late_night_out 深夜/凌晨在外：停驻点开始时间落在夜间窗口且不在本设备的家。
     - off_schedule   工作日白天缺席公司：当天有停驻但 13:00 无公司停留
-                     （按 (day, device_id) 分组评估，设备互不合并）。
+                     （按覆盖日 × device_id 分组评估——跨天 stay 计入其覆盖的
+                     每个自然日，Task 12；设备互不合并）。
 
     v1/v2 双读（Task 5c，显式 device_id/place_id）：家/公司集合按
     (device_id, 地点键) 匹配——v1 键为 grid_key，v2（user_version>=2）键为
@@ -1511,7 +1512,11 @@ def detect_route_changes(conn: sqlite3.Connection) -> int:
 
 
 def _group_stays_by_day(conn: sqlite3.Connection) -> list[tuple[str, str, list[tuple]]]:
-    """按 (day, device_id) 分组停驻点（Task 5c 设备隔离：设备互不合并）。
+    """按覆盖日（时间相交）+ device_id 分组停驻点（Task 5c 设备隔离：设备互不合并）。
+
+    跨天 stay 出现在其覆盖的每个 CST 自然日（半开区间 [当日 00:00, 次日 00:00)），
+    而非仅 stays.day 记录的起始日——否则 off_schedule 在后续天查正午时会漏掉
+    跨天 stay，与 fact_card 时间线的窗口裁剪口径自相矛盾（Task 12）。
 
     返回 [(day, device_id, [(start_ts, end_ts, grid_key, place_id), ...])]；
     v1 stays 无 place_id 列时以 NULL 占位，条目结构两版本一致。
@@ -1523,9 +1528,17 @@ def _group_stays_by_day(conn: sqlite3.Connection) -> list[tuple[str, str, list[t
     for r in conn.execute(
         f"SELECT day, device_id, start_ts, end_ts, grid_key, {pid_sel} FROM stays"
     ):
-        by_key[(r["day"], r["device_id"])].append(
-            (r["start_ts"], r["end_ts"], r["grid_key"], r["place_id"])
+        entry = (r["start_ts"], r["end_ts"], r["grid_key"], r["place_id"])
+        day0 = datetime.datetime.fromtimestamp(r["start_ts"] / 1000, tz=_TZ_CST).replace(
+            hour=0, minute=0, second=0, microsecond=0
         )
+        while True:
+            day_start_ms = int(day0.timestamp() * 1000)
+            if r["end_ts"] <= day_start_ms:
+                break
+            if r["start_ts"] < day_start_ms + 86400000:
+                by_key[(day0.date().isoformat(), r["device_id"])].append(entry)
+            day0 += datetime.timedelta(days=1)
     return [(day, dev, stays) for (day, dev), stays in sorted(by_key.items())]
 
 
