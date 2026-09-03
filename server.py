@@ -300,24 +300,17 @@ def _kill_pids_force(pids):
     return [p for p in pids if p in alive]
 
 
-def _free_service_ports(service):
-    """Free the service's declared ports before start by killing ANY occupier.
+def _declared_port_holders(service):
+    """Return (occupied_ports, holder_pids) for the service's declared ports.
 
-    A cheap pure-Python connect probe decides whether a port is actually occupied;
-    the heavier PowerShell call only runs when something is listening. Project
-    policy ("dev-console 拥有最高权力"): every holder is force-killed, whether it is
-    our own crash zombie (command line matches THIS service's match patterns) or a
-    foreign occupier — both are logged with PID + command line for audit. Kill
-    failures (elevated holder vs non-elevated console) leave the port occupied and
-    yield a Chinese error string so start_service can fail with an actionable
-    message. Holders missing from the process snapshot are killed too.
-
-    Returns None when ports are free (or cleaned), or the error string.
+    A cheap pure-Python connect probe finds occupied ports; the heavier
+    Get-NetTCPConnection call only runs when something is listening and maps
+    those ports to owning PIDs.
     """
     import socket
     ports = [int(p) for p in service.get("ports", []) if str(p).isdigit()]
     if not ports:
-        return None
+        return [], []
     occupied = []
     for p in ports:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -330,7 +323,7 @@ def _free_service_ports(service):
         finally:
             s.close()
     if not occupied:
-        return None
+        return [], []
     port_list = ",".join(str(p) for p in occupied)
     ps = ("($ports) | ForEach-Object { Get-NetTCPConnection -LocalPort $_ -State Listen "
           "-ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique }")
@@ -342,17 +335,34 @@ def _free_service_ports(service):
             creationflags=CREATE_NO_WINDOW,
         )
     except Exception as e:
-        logger.log("WARNING", "free ports failed", error_type=type(e).__name__,
+        logger.log("WARNING", "port holder scan failed", error_type=type(e).__name__,
                    context={"service": service.get("id"), "error": str(e)})
-        return None
+        return occupied, []
     holders = []
     for tok in (out.stdout or "").split():
         try:
             holders.append(int(tok))
         except ValueError:
             continue
-    if not holders:
+    return occupied, holders
+
+
+def _free_service_ports(service):
+    """Free the service's declared ports before start by killing ANY occupier.
+
+    Project policy ("dev-console 拥有最高权力"): every holder is force-killed,
+    whether it is our own crash zombie (command line matches THIS service's match
+    patterns) or a foreign occupier — both are logged with PID + command line for
+    audit. Kill failures (elevated holder vs non-elevated console) leave the port
+    occupied and yield a Chinese error string so start_service can fail with an
+    actionable message. Holders missing from the process snapshot are killed too.
+
+    Returns None when ports are free (or cleaned), or the error string.
+    """
+    occupied, holders = _declared_port_holders(service)
+    if not occupied or not holders:
         return None
+    port_list = ",".join(str(p) for p in occupied)
     # Classify against a FRESH scan: the 10s-cached snapshot may predate a
     # freshly-started zombie, which would misclassify it as a stranger. The
     # class only decides log wording — policy is to kill both kinds.
@@ -448,26 +458,32 @@ def start_service(service):
 
 
 def stop_service(service):
+    """Kill the service's matched processes AND anything holding its declared ports.
+
+    The cmdline match cannot see elevated processes (their command line is
+    unreadable), which made 'stop' report "no matching process found" for an
+    externally/elevated started service; port-holder cleanup closes that gap and
+    mirrors the start policy: dev-console has the final say over its declared ports.
+    """
+    sid = service.get("id", "unknown")
     procs = list_processes()
     pids = detect_pids(service, procs)
-    if not pids:
-        return False, "no matching process found"
-    killed = 0
-    for pid in pids:
-        try:
-            subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
-                 "Stop-Process -Id %d -Force -ErrorAction SilentlyContinue" % pid],
-                capture_output=True, text=True, timeout=15,
-                creationflags=CREATE_NO_WINDOW,
-            )
-            killed += 1
-        except Exception as e:
-            logger.log("ERROR", "stop pid failed", error_type=type(e).__name__,
-                       context={"pid": pid, "error": str(e)})
-    logger.log("INFO", "stop issued", context={"service": service.get("id"), "killed": killed})
+    _, port_pids = _declared_port_holders(service)
+    targets = list(dict.fromkeys(pids + port_pids))
+    if not targets:
+        return False, "没有可停止的进程：命令行匹配不到本服务，声明端口也没有占用者"
+    survivors = _kill_pids_force(targets)
+    desc_map = dict(procs)
+    logger.log("INFO", "stop issued",
+               context={"service": sid, "matched": pids, "port_holders": port_pids,
+                        "survivors": survivors})
     invalidate_process_cache()  # status poll right after stop must re-scan, not reuse the pre-kill list
-    return True, "stopped %d process(es)" % killed
+    if survivors:
+        sdesc = "; ".join(("PID %d: %s" % (p, (desc_map.get(p) or "<unknown>").strip()[:120])) for p in survivors)
+        return False, ("停止未完成：%d 个进程杀不动（%s）——可能为管理员权限启动的进程；"
+                       "请以管理员身份运行 dev-console，或在管理员终端执行 taskkill /F /PID %s。"
+                       % (len(survivors), sdesc, " /PID ".join(str(p) for p in survivors)))
+    return True, "stopped %d process(es)" % len(targets)
 
 
 def restart_service(service):

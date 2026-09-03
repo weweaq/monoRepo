@@ -42,11 +42,12 @@ dev-console/
 | `save_service_override` | fn | server.py:155 | 写 services.local.json（仅 EDITABLE_FIELDS） |
 | `sync_port_args` | fn | server.py:176 | 改端口时同步重写 args 里的 `--port` |
 | `start_service` | fn | server.py:295 | 单实例守卫 → 启进程 → 1.2s 存活校验 |
-| `stop_service` | fn | server.py:358 | 按 match 子串找 PID → Stop-Process |
+| `stop_service` | fn | server.py:460 | 杀 match 命中的 PID + 声明端口占用者（`_kill_pids_force`）；有杀不动的 survivor 时报 taskkill 提示 |
 | `detect_pids` | fn | server.py:223 | 命令行子串匹配（match 字段），存活判定核心 |
 | `list_processes` | fn | server.py:187 | 单次 powershell 枚举全量进程，带缓存 |
 | `_kill_pids_force` | fn | server.py:268 | 单次 powershell 强杀一批 PID 并在同一调用内校验存活 |
-| `_free_service_ports` | fn | server.py:301 | 启动前强杀所有占用声明端口的进程（含外来占用者；杀不动才拒绝启动） |
+| `_declared_port_holders` | fn | server.py:303 | connect 探测声明端口占用 + Get-NetTCPConnection 映射到 PID |
+| `_free_service_ports` | fn | server.py:350 | 启动前强杀所有占用声明端口的进程（含外来占用者；杀不动才拒绝启动） |
 | `JsonlLogger` | class | server.py:93 | 追加写 JSONL（AI 可解析），带锁 |
 | `now_cst` | fn | server.py:84 | 东八区时间（zoneinfo 优先） |
 
