@@ -2247,3 +2247,60 @@ Task 11：三份文档同步 + 真实库**备份后**全量 ETL（v1 + v2 shadow
 - [x] Task 9：dashboard 关键指标与迁移审查（补录）。
 - [x] Task 10：report/persona 证据边界统一（补录）。
 - [x] Task 11：文档、真实库迁移验证与总回归（本记录）。**未 commit**；未改动/提交任何 daily-report-v2 相关文件（scheduler.py / daily_info_pack.py / schedule.json / test_scheduler.py 等原样保留）。
+
+## 2026-09-04：位置事实 v2 正式激活 + 坐标制配置（I3/I4 落地，09-03 评审触发）
+
+### 背景
+用户评审 dashboard 09-03 数据提出"很多坐标感觉有问题"。诊断确认四件事叠加：
+1. **坐标系 541m 系统性偏移**：设备上报 Android 原始定位（gps/network 均 WGS84），但 `data/location_coord_systems.json` 缺失 → 全部按 `unknown` 原样透传高德 → 逆地理/POI 整体偏移约 541m（家/公司两簇实测同值）。
+2. **visit_count 累加事故仍在发生**：`user_version=0`，Task 11 停在 shadow/prepared，30 分钟周期 ETL 每轮全量 `visit_count+excluded.visit_count`，家=211989 / 公司=179749（全库 location 点仅约 900）。
+3. **幽灵 new_place**：08:57 一个 acc=550m 的 network 点落公司南侧一格（31.972,118.767，距公司中心 290m），偏移编码撞上"南京外国语学校雨花国际学校"，触发虚假 #new_place。
+4. location 上报稀疏（09-03 全天 8 点）放大以上全部问题。
+
+### 改动
+1. **坐标制实证（A/B regeo）**：家坐标 `unknown` 原样 → 雨花台(地铁站)/南京雨花台风景区；按 `wgs84` 转换 → **康盛花园**（住宅小区）。公司 `unknown` → 新华汇；`wgs84` → **润东科创园**。生产代码路径实测，确认该设备 gps/network 均 WGS84。
+2. **新建 `data/location_coord_systems.json`**：`default=unknown`（不猜未知设备）+ 两 device_id（c2b6198c 主键 / 5358c742 重装后别名，同一部手机）period `[0,null)` → `wgs84`。
+3. **回归基线**：12 个 langTrack pytest **273 passed**（需 `--basetemp=temp/pytest-tmp` 绕开 `pytest-of-17734` 陈旧符号链接的 WinError 5）。
+4. **shadow 幂等**：连跑两次，shadow_places/place_cells/stays/trips 四表内容哈希（除审计时间列）完全一致；规模 places=5 / cells=5 / stays=17 / trips=9。
+5. **prepare 重跑**：old=56 matched=11 renamed=3 tag=4→2 issues=2 conflicts=3 geocode invalidated=3。
+6. **备份**：`data/backup/langTrack-pre-v2-activate-20260904_002535.db`（206,974,976 字节）+ place_labels.json / .v2_backup / .v3.pending 三份带时间戳副本。
+7. **激活**：停服（旧 PID 16788）→ `--location-activate` → `user_version=2`、迁移状态 `complete`、六张 `*_v1_backup` 保留、标签文件切 v3（家→`9c7165318d19cdab`、公司→`fe1d9fd8a3c02dba`）→ 重启服务（PID 25832，:8000）。
+8. **全量 ETL（v2 分支）+ 增量 geocode 重编 5 地点**；unmapped_tag×2 经核实为同一住宅 65m 内的重复家锚点，家 tag 经 31.993,118.783 锚点存活，非阻断。
+
+### 验证（实测数字）
+- **places（v2 正式表 5 行）**：家 point_count=373 / visit_count=8（段）/ stay_ms≈77.8h is_primary；公司 343 / 6 / ≈136.4h；马鞍山 钢城花园 20 / 1；森隆英郡 与 外包产业园 point_count=0（stay-only）。**visit_count 语义=停留段数，累加事故终结**（v1 原始现场保留在 *_v1_backup）。
+- **geocode 重编后 POI**：家→康盛花园4期（雨花街道，住宅/楼宇）；公司→润东科创园（铁心桥街道众智路9号）；马鞍山两重复网格合并→钢城花园一村。"雨花台风景区/雨花台(地铁站)"从家地点永久消失。
+- **dashboard 09-03**：坐标制 `wgs84×8` 无黄警告；轨迹=润东科创园〔公司〕→ 康盛花园4期〔家〕；#new_place 学校消失；家停留 23:34-00:00（跨天 stay 按窗口边界裁剪，比旧 23:34-23:49 更真实）。
+- **dashboard 09-04 / 默认页**：无多设备歧义卡（5358c742 已归并）；今日轨迹 康盛花园4期〔家〕 00:00-00:20，00:21 新上报已并入（data_age 6 分钟），v2 管线下实时链路正常。
+- **服务日志**：fact_card 正常构建，`tag_conflict_count=3` 透传，`current_label=康盛花园4期〔家〕`。
+
+### 遗留（非本轮引入，按优先级）
+1. `#off_schedule` 口径：stay 按 start_ts 分天归属（跨天 stay 记在起始日），09-03 正午检查查不到公司 stay → 误报"未到公司"，与轨迹自相矛盾；待 detect_anomalies 按时间相交重算。
+2. **location 上报稀疏**：08-20 146 点/天 → 09-03 8 点/天，客户端（weiCheckApp）后台定位疑似被限制，需查 App 侧。
+3. location_migration_issues 两条 unmapped_tag open（重复锚点，无害）；`apply_accuracy_filter` 仍 False，待 I7 按实测分布由用户确认开启。
+
+### 待办更新
+- [x] v2 正式激活（user_version=2）+ 坐标制 wgs84 配置 + geocode 重编（本记录）。
+- [x] I3 出门标准复核：daily_location_quality 可见、filter 默认关闭、高德入口转换策略一致、activate 后出口冒烟通过。
+- [ ] detect_anomalies 跨天 stay 的 off_schedule 口径修正（时间相交判定）。
+- [ ] weiCheckApp 客户端定位上报稀疏排查（08-23 起 146→8 点/天）。
+- [ ] I7：实测 provider/accuracy 分布后由用户确认是否开启 accuracy filter。
+
+## 2026-09-04：位置智能增强 §7 用户验收（真实库激活后首轮）
+
+### 背景
+计划 §7 明文"任一 P0 项失败不进入下一迭代"。激活完成后对可程序化验收项（1/2/4/5/7/8/9）在真实库执行；3（人工回忆抽样）与 10（有用性访谈）属用户人工项，待用户执行。
+
+### 验收结果（temp/acceptance_check.py，连续两次全量 ETL）
+- **A1 幂等性（P0）PASS**：places(5)/place_cells(5)/stays(17)/trips(9)/SpatialProfile(7758B) 两轮内容哈希（除审计列、按 device_id）完全一致。
+- **A2 人工数据安全（P0）PASS**：家→`9c7165318d19cdab`、公司→`fe1d9fd8a3c02dba`，v3 标签文件归属设备正确，2/2 保留。
+- **A4 地点稳定性 PASS**：重跑后 place_id/成员/显示名零漂移。
+- **A5 商场误报（P0）PASS**：全部 5 地点 `display_granularity=neighborhood`，无低证据 venue 级店名主张。
+- **A7 无 tag 地点可见（P0）PASS**：fact_card places 展示 4 地点，其中 2 个无 tag（马鞍山两处）未被过滤。
+- **A8 证据完整（P0）FAIL→修复→PASS**：`build_evidence` 产出缺 `window_days` 键（10/10 证据节点不完整，dashboard 证据行显示"窗口 - 天"）。修复：`Evidence` TypedDict 与 `build_evidence` 返回值补 `window_days=requested_window_days`（spatial_profile.py，+2 行）。回归 spatial_profile/fact_card/dashboard/tools/report_evidence/persona **127 passed**；ruff 与基线逐项一致（6 条全存量，零新增）。
+- **A9 出口一致性（P0）PASS**：report 09-03 与 fact_card/dashboard 地点名、顺序、tag 一致（康盛花园4期〔家〕/润东科创园〔公司〕，"访问 8 次"= stay 段数语义）；无"现在在/上班/就医"类越证据叙事（Task 10 测试组持续看守）。
+- **A6 实时位置误报（P0）PASS**（冒烟复核）：compact 水位行"今日未完；数据至 00:21，距现在 6 分"，"当前已知"不越过 data_as_of。
+
+### 遗留
+- A3（人工抽 20 个 stay 核对起止时间）与 A10（有用性访谈）待用户人工执行。
+- report"白天主要在公司（11小时25分）"与 fact_card"停留累计 公司 16.4h"是"白天时段裁剪"与"当日裁剪"两种口径（文案已分别写明"白天"/"停留累计"），是否统一待定。

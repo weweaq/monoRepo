@@ -69,6 +69,7 @@ SEGMENTS = (
 class Evidence(TypedDict):
     """指标级数据质量证据；components 全部可复算，conf 由本模块规则计算。"""
 
+    window_days: int  # 指标窗口（§2.9：frequent_places 7/30/90，其余 30）
     requested_window_days: int
     available_window_days: int
     observed_bins: int
@@ -387,6 +388,7 @@ def build_evidence(
     quality_score = min(parse_score, acc_score)
     conf = min(coverage, sample_score, quality_score)
     return {
+        "window_days": requested_window_days,
         "requested_window_days": requested_window_days,
         "available_window_days": available_days,
         "observed_bins": daily_agg["observed_bins"],

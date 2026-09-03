@@ -1,0 +1,7 @@
+{
+  "default": "unknown",
+  "periods": [
+    {"device_id": "c2b6198c-e879-4bad-aee7-98d227dc9852", "start_ts": 0, "end_ts": null, "source": "wgs84"},
+    {"device_id": "5358c742-298c-4b7c-88e5-566e4e9800a0", "start_ts": 0, "end_ts": null, "source": "wgs84"}
+  ]
+}

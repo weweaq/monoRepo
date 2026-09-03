@@ -490,11 +490,13 @@ flowchart TD
 
 | 坐标系 | 用途 |
 |---|---|
-| WGS84 | 客户端 GPS 原始上报（网络定位多数已带国内偏移，标 `unknown` 原样放行） |
+| WGS84 | 客户端原始上报（2026-09-04 A/B regeo 实证：本设备 gps/network provider 均为 WGS84，已按设备声明于 `data/location_coord_systems.json`） |
 | GCJ02 | 高德系（regeo / 路径规划 / POI）唯一可接受坐标系；`trips.polyline` 落库即 GCJ02 |
-| unknown | 无法判定的定位，`to_amap_coord` 原样透传 |
+| unknown | 未在配置中声明的设备，`to_amap_coord` 原样透传并触发 dashboard 黄警告 |
 
 **边界约定**：所有高德外呼入口必须经 `to_amap_coord(lat, lon, coord_system)`（`location_facts.py:793-818`）——`unknown` 原样放行、WGS84 走 `wgs84_to_gcj02` 近似转换（`location_facts.py:778`），**禁止任何出口自行再转一次**；落库坐标以实测为主原样保存，避免双重偏移。
+
+**v2 激活状态**：2026-09-04 00:26 起生产库 `user_version=2`（location_migration_state status=complete），v1 六表冻结为 `*_v1_backup`；坐标制实测依据与激活数字见 roadmap 2026-09-04 记录。
 
 ---
 
@@ -505,7 +507,8 @@ flowchart TD
 | 高德 Key | `.env`（字节查找读取，容错混合编码，踩坑 #3） | regeo / 路径规划(walking 默认，`LANGTRACK_ROUTE_MODE` 可切 driving) / around POI |
 | `LANGTRACK_ETL_INTERVAL_SECONDS` | env | 周期 ETL 间隔，默认 1800s |
 | `LANGTRACK_ETL_TIMEOUT_SECONDS` | env | 单次 ETL 子进程超时，默认 120s |
-| `data/place_labels.json` | 文件 | 人工确认的家/公司标签持久化（ETL 重跑恢复） |
+| `data/place_labels.json` | 文件 | 人工确认的家/公司标签持久化（v3：`(device_id, place_id)` 主键 + anchor_grid_key 追溯；ETL 重跑恢复） |
+| `data/location_coord_systems.json` | 文件 | 设备坐标制声明（`default=unknown` + periods 按设备/历史区间；2026-09-04 起两台 device_id 声明 wgs84；重叠 period 拒绝 ETL） |
 | `data/app_categories.json` | 文件（gitignore） | App 分类映射；缺失时代码内置默认兜底 |
 | `data/profiles/langTrack_profile_<day>.json` | 文件 | report L5 画像快照（含 coverage/persona） |
 
