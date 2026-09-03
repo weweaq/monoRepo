@@ -4,18 +4,22 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Dev Console · 本地服务控制台</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='%233fb950'/%3E%3C/svg%3E" />
 <style>
   :root { --bg:#0f1419; --card:#1a212b; --border:#2a3441; --green:#3fb950; --red:#f85149; --text:#e6edf3; --muted:#8b949e; --accent:#58a6ff; }
   * { box-sizing: border-box; }
   body { margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,Segoe UI,Roboto,"Microsoft YaHei",sans-serif; }
   header { padding:18px 24px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; }
   header h1 { font-size:18px; margin:0; font-weight:600; }
+  header .right { display:flex; align-items:center; gap:10px; }
+  header button { flex:none; width:auto; padding:6px 14px; font-size:12px; }
   header .addr { color:var(--muted); font-size:13px; font-family:ui-monospace,Menlo,Consolas,monospace; }
   main { padding:24px; display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:16px; }
   .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:16px; }
   .card .top { display:flex; align-items:center; gap:10px; }
   .dot { width:10px; height:10px; border-radius:50%; background:var(--red); flex:none; }
   .dot.on { background:var(--green); }
+  .dot.warn { background:#d29922; }
   .card .name { font-weight:600; font-size:15px; }
   .card .meta { color:var(--muted); font-size:12px; margin:10px 0 14px; font-family:ui-monospace,Menlo,Consolas,monospace; min-height:16px; }
   .actions { display:flex; gap:8px; }
@@ -50,7 +54,11 @@
 <body>
 <header>
   <h1>Dev Console · 本地服务控制台</h1>
-  <span class="addr" id="addr">127.0.0.1:8787</span>
+  <div class="right">
+    <button id="startAll">全部启动</button>
+    <button id="stopAll">全部停止</button>
+    <span class="addr" id="addr">127.0.0.1:8787</span>
+  </div>
 </header>
 <div id="banner"></div>
 <main id="grid"></main>
@@ -91,7 +99,8 @@
       </label>
       <div class="cfg-actions">
         <button id="cfgReset">恢复默认</button>
-        <button id="cfgSave" style="flex:2">保存</button>
+        <button id="cfgSaveRestart" style="flex:1.4">保存并重启</button>
+        <button id="cfgSave" style="flex:1.4">保存</button>
       </div>
       <p class="cfg-tip">保存即写入 services.local.json（不影响 services.json 模板）。已运行的服务需重启才生效；修改端口会自动同步 args 中的 --port。</p>
     </div>
@@ -134,9 +143,9 @@ async function apiStatus() {
   return r.json();
 }
 
-async function apiAction(path, id) {
+async function postAction(path, id) {
   const tk = getToken();
-  if (tk === null) return;
+  if (tk === null) return { aborted: true };
   const r = await fetch(path, {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-DevConsole-Token": tk },
@@ -148,59 +157,110 @@ async function apiAction(path, id) {
     token = "";
     localStorage.removeItem(TOKEN_KEY);
     banner("err", "Token 错误，请重试");
+    return { unauthorized: true };
+  }
+  return { ok: !!data.ok, message: data.message || String(r.status) };
+}
+
+function svcById(id) {
+  return (currentList || []).find(x => x.id === id) || { id: id, name: id };
+}
+
+async function apiAction(path, id, opts) {
+  opts = opts || {};
+  let res;
+  try {
+    res = await postAction(path, id);
+  } catch (e) {
+    toast("✗ 请求失败：" + (e && e.message ? e.message : "网络错误"));
     return;
   }
-  toast((data.ok ? "✓ " : "✗ ") + (data.message || r.status));
+  if (!res || res.aborted || res.unauthorized) return;
+  if (!res.ok) {
+    // 始终展示后端原始消息——外来占口的拒绝原因（PID+命令行）必须可读；
+    // 只有真崩溃（消息含“未存活/日志尾部”）才追加打开日志弹窗，否则会
+    // 用一个无关的空弹窗把可操作信息顶掉。
+    toast("✗ " + res.message);
+    if (opts.autoLog !== false && /未存活|日志尾部/.test(res.message)) {
+      openLog(svcById(id));
+    }
+    return;
+  }
+  toast("✓ " + res.message);
+}
+
+async function runAction(path, id) {
+  busy = true;
+  render(currentList, true);
+  try {
+    await apiAction(path, id);
+  } finally {
+    // finally 保证任何异常（后端瞬断、fetch reject）都不会把按钮永久禁用
+    busy = false;
+    refresh(true);
+  }
 }
 
 let busy = false;
-function render(list) {
+let currentList = [];
+let lastRenderJson = null;
+
+function render(list, force) {
+  currentList = list;
+  const snapshot = JSON.stringify(list);
+  if (!force && snapshot === lastRenderJson) return; // 状态无变化时跳过重建，避免 hover/焦点丢失与点击落空
+  lastRenderJson = snapshot;
   const grid = document.getElementById("grid");
   grid.innerHTML = "";
   list.forEach(s => {
     const card = document.createElement("div");
     card.className = "card";
-    const meta = s.running
-      ? "● 运行中 · PID " + (s.pid ?? "?") + (s.ports && s.ports.length ? " · :" + s.ports.join(", :") : "")
-      : "○ 已停止";
+    const declared = s.ports || [];
+    const opened = s.ports_open || [];
+    const closed = declared.filter(p => !opened.includes(p));
+    let meta, dotCls = "";
+    if (!s.running) {
+      meta = "○ 已停止";
+    } else {
+      dotCls = closed.length ? "warn" : "on";
+      meta = "● 运行中 · PID " + (s.pid ?? "?");
+      meta += closed.length
+        ? " · 端口未就绪 :" + closed.join(", :")
+        : (declared.length ? " · :" + declared.join(", :") : "");
+    }
     card.innerHTML =
-      '<div class="top"><span class="dot ' + (s.running ? "on" : "") + '"></span>' +
+      '<div class="top"><span class="dot ' + dotCls + '"></span>' +
       '<span class="name"></span></div>' +
       '<div class="meta"></div>' +
       '<div class="actions">' +
       '<button class="start">启动</button>' +
+      '<button class="restart">重启</button>' +
       '<button class="stop">停止</button>' +
       '<button class="log">日志</button>' +
       '<button class="cfg">配置</button></div>';
     card.querySelector(".name").textContent = s.name;
     card.querySelector(".meta").textContent = meta;
-    const startBtn = card.querySelector(".start");
-    const stopBtn = card.querySelector(".stop");
-    startBtn.disabled = busy;
-    stopBtn.disabled = busy;
-    startBtn.onclick = async () => {
-      busy = true; render(await safeStatus() || list);
-      await apiAction("/api/start", s.id);
-      busy = false; refresh();
-    };
-    stopBtn.onclick = async () => {
-      busy = true; render(await safeStatus() || list);
-      await apiAction("/api/stop", s.id);
-      busy = false; refresh();
-    };
+    ["start", "restart", "stop"].forEach(cls => { card.querySelector("." + cls).disabled = busy; });
+    startBtnWire(card, s);
     card.querySelector(".log").onclick = () => openLog(s);
     card.querySelector(".cfg").onclick = () => openConfig(s);
     grid.appendChild(card);
   });
 }
 
-async function safeStatus() {
-  try { return (await apiStatus()).services; } catch (e) { return null; }
+function startBtnWire(card, s) {
+  card.querySelector(".start").onclick = () => runAction("/api/start", s.id);
+  card.querySelector(".restart").onclick = () => runAction("/api/restart", s.id);
+  card.querySelector(".stop").onclick = () => {
+    if (!confirm("确定停止「" + s.name + "」？（强制结束进程）")) return;
+    runAction("/api/stop", s.id);
+  };
 }
 
 /* ---- 日志查看 ---- */
 let logTimer = null;
 let logStick = true;  // 用户未主动上翻时保持跟随底部
+const ANSI_RE = /\x1B\[[0-9;]*[A-Za-z]/g;  // 服务端彩色输出会以 [32m 形式裸奔，统一清洗
 
 function openLog(s) {
   const m = document.getElementById("logModal");
@@ -233,7 +293,7 @@ async function pollLog(id) {
     if (!d.ok) return;
     m.querySelector(".modal-path").textContent = d.path || "";
     m.querySelector(".modal-head .dot").classList.toggle("on", !!d.running);
-    const text = d.content || (d.hint || "（暂无输出）");
+    const text = ((d.content || d.hint || "（暂无输出）") + "").replace(ANSI_RE, "");
     if (pre.textContent !== text) {
       const wasStuck = logStick;
       pre.textContent = text;
@@ -294,33 +354,46 @@ function collectCfgFields() {
   return fields;
 }
 
-async function saveCfg() {
+async function saveCfg(andRestart) {
   const fields = collectCfgFields();
   if (!fields) return;
   const tk = getToken();
   if (tk === null) return;
-  const r = await fetch("/api/config", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-DevConsole-Token": tk },
-    body: JSON.stringify({ service: cfgSid, fields }),
-  });
-  const d = await r.json().catch(() => ({}));
+  let r, d;
+  try {
+    r = await fetch("/api/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-DevConsole-Token": tk },
+      body: JSON.stringify({ service: cfgSid, fields }),
+    });
+    d = await r.json().catch(() => ({}));
+  } catch (e) {
+    toast("✗ 保存失败：" + (e && e.message ? e.message : "网络错误"));
+    return;
+  }
   toast((d.ok ? "✓ " : "✗ ") + (d.message || r.status));
   cfgServices = null;
   closeCfg();
-  refresh();
+  if (d.ok && andRestart && cfgSid) runAction("/api/restart", cfgSid);
+  else refresh();
 }
 
 async function resetCfg() {
   const tk = getToken();
   if (tk === null) return;
   if (!confirm("恢复该服务的默认配置？")) return;
-  const r = await fetch("/api/config", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-DevConsole-Token": tk },
-    body: JSON.stringify({ service: cfgSid, reset: true }),
-  });
-  const d = await r.json().catch(() => ({}));
+  let r, d;
+  try {
+    r = await fetch("/api/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-DevConsole-Token": tk },
+      body: JSON.stringify({ service: cfgSid, reset: true }),
+    });
+    d = await r.json().catch(() => ({}));
+  } catch (e) {
+    toast("✗ 重置失败：" + (e && e.message ? e.message : "网络错误"));
+    return;
+  }
   toast((d.ok ? "✓ " : "✗ ") + (d.message || r.status));
   cfgServices = null;
   closeCfg();
@@ -328,24 +401,69 @@ async function resetCfg() {
 }
 
 document.getElementById("cfgClose").onclick = closeCfg;
-document.getElementById("cfgSave").onclick = saveCfg;
+document.getElementById("cfgSave").onclick = () => saveCfg(false);
+document.getElementById("cfgSaveRestart").onclick = () => saveCfg(true);
 document.getElementById("cfgReset").onclick = resetCfg;
 document.getElementById("cfgModal").addEventListener("click", (e) => {
   if (e.target === document.getElementById("cfgModal")) closeCfg();
 });
 
-async function refresh() {
+async function refresh(force) {
   try {
     const data = await apiStatus();
     banner("");
-    render(data.services);
+    render(data.services, force);
   } catch (e) {
     banner("err", "无法连接后端（127.0.0.1:8787 是否未启动？）");
   }
 }
 
+/* ---- 批量启停 ---- */
+async function batch(path, label) {
+  if (busy) return;
+  const list = currentList || [];
+  if (!list.length) return;
+  if (path === "/api/stop" && !confirm("确定停止全部服务？（强制结束进程）")) return;
+  busy = true;
+  render(currentList, true);
+  let okN = 0;
+  const fails = [];
+  let abortReason = "";
+  try {
+    for (let i = 0; i < list.length; i++) {
+      toast(label + " (" + (i + 1) + "/" + list.length + ")…");
+      let res;
+      try {
+        res = await postAction(path, list[i].id);
+      } catch (e) {
+        fails.push(list[i].name + "（网络错误）");
+        continue;
+      }
+      if (!res || res.aborted) { abortReason = "已取消"; break; }
+      if (res.unauthorized) { abortReason = "Token 失效"; break; }
+      if (res.ok) okN++;
+      else fails.push(list[i].name + "（" + res.message + "）");
+    }
+  } finally {
+    busy = false;
+    refresh(true);
+  }
+  const bad = fails.length > 0 || !!abortReason;
+  toast((bad ? "✗ " : "✓ ") + label + "完成：" + okN + "/" + list.length +
+        (abortReason ? "；中断：" + abortReason : "") +
+        (fails.length ? "；失败：" + fails.join("；") : ""));
+}
+
+document.getElementById("startAll").onclick = () => batch("/api/start", "批量启动");
+document.getElementById("stopAll").onclick = () => batch("/api/stop", "批量停止");
+
+/* ---- 全局快捷键 ---- */
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { closeLog(); closeCfg(); }
+});
+
 refresh();
-setInterval(refresh, 5000);
+setInterval(() => refresh(false), 5000);
 </script>
 </body>
 </html>

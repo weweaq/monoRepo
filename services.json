@@ -56,8 +56,8 @@
       "env": {},
       "interpreter": "C:\\Users\\17734\\AppData\\Roaming\\npm\\node_modules\\opencode-ai\\bin\\opencode.exe",
       "args": ["serve", "--hostname", "127.0.0.1", "--port", "4096"],
-      "match": ["opencode"],
-      "notes": "直连 opencode.exe（不再经 opencode.cmd -> cmd.exe 中转）；只读 127.0.0.1；未设密码"
+      "match": ["opencode", "--port 4096"],
+      "notes": "直连 opencode.exe（不再经 opencode.cmd -> cmd.exe 中转）；只读 127.0.0.1；未设密码。match 为 AND 语义：须同时含 opencode 与 --port 4096，避免误伤终端里交互式 opencode 会话"
     },
     {
       "id": "app-apk",

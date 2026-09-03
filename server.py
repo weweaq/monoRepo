@@ -20,7 +20,7 @@ from urllib.parse import urlparse, parse_qs
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
 OVERRIDE_PATH = os.path.join(SCRIPT_DIR, "services.local.json")
-EDITABLE_FIELDS = ("interpreter", "args", "cwd", "env", "ports")
+EDITABLE_FIELDS = ("interpreter", "args", "cwd", "env", "ports", "match")
 
 RUN_DIR = None  # current run's log directory, set in main()
 
@@ -184,6 +184,31 @@ def sync_port_args(args, old_port, new_port):
     return out
 
 
+def sync_port_match(match, old_port, new_port):
+    """Keep '--port <old>' needles inside match[] in step when the port is edited.
+
+    Detection needles may embed a literal port (e.g. opencode's "--port 4096");
+    without this rewrite an AND-match would silently stop matching after a port
+    override. Returns the original list untouched when nothing matches.
+    """
+    if str(old_port) == str(new_port):
+        return match
+    try:
+        old_needle = ("--port %d" % int(old_port)).lower()
+        new_needle = "--port %d" % int(new_port)
+    except (TypeError, ValueError):
+        return match
+    out = []
+    changed = False
+    for m in match:
+        if isinstance(m, str) and m.lower() == old_needle:
+            out.append(new_needle)
+            changed = True
+        else:
+            out.append(m)
+    return out if changed else match
+
+
 def list_processes():
     """Return list of (pid, commandline) for all running processes via a single PowerShell call."""
     ps = ("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
@@ -221,7 +246,12 @@ def list_processes():
 
 
 def detect_pids(service, procs=None):
-    """Return list of PIDs whose command line matches any of service['match'] substrings."""
+    """Return PIDs whose command line contains ALL of service['match'] substrings (case-insensitive).
+
+    Needles are AND-ed, so a service like opencode can use
+    ["opencode", "--port 4096"] to match only its own serve child and never an
+    unrelated process that merely shares one keyword.
+    """
     if procs is None:
         procs = get_processes()
     needles = [m.lower() for m in service.get("match", [])]
@@ -230,21 +260,64 @@ def detect_pids(service, procs=None):
     pids = []
     for pid, cl in procs:
         cll = (cl or "").lower()
-        if any(n in cll for n in needles):
+        if all(n in cll for n in needles):
             pids.append(pid)
     return pids
 
 
-def _free_service_ports(service):
-    """Kill any process still listening on the service's declared ports (zombie from a crash).
+def _kill_pids_force(pids):
+    """Force-kill PIDs in ONE PowerShell call, then verify inside the same call.
 
-    A cheap pure-Python connect probe decides whether a port is actually occupied; the
-    heavier PowerShell call only runs when a zombie is detected, so a clean start stays fast.
+    Returns the subset of PIDs still alive afterwards (kill failed, typically an
+    elevated process + non-elevated console -> access denied).
+    """
+    if not pids:
+        return []
+    ps = ("$ids = @(%s); "
+          "$ids | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }; "
+          "Start-Sleep -Milliseconds 400; "
+          "$alive = @($ids | Where-Object { Get-Process -Id $_ -ErrorAction SilentlyContinue }); "
+          # Where-Object passes through the INPUT ids (not Get-Process objects),
+          # so $alive already IS the survivor id list — join it directly.
+          "if ($alive.Count -gt 0) { $alive -join ',' }"
+          % ",".join(str(p) for p in pids))
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            capture_output=True, text=True, timeout=15, encoding="utf-8", errors="replace",
+            creationflags=CREATE_NO_WINDOW,
+        )
+    except Exception as e:
+        logger.log("WARNING", "kill pids failed", error_type=type(e).__name__,
+                   context={"pids": list(pids), "error": str(e)})
+        return list(pids)
+    alive = set()
+    for tok in (out.stdout or "").replace(",", " ").split():
+        try:
+            alive.add(int(tok))
+        except ValueError:
+            continue
+    return [p for p in pids if p in alive]
+
+
+def _free_service_ports(service):
+    """Free the service's declared ports before start by killing ANY occupier.
+
+    A cheap pure-Python connect probe decides whether a port is actually occupied;
+    the heavier PowerShell call only runs when something is listening. Project
+    policy ("dev-console 拥有最高权力"): every holder is force-killed, whether it is
+    our own crash zombie (command line matches THIS service's match patterns) or a
+    foreign occupier — both are logged with PID + command line for audit. Kill
+    failures (elevated holder vs non-elevated console) leave the port occupied and
+    yield a Chinese error string so start_service can fail with an actionable
+    message. Holders missing from the process snapshot are killed too.
+
+    Returns None when ports are free (or cleaned), or the error string.
     """
     import socket
     ports = [int(p) for p in service.get("ports", []) if str(p).isdigit()]
     if not ports:
-        return
+        return None
     occupied = []
     for p in ports:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -257,7 +330,7 @@ def _free_service_ports(service):
         finally:
             s.close()
     if not occupied:
-        return
+        return None
     port_list = ",".join(str(p) for p in occupied)
     ps = ("($ports) | ForEach-Object { Get-NetTCPConnection -LocalPort $_ -State Listen "
           "-ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique }")
@@ -271,25 +344,40 @@ def _free_service_ports(service):
     except Exception as e:
         logger.log("WARNING", "free ports failed", error_type=type(e).__name__,
                    context={"service": service.get("id"), "error": str(e)})
-        return
-    killed = 0
+        return None
+    holders = []
     for tok in (out.stdout or "").split():
         try:
-            pid = int(tok)
+            holders.append(int(tok))
         except ValueError:
             continue
-        try:
-            subprocess.run(
-                ["powershell", "-NoProfile", "-Command",
-                 "Stop-Process -Id %d -Force -ErrorAction SilentlyContinue" % pid],
-                capture_output=True, text=True, timeout=10,
-                creationflags=CREATE_NO_WINDOW,
-            )
-            killed += 1
-        except Exception:
-            pass
-    if killed:
-        logger.log("INFO", "freed ports", context={"service": service.get("id"), "ports": occupied, "killed": killed})
+    if not holders:
+        return None
+    # Classify against a FRESH scan: the 10s-cached snapshot may predate a
+    # freshly-started zombie, which would misclassify it as a stranger. The
+    # class only decides log wording — policy is to kill both kinds.
+    proc_map = dict(list_processes())
+    zombies, strangers = [], []
+    for pid in holders:
+        cl = proc_map.get(pid) or ""
+        if detect_pids(service, [(pid, cl)]):
+            zombies.append(pid)
+        else:
+            strangers.append((pid, cl))
+    if strangers:
+        desc = "; ".join(("PID %d: %s" % (p, (cl or "<unknown>").strip()[:120])) for p, cl in strangers)
+        logger.log("WARNING", "killing foreign port owner", context={"service": service.get("id"), "ports": occupied, "strangers": desc})
+    survivors = _kill_pids_force(holders)
+    if survivors:
+        sdesc = "; ".join(("PID %d: %s" % (p, (proc_map.get(p) or "<unknown>").strip()[:120])) for p in survivors)
+        logger.log("WARNING", "port holder kill failed", context={"service": service.get("id"), "ports": occupied, "survivors": sdesc})
+        return ("启动取消：端口 %s 被进程占用（%s），自动清理失败——对方可能是管理员权限启动的进程。"
+                "请以管理员身份运行 dev-console，或在管理员终端执行 taskkill /F /PID %s。"
+                % (port_list, sdesc, " /PID ".join(str(p) for p in survivors)))
+    logger.log("INFO", "freed ports",
+               context={"service": service.get("id"), "ports": occupied,
+                        "killed_own_zombie": zombies, "killed_foreign": [p for p, _ in strangers]})
+    return None
 
 
 def start_service(service):
@@ -314,8 +402,12 @@ def start_service(service):
     except Exception as e:
         logger.log("ERROR", "cannot open service log", error_type=type(e).__name__,
                    context={"service": sid, "error": str(e)})
-    # Clear any zombie still holding the port from a previous crash, so bind won't fail.
-    _free_service_ports(service)
+    # Clear declared ports (kill any holder — own zombie or foreign); refuse to
+    # launch only if a holder survived the kill (elevated process).
+    blocked = _free_service_ports(service)
+    if blocked:
+        logger.log("WARNING", "start refused", context={"service": sid, "reason": "port holder could not be cleared"})
+        return False, blocked
     # DETACHED_PROCESS avoids inheriting the parent console, but console-subsystem
     # interpreters (python.exe, opencode.cmd -> cmd.exe) still allocate their OWN
     # window. CREATE_NO_WINDOW suppresses that so every service runs headless.
@@ -376,6 +468,35 @@ def stop_service(service):
     logger.log("INFO", "stop issued", context={"service": service.get("id"), "killed": killed})
     invalidate_process_cache()  # status poll right after stop must re-scan, not reuse the pre-kill list
     return True, "stopped %d process(es)" % killed
+
+
+def restart_service(service):
+    """Stop then start. A 'not running' stop is tolerated (process may be externally started)."""
+    ok_stop, msg_stop = stop_service(service)
+    time.sleep(1.0)  # give Windows a beat to release PIDs/ports before the start guard re-scans
+    ok_start, msg_start = start_service(service)
+    return ok_start, "%s；%s" % (msg_stop, msg_start)
+
+
+def probe_ports(ports, timeout=0.25):
+    """Return the subset of ports that currently accept TCP connections on loopback."""
+    import socket
+    opened = []
+    for p in ports:
+        try:
+            num = int(p)
+        except (TypeError, ValueError):
+            continue
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(timeout)
+        try:
+            s.connect(("127.0.0.1", num))
+            opened.append(num)
+        except OSError:
+            pass
+        finally:
+            s.close()
+    return opened
 
 
 class SingleInstanceHTTPServer(ThreadingHTTPServer):
@@ -450,12 +571,18 @@ class Handler(BaseHTTPRequestHandler):
         procs = get_processes()
         for s in CONFIG.get("services", []):
             pids = detect_pids(s, procs)
+            running = len(pids) > 0
+            declared = s.get("ports", [])
+            # Probe declared ports so the UI can tell "process alive but not
+            # listening" (hung) apart from a genuinely healthy service.
+            opened = probe_ports(declared) if running else []
             services.append({
                 "id": s.get("id"),
                 "name": s.get("name"),
-                "running": len(pids) > 0,
+                "running": running,
                 "pid": pids[0] if pids else None,
-                "ports": s.get("ports", []),
+                "ports": declared,
+                "ports_open": opened,
                 "log": service_log_file(s.get("id", "")) or "",
             })
         self._send_json(200, {"services": services})
@@ -517,20 +644,22 @@ class Handler(BaseHTTPRequestHandler):
         if not service:
             self._send_json(404, {"ok": False, "message": "unknown service"})
             return
-        # Editing the port should also rewrite '--port <old>' inside args.
+        # Editing the port should also rewrite '--port <old>' inside args,
+        # and keep any '--port <old>' detection needle in match in lockstep.
         if isinstance(fields.get("ports"), list) and fields["ports"]:
             old = (service.get("ports") or [None])[0]
             new = fields["ports"][0]
             if old is not None and str(old) != str(new):
                 args = list(fields.get("args", service.get("args", [])))
                 fields["args"] = sync_port_args(args, old, new)
+                fields["match"] = sync_port_match(list(service.get("match", [])), old, new)
         save_service_override(sid, fields, reset=reset)
         CONFIG = load_config()
         logger.log("INFO", "config saved", context={"service": sid, "reset": reset})
         self._send_json(200, {"ok": True, "message": "已保存（重启服务后生效）"})
 
     def do_POST(self):
-        if self.path not in ("/api/start", "/api/stop", "/api/config"):
+        if self.path not in ("/api/start", "/api/stop", "/api/restart", "/api/config"):
             self._send_json(404, {"ok": False, "message": "not found"})
             return
         if not self._token_ok():
@@ -548,6 +677,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/start":
             ok, msg = start_service(service)
+        elif self.path == "/api/restart":
+            ok, msg = restart_service(service)
         else:
             ok, msg = stop_service(service)
         self._send_json(200, {"ok": ok, "message": msg})
