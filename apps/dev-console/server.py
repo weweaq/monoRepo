@@ -6,16 +6,15 @@ services defined in services.json. Binds to loopback ONLY (127.0.0.1) so the
 console cannot be reached from the LAN. Mutating endpoints require a token.
 """
 
+import json
 import os
 import re
-import json
 import subprocess
 import threading
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlparse, parse_qs
-
+from urllib.parse import parse_qs, urlparse
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -134,12 +133,12 @@ def load_config():
     (interpreter/args/cwd/env/ports), so services.json stays the template and
     '恢复默认' simply drops the override.
     """
-    with open(os.path.join(SCRIPT_DIR, "services.json"), "r", encoding="utf-8") as f:
+    with open(os.path.join(SCRIPT_DIR, "services.json"), encoding="utf-8") as f:
         cfg = json.load(f)
     overrides = {}
     if os.path.isfile(OVERRIDE_PATH):
         try:
-            with open(OVERRIDE_PATH, "r", encoding="utf-8") as f:
+            with open(OVERRIDE_PATH, encoding="utf-8") as f:
                 overrides = json.load(f) or {}
         except Exception:
             overrides = {}
@@ -157,7 +156,7 @@ def save_service_override(sid, fields, reset=False):
     overrides = {}
     if os.path.isfile(OVERRIDE_PATH):
         try:
-            with open(OVERRIDE_PATH, "r", encoding="utf-8") as f:
+            with open(OVERRIDE_PATH, encoding="utf-8") as f:
                 overrides = json.load(f) or {}
         except Exception:
             overrides = {}
@@ -376,11 +375,13 @@ def _free_service_ports(service):
             strangers.append((pid, cl))
     if strangers:
         desc = "; ".join(("PID %d: %s" % (p, (cl or "<unknown>").strip()[:120])) for p, cl in strangers)
-        logger.log("WARNING", "killing foreign port owner", context={"service": service.get("id"), "ports": occupied, "strangers": desc})
+        logger.log("WARNING", "killing foreign port owner",
+                   context={"service": service.get("id"), "ports": occupied, "strangers": desc})
     survivors = _kill_pids_force(holders)
     if survivors:
         sdesc = "; ".join(("PID %d: %s" % (p, (proc_map.get(p) or "<unknown>").strip()[:120])) for p in survivors)
-        logger.log("WARNING", "port holder kill failed", context={"service": service.get("id"), "ports": occupied, "survivors": sdesc})
+        logger.log("WARNING", "port holder kill failed",
+                   context={"service": service.get("id"), "ports": occupied, "survivors": sdesc})
         return ("启动取消：端口 %s 被进程占用（%s），自动清理失败——对方可能是管理员权限启动的进程。"
                 "请以管理员身份运行 dev-console，或在管理员终端执行 taskkill /F /PID %s。"
                 % (port_list, sdesc, " /PID ".join(str(p) for p in survivors)))
@@ -398,7 +399,7 @@ def start_service(service):
         logger.log("INFO", "already running, skip start", context={"service": sid, "pid": existing[0]})
         return True, "已在运行 (pid %d)" % existing[0]
 
-    cmd = [service["interpreter"]] + list(service.get("args", []))
+    cmd = [service["interpreter"], *service.get("args", [])]
     env = dict(os.environ)
     env.update(service.get("env", {}))
     cwd = service.get("cwd") or None
@@ -447,7 +448,7 @@ def start_service(service):
     reason = "进程启动后未存活"
     if log_path and os.path.isfile(log_path):
         try:
-            with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
+            with open(log_path, encoding="utf-8", errors="replace") as fh:
                 tail = "".join(fh.readlines()[-8:])
         except Exception:
             tail = ""
@@ -488,7 +489,7 @@ def stop_service(service):
 
 def restart_service(service):
     """Stop then start. A 'not running' stop is tolerated (process may be externally started)."""
-    ok_stop, msg_stop = stop_service(service)
+    _, msg_stop = stop_service(service)
     time.sleep(1.0)  # give Windows a beat to release PIDs/ports before the start guard re-scans
     ok_start, msg_start = start_service(service)
     return ok_start, "%s；%s" % (msg_stop, msg_start)
