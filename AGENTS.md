@@ -33,6 +33,7 @@
 - 禁止"预防性抽象"：为一个未来需求提前建包
 
 ### R4 提交规范
+- **小步提交（工作方式，最高优先）**：做事拆成可独立验证的小步骤，每步完成即提交；单提交保持聚焦、可单独回退。禁止长时间攒大提交，禁止把多件不相关的事塞进一个提交
 - 格式：`type(scope): 描述`，scope 为包/应用名（如 `feat(amap-sdk): ...`、`fix(langTrack): ...`）
 - type 限定：feat / fix / docs / test / style / refactor / chore / perf
 - 一个提交只做一件事；跨包联动改动允许一个提交覆盖所涉包，但 scope 写明（如 `feat(langTrack,amap-sdk): ...`）
@@ -91,6 +92,7 @@ uv run pre-commit install                        # 启用 git 提交钩子（首
 
 ## 4. 提交前检查清单
 
+- [ ] 按小步提交推进：本提交聚焦单一目的（R4）
 - [ ] ruff + pytest 全绿（R7）
 - [ ] 提交信息符合 `type(scope): 描述`（R4）
 - [ ] ROADMAP.md 追加了执行记录（R5）
