@@ -638,3 +638,33 @@ class TestOffScheduleCrossDay:
 
         rows = [r for r in _kinds(v2_db) if r[1] == "off_schedule" and r[2] == "dev1"]
         assert ("2026-08-18", "off_schedule", "dev1") not in rows
+
+
+class TestOffScheduleInProgressDay:
+    def test_skips_day_before_noon(self, tmp_path, anomaly_env, monkeypatch):
+        """正午未到的进行中日不评估 off_schedule（清晨不误报'未到公司'）。"""
+        path = tmp_path / "lt.db"
+        _v1_db(path)
+        _add_stay(path, "dev1", "2026-08-17", 7, 0, 60, *HOME, HOME_GK)
+        monkeypatch.setattr(etl.time, "time", lambda: _ts("2026-08-17", 8, 0) / 1000)
+
+        conn = sqlite3.connect(path)
+        etl.detect_anomalies(conn)
+        conn.close()
+
+        assert [r for r in _kinds(path) if r[1] == "off_schedule"] == []
+
+    def test_fires_after_noon(self, tmp_path, anomaly_env, monkeypatch):
+        """正午已过仍无公司停留 → 照常评估（不因进行中日守卫漏报）。"""
+        path = tmp_path / "lt.db"
+        _v1_db(path)
+        _add_stay(path, "dev1", "2026-08-17", 7, 0, 60, *HOME, HOME_GK)
+        monkeypatch.setattr(etl.time, "time", lambda: _ts("2026-08-17", 14, 0) / 1000)
+
+        conn = sqlite3.connect(path)
+        etl.detect_anomalies(conn)
+        conn.close()
+
+        assert [r for r in _kinds(path) if r[1] == "off_schedule"] == [
+            ("2026-08-17", "off_schedule", "dev1")
+        ]

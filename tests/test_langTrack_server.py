@@ -67,3 +67,28 @@ def test_ingest_invalid_422(client):
     # type 不再限制枚举，422 改为缺 events / 缺 ts 等结构性错误
     r = c.post("/ingest", json={"device_id": "d", "batch_id": "b", "client_ts": 1, "events": [{"type": "nope", "data": {}}]})
     assert r.status_code == 422
+
+
+def test_ingest_normalizes_alias_device(client, tmp_path, monkeypatch):
+    """ingest 层别名归一：alias device_id 入库即写主设备（原始层不再带别名）。"""
+    import json as _json
+
+    from gacore.langTrack import etl as _etl
+
+    alias_file = tmp_path / "device_aliases.json"
+    alias_file.write_text(
+        _json.dumps({"dev2": "dev1"}), encoding="utf-8"
+    )
+    monkeypatch.setattr(_etl, "DEVICE_ALIASES_PATH", alias_file)
+
+    c, storage = client
+    payload = {
+        "device_id": "dev2", "batch_id": "b1", "client_ts": 1000,
+        "events": [{"type": "usage", "ts": 1000, "data": {"pkg": "com.x"}}],
+    }
+    r = c.post("/ingest", json=payload)
+    assert r.status_code == 200
+
+    conn = storage._conn
+    devs = [r[0] for r in conn.execute("SELECT DISTINCT device_id FROM events")]
+    assert devs == ["dev1"]

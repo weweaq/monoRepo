@@ -1364,6 +1364,9 @@ def detect_anomalies(conn: sqlite3.Connection, lookback_days: int = 7) -> int:
         # 正午 13:00 作为"白天在公司"的代表时刻：停留段覆盖 13:00 且落在公司
         # （不能用 start_ts 落在窗口内判断——公司停留段常开始于 08:40/09:47，会被误判缺席）
         noon = int(datetime.datetime.fromisoformat(f"{day} 13:00").replace(tzinfo=_TZ_CST).timestamp() * 1000)
+        if noon > now_ms:
+            # 进行中日且正午未到：无法判定"未到公司"，评估只会误报（Task 12b）
+            continue
         key_idx = 3 if v2 else 2  # stay 条目 (start_ts, end_ts, grid_key, place_id)
         in_office = any(
             (device_id, s[key_idx]) in work and s[0] <= noon <= s[1]
@@ -1663,6 +1666,16 @@ def _load_device_aliases() -> dict[str, str]:
 
 
 
+
+
+def canonical_device_id(device_id: str) -> str:
+    """/ingest 层别名归一：alias → 主设备（Task 12b）。
+
+    原始层入库即写规范 device_id，消除"两次 ETL 之间新事件带别名"的窗口
+    （期间 report/devices 会误判多设备）；存量历史行仍由 merge_device_aliases
+    在 ETL 中改写。
+    """
+    return _load_device_aliases().get(device_id, device_id)
 
 
 def merge_device_aliases(conn: sqlite3.Connection) -> int:

@@ -2339,3 +2339,18 @@ Task 11：三份文档同步 + 真实库**备份后**全量 ETL（v1 + v2 shadow
 - 通勤带网格 lon 上限 118.782 → 118.791（向真实走廊东南移），沿途 POI 换为真实走廊地物。
 - coordinate 域戳记：endpoint=wgs84 / polyline=gcj02 保持正确分离。
 - 遗留观察：route_key 全变导致 route_change 异常重算（2 条），属预期；未来若再变更坐标制/请求域，需同步作废路线缓存（已记入口径）。
+
+## 2026-09-04：Task 12b 两项数据卫生修复（off_schedule 进行中日守卫 + ingest 层别名归一）
+
+### 背景（数据体检发现，用户指派修复）
+1. **off_schedule 过早触发**：周五 08:29（正午未到）anomalies 已报当日"工作日白天未到公司"——进行中日无法判定缺席，纯误报。老问题，非 Task 12 引入。
+2. **别名事件仅 ETL 时归并**：merge_device_aliases 会改写 events，但只在 30 分钟周期 ETL 里跑，两次 ETL 之间新事件原始行一直顶着重装别名 device_id（实测窗口内 98 条），期间 report 的 devices_of_day 会误判多设备、devices.last_seen 挂在别名行。
+
+### 改动
+1. `etl.py detect_anomalies`：off_schedule 循环加 `noon > now_ms → continue` 守卫（正午未到的日子不评估，漏报风险为零——正午过后下次 ETL 照常评估）。
+2. `etl.py` 新增 `canonical_device_id()`（复用 _load_device_aliases）；`server.py /ingest` 入库前归一：events/devices 原始层只写主设备，ETL 归并降级为历史行兜底。
+3. TDD：`TestOffScheduleInProgressDay` 两用例（monkeypatch etl.time.time 固定"现在"在正午前/后）+ `test_ingest_normalizes_alias_device`（TestClient 打别名 device_id，断言 events 只落主设备）——先失败后通过。
+
+### 验证
+- 受影响面回归（server/anomalies/etl_location/fact_card/report_evidence/persona/dashboard/location_migration）：**169 passed**；ruff 前后对比 15→14（零新增，顺带消一条存量 I001）。
+- 真实库：ETL 重跑后 09-04 off_schedule 消失（anomalies 7→6）；服务重启（PID 34824）后新上报事件即以主设备入库。
