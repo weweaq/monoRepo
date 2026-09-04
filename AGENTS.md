@@ -3,7 +3,7 @@
 > 本文件是全仓最高规则，对人和 AI 助手同等生效。
 > 包级 AGENTS.md（apps/*/AGENTS.md、packages/*/AGENTS.md）只能补充、不能冲突；冲突以本文件为准，修订需提 docs/decisions/ 下的 ADR。
 >
-> 当前状态：Phase 0 骨架刚初始化，apps/ 与 packages/ 为空。迁移路线图见 docs/monorepo-guide.md 第 7 章。
+> 当前状态：Phase 1 试点完成——dev-console 已迁入 `apps/dev-console/`（保留原仓库 9 条提交历史）。迁移路线图见 docs/monorepo-guide.md 第 7 章。
 
 ## 1. 仓库定位与结构
 

@@ -16,13 +16,13 @@ tools/scripts/check.ps1            # 一键质量门禁（R7）
 
 ### 仓内成员
 
-**apps/**（计划迁入，阶段划分见指导第 7 章）
+**apps/**（dev-console 已迁入；其余计划迁入，阶段划分见指导第 7 章）
 
 | 应用 | 来源项目 | 阶段 | 说明 |
 |---|---|---|---|
+| **dev-console** | dev-console | ✅ 已迁入（2026-09-04） | 服务管理器（首个迁移试点，subtree 保留 9 条历史） |
 | withlanggraph | WithLangGraph | Phase 2 | gacore / langTrack 数据管线，旗舰项目 |
 | checkself | checkSelf | Phase 2 | 画像与自追踪 |
-| dev-console | dev-console | Phase 1 | 服务管理器（首个迁移试点） |
 | generic-agent | GenericAgent | Phase 3 | Agent 框架，前端矩阵最广 |
 | claw1 | claw1 | Phase 3 | Agent 项目（ruff + mypy） |
 | claw0 | claw0 | Phase 3 | 教学 agent gateway |

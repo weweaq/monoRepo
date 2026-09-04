@@ -315,21 +315,21 @@ packages/amap-sdk/
 
 原则：**先立规则，再迁轻项目，抽包随主项目迁移走，主力项目最后动**。每阶段有明确验收标准，不达标不进下一阶段。
 
-### Phase 0：骨架搭建（半天）
-- [ ] 新建 `mono/` 目录，git init，写入根 pyproject.toml（workspace 定义 + ruff/pytest 统一配置）
-- [ ] 写根 AGENTS.md（第 5 章 R 系列全文）+ README.md（项目地图，含仓外项目）
-- [ ] `uv init` 建两个空成员（apps/placeholder、packages/placeholder 验证 workspace 解析）后删除
-- [ ] 配 .gitignore（data/、.env、__pycache__、.idea 等）、.editorconfig、.pre-commit-config.yaml（ruff + 基础钩子）
-- [ ] 推送远端（github/gitee 自选，建议双推）
+### Phase 0：骨架搭建（半天）✅ 2026-09-04 完成
+- [x] 新建 `mono/` 目录，git init，写入根 pyproject.toml（workspace 定义 + ruff/pytest 统一配置）
+- [x] 写根 AGENTS.md（第 5 章 R 系列全文）+ README.md（项目地图，含仓外项目）
+- [x] `uv init` 建两个空成员（apps/placeholder、packages/placeholder 验证 workspace 解析）后删除
+- [x] 配 .gitignore（data/、.env、__pycache__、.idea 等）、.editorconfig、.pre-commit-config.yaml（ruff + 基础钩子）
+- [x] 推送远端（github/gitee 自选，建议双推）
 
 验收：`uv sync` 与 `uv run pytest`（空跑）成功；pre-commit install 生效。
 
-### Phase 1：轻量试点迁入（半天）
-- [ ] 迁 `dev-console`（零依赖、单文件，最理想试点）：`git subtree add --prefix=apps/dev-console <repo> main` 保留历史，或直接拷贝（历史价值低的项目可省）
-- [ ] 补包级 pyproject.toml，接入 workspace
-- [ ] 按模板补 AGENTS.md / ROADMAP.md / 测试目录（先跑通结构，测试可后补）
+### Phase 1：轻量试点迁入（半天）✅ 2026-09-04 完成
+- [x] 迁 `dev-console`：`git subtree add --prefix=apps/dev-console <repo> master` 保留 9 条历史
+- [x] 补包级 pyproject.toml，接入 workspace（零第三方依赖）
+- [x] 按模板补 AGENTS.md / ROADMAP.md / 测试目录（先跑通结构，测试可后补）
 
-验收：`uv run --package dev-console python server.py` 行为与迁前一致。
+验收结果：`uv sync` 识别成员成功；8788 端口冒烟 `/api/status`、`/`、无 token POST 401 全部符合预期；新旧仓库 git blob 哈希一致（迁移忠实）；ruff + pytest 全绿。遗留：services.json 中的本机绝对路径待模板化（已记入 dev-console ROADMAP 待办）。
 
 ### Phase 2：首批共享包 + 主力项目迁入（1-2 个工作日）
 - [ ] 迁 `WithLangGraph`（subtree add 保留完整历史——305 个测试的演进史值得保留）
