@@ -20,6 +20,11 @@ apps/*/data/
 # gacore run_repl 启动即导出的图（test_cli 每个用例都会在 CWD 落一份）
 agent_graph.png
 
+# withlanggraph 测试用相对路径 file_write 落盘的产物（test_qq/test_middleware，
+# 上游自带 .gitignore 只覆盖其子目录，测试 CWD 是仓库根）
+h.txt
+notes.txt
+
 # Secrets
 .env
 .env.*
