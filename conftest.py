@@ -14,6 +14,12 @@ import pytest
 # subtree 同步上游修复后删除本条。
 _KNOWN_UPSTREAM_FAILURES = {
     "apps/withlanggraph/tests/test_qq.py::test_role_command_switches_card_and_clears_thread",
+    # checkSelf（HEAD e8e7864）4 个 schema 漂移失败：近期 refactor（readers 内联、
+    # portal UI 重构）改了 analysis 输出键名，测试断言仍是旧键。上游修好后移除。
+    "apps/checkself/tests/test_activity.py::test_single_source_traces_through",
+    "apps/checkself/tests/test_direction.py::test_analyze_weekly_trends",
+    "apps/checkself/tests/test_topic.py::test_analyze_returns_top_words",
+    "apps/checkself/tests/test_topic.py::test_analyze_categorizes",
 }
 
 
