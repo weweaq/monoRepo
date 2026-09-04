@@ -359,19 +359,18 @@ packages/amap-sdk/
 ## 8. 常用命令速查
 
 ```powershell
-# 全仓同步依赖（装齐所有成员）
-uv sync
+# 全仓同步依赖（装齐所有成员；uv 默认只装根项目，成员必须 --all-packages）
+uv sync --all-packages
 
-# 全仓质量门禁（提交前必跑）
-uv run ruff check apps packages
-uv run pytest
+# 全仓质量门禁（提交前必跑；等价于 tools/scripts/check.ps1）
+uv run ruff check apps packages tests
+uv run --all-packages pytest
 
-# 只跑某个应用的测试
-uv run pytest apps/withlanggraph/tests
-uv run --package withlanggraph pytest
+# 只跑某个应用的测试（从仓库根目录）
+uv run --all-packages pytest apps/withlanggraph/tests
 
-# 运行某个应用的入口
-uv run --package withlanggraph python -m gacore.langTrack --db data/langTrack.db
+# 运行某个应用的入口（注意 --package 用包名，withlanggraph 目录的包名是 gacore）
+uv run --all-packages python -m gacore.langTrack --db data/langTrack.db
 uv run --package dev-console python server.py
 
 # 带历史迁入一个已有 git 仓库

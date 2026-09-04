@@ -17,6 +17,9 @@ data/*
 !data/README.md
 apps/*/data/
 
+# gacore run_repl 启动即导出的图（test_cli 每个用例都会在 CWD 落一份）
+agent_graph.png
+
 # Secrets
 .env
 .env.*
