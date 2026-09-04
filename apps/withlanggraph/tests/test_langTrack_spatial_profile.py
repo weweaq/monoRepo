@@ -156,10 +156,8 @@ def _make_db(device_id: str = "devA", as_of: str = _AS_OF,
     # fresh：出现在当前窗口开始后（place_change 的 new canonical）
     fresh_first_seen = _day_ts(_add_days(as_of, -10, ))
     places.append((pid, "fresh", FRESH, "未知"))
-    fresh_row = pid
     pid += 1
 
-    p_idx = 0
     stay_id = 1
     for daystr in days:
         if daystr in NO_DATA_DAYS:
@@ -213,7 +211,6 @@ def _make_db(device_id: str = "devA", as_of: str = _AS_OF,
     # 打上 place_id（read_stays join 用 place 表 place_id；直接 UPDATE stays）
     place_map = {"home": "home_p", "work": "work_p", "park": "park_p", "fresh": "fresh_p"}
     for idx, (pid, key, coord, label) in enumerate(places, start=1):
-        visit_count = sum(1 for _ in ())  # placeholder
         first_s = fresh_first_seen if key == "fresh" else first_seen
         poi = "某某公园" if key == "park" else None
         l1 = "公园" if key == "park" else ("住宅" if key == "home" else "办公")
@@ -303,7 +300,6 @@ def test_build_spatial_profile_empty_db_no_crash():
 # ---------------------------------------------------------------------------
 
 def _freq_by_window(prof, days):
-    idx = f"{days}"
     found = [p for p in prof["frequent_places"] if p["window_days"] == days]
     return found
 
@@ -638,7 +634,7 @@ def _add_day_str(day: str, n: int) -> str:
 
 
 def test_build_evidence_coverage_uses_recorded_day_median():
-    conn = _make_db()
+    _make_db()
     daylist = [_add_day_str("2026-08-02", i) for i in range(30)]
     qbd = {}
     for i, d in enumerate(daylist):

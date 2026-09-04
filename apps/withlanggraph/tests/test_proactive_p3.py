@@ -207,6 +207,16 @@ class TestRunProactiveJobWriteBack:
             "recall_topic",
             lambda cfg_, uid, now: {"kind": "none", "text": "", "thread_id": ""},
         )
+        # build_graph inside _write_back_proactive initializes the LLM via
+        # gacore.graph.get_llm — swap it for a bindable fake so this e2e test is
+        # hermetic and does not depend on ambient .env (LLM_PROVIDER).
+        from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+
+        class _Fake(GenericFakeChatModel):
+            def bind_tools(self, tools, **kwargs):
+                return self
+
+        monkeypatch.setattr("gacore.graph.get_llm", lambda tools, bind_tools=False: _Fake(messages=iter(["ok"])))
         job = Job(name="proactive-morning", schedule="every 1h", prompt="早安", type="proactive")
         result = proactive.run_proactive_job(job, cfg=cfg, clock=lambda: _dt(2026, 8, 30, 7))
         assert result["sent"] == 1
