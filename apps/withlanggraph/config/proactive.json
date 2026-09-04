@@ -1,0 +1,10 @@
+{
+  "enabled": true,
+  "target": { "channel": "c2c", "users": [] },
+  "guard": {
+    "idle_hours": 24,
+    "max_per_day": 2,
+    "hot_chat_minutes": 30,
+    "jitter_minutes": 30
+  }
+}
