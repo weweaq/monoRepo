@@ -2324,3 +2324,18 @@ Task 11：三份文档同步 + 真实库**备份后**全量 ETL（v1 + v2 shadow
 
 ### 待办更新
 - [x] Task 12：off_schedule 跨天 stay 口径修正（覆盖日分组，2+189 用例通过，真实库验证）。
+
+## 2026-09-04：路线缓存作废重编（坐标制生效后的遗留偏移清除）
+
+### 背景
+数据体检发现：9 条 trips 的 polyline 全部编码于 08-21 ~ 09-01（坐标制配置生效前），当时以"原始 WGS84 坐标当 GCJ02 直发"高德路径规划——polyline[0] 距原始起点仅 10-35m、距 GCJ(起点) 505-560m，即整条路线在真实空间偏移约 541m；route_grids（245 行）与 grid_pois（100 行）随之整体偏移。缓存按 (device_id,start_ts,end_ts) 精确键命中，坐标制变更不会自动失效（Task 3 迁移只做键匹配，与 §2.5 regeo 偏移失效不同源），属设计空档。
+
+### 改动（纯数据操作，无代码变更）
+- 作废缓存：`UPDATE trips SET polyline/route_key/route_mode/route_encoded_at=NULL`（9 条）+ `DELETE FROM route_grids`（245 行）+ `DELETE FROM grid_pois`（100 行）。
+- 全量 ETL 重编：9 段补路（walking）+ 通勤带重建 252 格 + 沿途 POI 重编 5 网格（高德外呼一次性成本）。
+
+### 验证（实测）
+- 重编后 polyline[0] vs GCJ(起点) 1-8m、vs 原始起点 538-543m → polyline 落在真实 GCJ02 域（方向与距离均正确）。
+- 通勤带网格 lon 上限 118.782 → 118.791（向真实走廊东南移），沿途 POI 换为真实走廊地物。
+- coordinate 域戳记：endpoint=wgs84 / polyline=gcj02 保持正确分离。
+- 遗留观察：route_key 全变导致 route_change 异常重算（2 条），属预期；未来若再变更坐标制/请求域，需同步作废路线缓存（已记入口径）。
