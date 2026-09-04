@@ -10,7 +10,9 @@ dev = [
     "pre-commit>=4.0",
     "pytest>=8.0",
     "pytest-asyncio>=0.26",
-    "ruff>=0.12",
+    # 与 .pre-commit-config.yaml 的 ruff hook (v0.12.5) 对齐；ruff 0.16 起默认
+    # 规则集扩大，升级前须评估全仓影响
+    "ruff>=0.12,<0.13",
 ]
 
 [tool.uv]

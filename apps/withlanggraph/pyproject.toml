@@ -22,6 +22,7 @@ dependencies = [
     "numpy",
     "fastapi",
     "uvicorn",
+    "pygraphviz",
 ]
 
 [project.optional-dependencies]
@@ -36,9 +37,26 @@ qq = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
-[tool.pytest.ini_options]
-testpaths = ["tests"]
-asyncio_mode = "auto"
-
+# pytest 配置统一由仓库根 pyproject.toml 提供：应用级若保留 [tool.pytest.ini_options]，
+# pytest 跑 apps/withlanggraph 时会改用应用配置、绕开根配置的 --basetemp，
+# 从而踩 %TEMP% 遗留 ACL 坏符号链接的崩溃。
 [tool.ruff]
 line-length = 120
+# config/assets/code_run_header.py 是注入执行前的代码头部资产：刻意单行紧凑风格
+# + 为注入代码预置 import，不参与 lint。
+extend-exclude = ["config/assets"]
+
+[tool.ruff.lint]
+# 迁移基线 = 最小规则集（ruff<0.13 时代的默认规则）。根配置全量规则下存量 362 处，
+# 专项整改见 ROADMAP；升级 ruff（0.16 起默认规则集扩大）前须先评估。
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# langTrack 测试惯例：文件头先做路径准备再 import；clock 用 lambda 简写
+"tests/*" = ["E402", "E731"]
+# 存量告警豁免：这些文件在原仓库有未提交 WIP，mono 侧不改动以免分叉；
+# 待 subtree 同步上游修复后专项清理（见 ROADMAP「lint 债务」）。
+"src/gacore/langTrack/geocode.py" = ["F841"]
+"src/gacore/langTrack/persona.py" = ["F841"]
+"src/gacore/langTrack/spatial_profile.py" = ["F401", "F841"]
+"src/gacore/langTrack/report.py" = ["E702"]
