@@ -726,3 +726,18 @@ def test_dashboard_renders_manual_etl_button():
     assert 'id="etl-btn"' in html
     assert "/etl/run" in html
     assert "/etl/status" in html
+
+
+def test_dashboard_renders_time_space_matrix():
+    """生活轨迹 · 时段分布卡片：矩阵渲染 + 空数据降级。"""
+    from gacore.langTrack.dashboard import _render_time_space
+
+    sp = {"time_space": {
+        "days": 30,
+        "hours": [{"hour": 0, "home": 27, "work": 13, "other": 0, "no_data": 60}],
+        "evidence": None,
+    }}
+    html = _render_time_space(sp)
+    assert "生活轨迹 · 时段分布" in html
+    assert "00:00" in html
+    assert _render_time_space(None).count("数据不足") == 1

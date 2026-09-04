@@ -659,3 +659,69 @@ if __name__ == "__main__":
     import pytest
 
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+# ---------------------------------------------------------------------------
+# Task 12d：小时 × 地点分布（生活轨迹时段分布）
+# ---------------------------------------------------------------------------
+
+class TestTimeSpaceMatrix:
+    def _matrix(self, clipped, daily_agg=None):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        places = {"home": {"label": "家", "place_id": "home"},
+                  "work": {"label": "公司", "place_id": "work"}}
+        win_s, win_e = _ts(2026, 8, 30), _ts(2026, 9, 1)
+        return sp._time_space_matrix(
+            conn, "devA", places, clipped, ["2026-08-30", "2026-08-31"],
+            win_s, win_e, win_s, _ts(2026, 8, 31, 23, 59),
+            daily_agg or {"points_total": 10, "points_valid": 10,
+                          "accuracy_known": 10, "observed_bins": 48},
+        )
+
+    def test_threshold_and_cross_midnight(self):
+        """>=15 分钟计入该地点；<15 分钟计无数据；跨午夜按自然日分摊。"""
+        clipped = [
+            # 家 08-30 22:00 → 08-31 02:00（跨午夜，已按自然日切两条）
+            {"day": "2026-08-30", "start_ts": _ts(2026, 8, 30, 22, 0),
+             "end_ts": _ts(2026, 8, 30, 23, 59, 59), "place_id": "home"},
+            {"day": "2026-08-31", "start_ts": _ts(2026, 8, 31, 0, 0),
+             "end_ts": _ts(2026, 8, 31, 2, 0), "place_id": "home"},
+            # 公司 08-31 09:00-09:05：5 分钟 < 15 分钟阈值 → 该小时无数据
+            {"day": "2026-08-31", "start_ts": _ts(2026, 8, 31, 9, 0),
+             "end_ts": _ts(2026, 8, 31, 9, 5), "place_id": "work"},
+            # 08-30 23:00-24:00 家/公司各 30 分钟 → hour23 同桶双计
+            {"day": "2026-08-30", "start_ts": _ts(2026, 8, 30, 23, 0),
+             "end_ts": _ts(2026, 8, 30, 23, 30), "place_id": "home"},
+            {"day": "2026-08-30", "start_ts": _ts(2026, 8, 30, 23, 30),
+             "end_ts": _ts(2026, 8, 30, 23, 59, 59), "place_id": "work"},
+        ]
+        out = self._matrix(clipped)
+        by_h = {it["hour"]: it for it in out["hours"]}
+        assert by_h[22]["home"] == 1 and by_h[22]["no_data"] == 1
+        assert by_h[0]["home"] == 1          # 08-31 凌晨（跨午夜分摊）
+        assert by_h[9]["work"] == 0 and by_h[9]["no_data"] == 2
+        assert by_h[23]["home"] == 1 and by_h[23]["work"] == 1
+        assert by_h[15]["no_data"] == 2 and by_h[15]["home"] == 0
+        assert out["days"] == 2
+        assert out["evidence"]["confidence_level"] in ("low", "medium", "high")
+
+    def test_profile_includes_time_space_and_device_isolation(self):
+        """build_spatial_profile 输出 time_space；无 tag 公园归"其他"；设备隔离。"""
+        conn = _make_db()
+        profile = sp.build_spatial_profile(conn, "devA", _AS_OF)
+        ts = profile["time_space"]
+        assert ts and len(ts["hours"]) == 24 and ts["days"] == 30
+        h0 = ts["hours"][0]
+        assert h0["hour"] == 0 and h0["home"] >= 25   # 每日 00-08 在家
+        h10 = ts["hours"][10]
+        assert h10["work"] >= 19                      # 工作日上午在公司
+        assert h10["other"] >= 1                      # 周末公园 → 其他
+        h12 = ts["hours"][12]
+        assert h12["no_data"] >= 19                   # 工作日午休(12-13点)fixture 无定位 → 如实显示
+        assert h12["home"] >= 8                       # 周末 12 点在家
+        # 设备隔离：devB 只有一条 09:00-10:00 的未知地点 stay
+        b = sp.build_spatial_profile(conn, "devB", _AS_OF)
+        bh = {it["hour"]: it for it in b["time_space"]["hours"]}
+        assert bh[23]["other"] == 1 and bh[23]["no_data"] == 29
+        assert bh[0]["home"] == 0 and bh[0]["no_data"] == 30

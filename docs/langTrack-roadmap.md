@@ -2368,3 +2368,17 @@ Task 11：三份文档同步 + 真实库**备份后**全量 ETL（v1 + v2 shadow
 ### 验证
 - 回归：server/dashboard/anomalies/etl_location/fact_card/report_evidence/persona/location_migration **172 passed**；ruff server/dashboard 全绿（All checks passed）。
 - 真实系统实测（PID 20512）：POST → `{"status":"started"}`，连点第二次 → `{"status":"busy"}`，轮询至 `{"running":false,"last_finished_at":"2026-09-04 22:19:31","last_ok":true}`，etl_state 水位由 22:12 推进——手动触发的 ETL 真实处理了新数据。
+
+## 2026-09-04：Task 12d 生活轨迹 · 时段分布（小时 × 地点卡片）
+
+### 背景
+用户指出 dashboard 缺少"坐标 × 时间分布"展示——这是画像最核心的一张图（什么时间在什么地方）。计划 §2.11 有节奏/通勤/常去地点等聚合，但没有小时粒度的时空分布。
+
+### 改动
+1. `spatial_profile.py`：新增 `_time_space_matrix`——小时 × 地点类（家/公司/其他）30 天矩阵，复用 clipped30（窗口∩自然日裁剪）与 places_by_id 语义；口径：单小时 ≥15 分钟计入该类、不足计无数据、同一小时可同时计入两类（过渡小时）；Evidence 复用 build_evidence（sample=有数据天数，需求 10 天）。SpatialProfile 增 `time_space` 键（空骨架 None）。
+2. `dashboard.py`：新增「生活轨迹 · 时段分布」卡片（定位健康卡之后），24 行 × 家/公司/其他/无数据 四列 + 口径注记 + Evidence；无 tag 地点归"其他"不隐藏。
+3. TDD：`TestTimeSpaceMatrix`（阈值/跨午夜分摊/同桶双计/设备隔离/devB 23 时单 stay）+ dashboard 渲染两用例（空数据降级）——先失败后通过（期间修正了与 fixture 午休无定位、devB 23 时 stay 不符的两处断言）。
+
+### 验证
+- 回归 spatial_profile/dashboard/fact_card/tools/report_evidence/persona/server/anomalies **159 passed**；ruff 与基线一致零新增。
+- 真实数据渲染（30 天窗口）：凌晨家 23-27%、09-18 时公司 20-33%、22-23 时回家 13-23%；无数据列如实显示 57-73%（客户端上报断供的直接映射）。

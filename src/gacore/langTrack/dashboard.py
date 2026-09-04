@@ -778,6 +778,45 @@ def _render_place_change(sp: dict | None) -> str:
     )
 
 
+def _render_time_space(sp: dict | None) -> str:
+    """生活轨迹 · 时段分布（小时 × 地点类，30 天；Task 12d）。
+
+    口径与 spatial_profile._time_space_matrix 一致：单小时 ≥15 分钟计入该地点、
+    跨 midnight stay 按自然日分摊、无数据小时如实显示不隐藏。
+    """
+    ts = (sp or {}).get("time_space") or {}
+    hours = ts.get("hours") or []
+    if not hours:
+        return (
+            '<div class="card"><h2>生活轨迹 · 时段分布</h2>'
+            '<div class="empty">数据不足，无法构建时段分布。</div></div>'
+        )
+    n_days = int(ts.get("days") or 0) or 1
+
+    def _pct(v: int) -> str:
+        p = v / n_days * 100
+        return f"{p:.0f}%" if p else '<span class="dim">·</span>'
+
+    rows = ""
+    for it in hours:
+        rows += (
+            f'<tr><td>{it["hour"]:02d}:00</td>'
+            f'<td style="color:var(--violet)">{_pct(it["home"])}</td>'
+            f'<td style="color:var(--cyan)">{_pct(it["work"])}</td>'
+            f'<td style="color:var(--amber)">{_pct(it["other"])}</td>'
+            f'<td class="dim">{_pct(it["no_data"])}</td></tr>'
+        )
+    ev = _render_evidence(ts.get("evidence"), metric="时段分布")
+    return (
+        f'<div class="card"><h2>生活轨迹 · 时段分布（{ts.get("window_days", 30)} 天）</h2>'
+        f'<table class="tbl"><tr><th>时段</th><th>家</th><th>公司</th><th>其他</th>'
+        f'<th>无数据</th></tr>{rows}</table>'
+        f'<div class="mig-note">每格 = 该小时处于此地点的天数占比；单小时 ≥15 分钟计入，'
+        f'跨午夜 stay 按自然日分摊；同一小时可同时计入两类（地点转移过渡）；无数据不隐藏。</div>'
+        f'{ev}</div>'
+    )
+
+
 def _render_migration(conn: sqlite3.Connection, device_id: str) -> str:
     """迁移审查（shadow）：mapping 旧→新、孤儿 stay、tag 冲突、geocode 失效、metrics。"""
     mapping_rows = ""
@@ -987,6 +1026,7 @@ def render_dashboard_html(
         {_render_persona(card.get("persona"))}
         {_render_coverage(conn)}
         {_render_location_health(conn, dev, requested)}
+        {_render_time_space(sp)}
         {_render_kpi30(sp)}
         {_render_frequent_places(conn, card, sp, window)}
         {_render_rhythm(sp)}

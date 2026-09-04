@@ -97,6 +97,7 @@ class SpatialProfile(TypedDict):
     home_work_rhythm: dict | None
     scene_exposure: list[dict]
     place_change: dict | None
+    time_space: dict | None  # 小时 × 地点类分布（Task 12d：生活轨迹时段分布）
     per_window: dict  # 7/30/90 聚合证据汇总（可选，测试与 dashboard 用）
 
 
@@ -920,6 +921,75 @@ def _place_change(
 # 主入口
 # ---------------------------------------------------------------------------
 
+def _time_space_matrix(
+    conn, device_id, places_by_id, clipped30, day30s,
+    win_start: int, win_end: int, first_seen: int | None,
+    data_as_of: int | None, daily_agg: dict,
+) -> dict:
+    """小时 × 地点类分布（Task 12d：生活轨迹时段分布）。
+
+    口径：
+    - 地点类按 places.label 映射：家 / 公司，其余（未知、无 tag）归"其他"；
+    - stay 已按「窗口 ∩ 自然日」裁剪展开，逐小时桶按交集分钟数累计；
+    - 单小时同一类别 ≥15 分钟才计入该类"天数"；不足 15 分钟计"无数据"；
+      同一小时可同时计入两类（如跨地点转移的过渡小时），如实呈现；
+    - evidence 复用 build_evidence：样本 = 有定位数据的天数，需求 10 天（rhythm 档）。
+    """
+    hour_ms = 3600000
+    presence_min = 15 * 60 * 1000
+
+    day_hour: dict[tuple[str, int], dict[str, float]] = {}
+    for it in clipped30:
+        pl = places_by_id.get(it.get("place_id")) or {}
+        label = pl.get("label") or ""
+        cls = label if label in ("家", "公司") else "其他"
+        cur = it["start_ts"]
+        while cur < it["end_ts"]:
+            dt = datetime.fromtimestamp(cur / 1000, tz=_TZ_CST)
+            hh = dt.hour
+            next_h = int(dt.replace(minute=0, second=0, microsecond=0).timestamp() * 1000) + hour_ms
+            seg = min(it["end_ts"], next_h) - cur
+            g = day_hour.setdefault((it["day"], hh), {})
+            g[cls] = g.get(cls, 0) + seg
+            cur += seg
+
+    hours: list[dict] = []
+    days_with_data = 0
+    for h in range(24):
+        counts = {"hour": h, "home": 0, "work": 0, "other": 0, "no_data": 0}
+        for day in day30s:
+            g = day_hour.get((day, h)) or {}
+            tot = sum(g.values())
+            if tot < presence_min:
+                counts["no_data"] += 1
+            else:
+                days_with_data += 1
+            if g.get("家", 0) >= presence_min:
+                counts["home"] += 1
+            if g.get("公司", 0) >= presence_min:
+                counts["work"] += 1
+            if g.get("其他", 0) >= presence_min:
+                counts["other"] += 1
+        hours.append(counts)
+
+    evidence = build_evidence(
+        requested_window_days=30,
+        win_start=win_start,
+        win_end=win_end,
+        first_seen=first_seen,
+        data_as_of=data_as_of,
+        daily_agg=daily_agg,
+        sample_count=days_with_data,
+        required_samples=10,
+    )
+    return {
+        "window_days": 30,
+        "days": len(day30s),
+        "hours": hours,
+        "evidence": evidence,
+    }
+
+
 def build_spatial_profile(
     conn: sqlite3.Connection,
     device_id: str,
@@ -939,6 +1009,7 @@ def build_spatial_profile(
         "home_work_rhythm": None,
         "scene_exposure": [],
         "place_change": None,
+        "time_space": None,
         "per_window": {},
     }
 
@@ -1044,6 +1115,12 @@ def build_spatial_profile(
         prev_s, prev_e, 30, w30_s, w30_e, first_seen, as_of_ms, daily_agg, all_places,
     )
 
+    # -- ⑦ time_space（小时 × 地点类分布，30 天；Task 12d） ------
+    time_space = _time_space_matrix(
+        conn, device_id, places_by_id, clipped30, day30s,
+        w30_s, w30_e, first_seen, as_of_ms, daily_agg,
+    )
+
     empty.update({
         "data_as_of": data_as_of_iso,
         "data_as_of_ms": as_of_ms,
@@ -1053,6 +1130,7 @@ def build_spatial_profile(
         "home_work_rhythm": home_work_rhythm,
         "scene_exposure": scene_exposure,
         "place_change": place_change,
+        "time_space": time_space,
         "per_window": {
             "30": {"observed_bins": daily_agg["observed_bins"],
                    "expected_bins": _expected_bins(
