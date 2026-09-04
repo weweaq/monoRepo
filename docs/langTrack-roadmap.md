@@ -2283,7 +2283,7 @@ Task 11：三份文档同步 + 真实库**备份后**全量 ETL（v1 + v2 shadow
 - [x] v2 正式激活（user_version=2）+ 坐标制 wgs84 配置 + geocode 重编（本记录）。
 - [x] I3 出门标准复核：daily_location_quality 可见、filter 默认关闭、高德入口转换策略一致、activate 后出口冒烟通过。
 - [ ] detect_anomalies 跨天 stay 的 off_schedule 口径修正（时间相交判定）。
-- [ ] weiCheckApp 客户端定位上报稀疏排查（08-23 起 146→8 点/天）。
+- [ ] weiCheckApp 客户端上报排查（08-23 起采集断供 + 延迟上传）：09-04 体检确认定位采集白天已恢复（73 点，精度全部 ≤50m），但 10:00-17:31 的事件 **22:08 才一次性补传**（received_at 佐证）——采集在工作，上传通道疑似仅在 App 前台/唤醒时可用，白天数据最长延迟 12 小时入库（白天看 dashboard 会缺当日白天画像，晚间补齐）。
 - [ ] I7：实测 provider/accuracy 分布后由用户确认是否开启 accuracy filter。
 
 ## 2026-09-04：位置智能增强 §7 用户验收（真实库激活后首轮）
