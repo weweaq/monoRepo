@@ -332,12 +332,14 @@ packages/amap-sdk/
 验收结果：`uv sync` 识别成员成功；8788 端口冒烟 `/api/status`、`/`、无 token POST 401 全部符合预期；新旧仓库 git blob 哈希一致（迁移忠实）；ruff + pytest 全绿。遗留：services.json 中的本机绝对路径待模板化（已记入 dev-console ROADMAP 待办）。
 
 ### Phase 2：首批共享包 + 主力项目迁入（1-2 个工作日）
-- [ ] 迁 `WithLangGraph`（subtree add 保留完整历史——305 个测试的演进史值得保留）
-- [ ] 迁移过程中提炼 `amap-sdk`（geocode/routes/坐标转换整体搬出，WithLangGraph 改为依赖 workspace 包，全量回归 305 用例必须全绿）
-- [ ] 迁 `checkSelf`，提炼 `ga-logging`
-- [ ] 存量迁移注意：WithLangGraph 的 `data/`（langTrack.db、etl_config.json）保持 gitignore 状态，配置文件按 R9 出 `.example` 模板
+- [x] 迁 `WithLangGraph`（subtree add 保留完整历史——305 个测试的演进史值得保留）2026-09-05 完成
+- [ ] 迁移过程中提炼 `amap-sdk`（geocode/routes/坐标转换整体搬出，WithLangGraph 改为依赖 workspace 包，全量回归 305 用例必须全绿）——暂缓：上游 geocode.py 有未提交 WIP，先等同步
+- [x] 迁 `checkSelf` 2026-09-05 完成（提炼 `ga-logging` 待做，已记入 apps/checkself/ROADMAP.md）
+- [x] 存量迁移注意：WithLangGraph 的 `data/`（langTrack.db、etl_config.json）保持 gitignore 状态，配置文件按 R9 出 `.example` 模板
 
 验收：全仓 `uv run pytest` 通过；WithLangGraph 用例数不少于迁前（305+）；`uv run python -m gacore.langTrack --db ...` 冒烟可用。
+
+Phase 2 迁移验收结果（2026-09-05）：`tools/scripts/check.ps1` 全绿——ruff 0 错误、pytest 987 passed / 5 skipped（5 个 skip 均为上游 HEAD 既有失败用例，根 conftest.py `_KNOWN_UPSTREAM_FAILURES` 登记来源，上游修复随 subtree 同步后移除）；WithLangGraph 侧 935+1 用例（不少于迁前 305+），`--package gacore` CLI 冒烟通过；checkSelf 侧 50 passed + 4 skipped（schema 漂移 skip），portal app 导入冒烟通过。两个应用均以**虚拟成员或显式基线**接入：WithLangGraph 是标准成员（包名 `gacore`），checkSelf 因包名 `profile` 与标准库同名改为虚拟成员（`[tool.uv] package = false`）。踩坑与债务详见各 app 的 ROADMAP.md（pygraphviz 依赖缺失、ruff 0.16 默认规则集扩大、task_engine 隐式 re-export 断链、lint 债务 362+106 处）。
 
 ### Phase 3：其余项目逐个迁入（每项目约 1-2 小时）
 - [ ] 迁 `GenericAgent`（uv 项目，改造成本最低；注意保留其 extras 结构）
