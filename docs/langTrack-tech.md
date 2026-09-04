@@ -99,7 +99,7 @@ flowchart LR
 |---|---|---|---|---|
 | GET | `/health` | — | `{"status":"ok"}` | 存活探针 |
 | POST | `/ingest` | body=`IngestRequest` | `{"status":"ok","inserted":N,"deduplicated":bool}` | 幂等：`batch_id` 重复时返回 `{"status":"ok","inserted":0,"deduplicated":true}` |
-| GET | `/dashboard` | `?day=YYYY-MM-DD`（可选） | `text/html` | 深色单页仪表盘，调 `render_dashboard_html(conn, day)`（`dashboard.py:237`），每次请求新开只读连接；含「事实审查块」（FactCard 逐项人眼核对，不跑 ETL） |
+| GET | `/dashboard` | `?day=YYYY-MM-DD`（可选） | `text/html` | 深色单页仪表盘，调 `render_dashboard_html(conn, day)`（`dashboard.py:237`），每次请求新开只读连接；含「事实审查块」（FactCard 逐项人眼核对，不跑 ETL）；含「生活轨迹 · 时段分布」卡（小时 × 家/公司/其他 30 天矩阵，`spatial_profile._time_space_matrix`，单小时 ≥15 分钟计入、跨午夜 stay 按自然日分摊、无数据不隐藏）与「立即转换 (ETL)」按钮 |
 
 ### 2.1 幂等与事务语义（`storage.ingest_batch`, storage.py:89-115）
 
