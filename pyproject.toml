@@ -25,6 +25,9 @@ src = ["apps", "packages", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP", "RUF"]
+# RUF001/2/3: 中文文案的全角标点（，：（）等）是正常用法，非误用 ASCII 近似字符
+# UP031: 存量代码统一使用 % 格式化（作者风格），强制 f-string 会造成大规模无意义 diff
+ignore = ["RUF001", "RUF002", "RUF003", "UP031"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests", "apps", "packages"]
