@@ -29,8 +29,8 @@ _ETL_INTERVAL_SECONDS = int(os.environ.get("LANGTRACK_ETL_INTERVAL_SECONDS", "18
 _ETL_TIMEOUT_SECONDS = int(os.environ.get("LANGTRACK_ETL_TIMEOUT_SECONDS", "120"))
 
 
-def _run_etl_once() -> None:
-    """幂等重建事实表；失败只记日志不阻塞。"""
+def _run_etl_once() -> bool:
+    """幂等重建事实表；失败只记日志不阻塞。返回是否成功（Task 12c）。"""
     try:
         result = subprocess.run(
             [sys.executable, "-m", "gacore.langTrack.etl"],
@@ -42,21 +42,52 @@ def _run_etl_once() -> None:
         )
         if result.returncode == 0:
             logger.info("periodic ETL ok")
-        else:
-            logger.warning(
-                "periodic ETL failed rc=%s stderr=%s",
-                result.returncode,
-                (result.stderr or "")[-2000:],
-            )
+            return True
+        logger.warning(
+            "periodic ETL failed rc=%s stderr=%s",
+            result.returncode,
+            (result.stderr or "")[-2000:],
+        )
+        return False
     except Exception as e:  # noqa: BLE001
         logger.warning("periodic ETL error: %s", e)
+        return False
+
+
+# 手动/周期 ETL 共用的防重入状态（Task 12c：dashboard"立即转换"按钮）
+_ETL_STATE_LOCK = threading.Lock()
+_ETL_STATE: dict = {"running": False, "last_finished_at": None, "last_ok": None}
+
+
+def _try_start_etl() -> bool:
+    """非阻塞启动一次 ETL 后台任务；已有 ETL 在跑则返回 False（防重入）。
+
+    周期线程与手动按钮共用同一守卫，杜绝两个 ETL 子进程并发写库。
+    """
+    with _ETL_STATE_LOCK:
+        if _ETL_STATE["running"]:
+            return False
+        _ETL_STATE["running"] = True
+
+    def _task() -> None:
+        ok = False
+        try:
+            ok = _run_etl_once()
+        finally:
+            with _ETL_STATE_LOCK:
+                _ETL_STATE["running"] = False
+                _ETL_STATE["last_ok"] = bool(ok)
+                _ETL_STATE["last_finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    threading.Thread(target=_task, daemon=True, name="langTrack-etl-manual").start()
+    return True
 
 
 def _etl_loop(stop_event: threading.Event) -> None:
     while not stop_event.wait(_ETL_INTERVAL_SECONDS):
         try:
-            _run_etl_once()
-        except Exception:  # noqa: BLE001
+            _try_start_etl()
+        except Exception:
             logger.exception("periodic ETL loop crashed")
 
 
@@ -89,6 +120,17 @@ def create_app(storage: Storage) -> FastAPI:
             return render_dashboard_html(conn, day)
         finally:
             conn.close()
+
+    @app.post("/etl/run")
+    def etl_run() -> dict:
+        """手动触发一次 ETL（异步执行，立即返回；运行中则 busy，Task 12c）。"""
+        started = _try_start_etl()
+        return {"status": "started" if started else "busy"}
+
+    @app.get("/etl/status")
+    def etl_status() -> dict:
+        with _ETL_STATE_LOCK:
+            return dict(_ETL_STATE)
 
     @app.post("/ingest")
     def ingest(req: IngestRequest) -> dict:

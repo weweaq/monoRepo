@@ -74,6 +74,11 @@ background:#0B0F18;border:1px solid var(--line);border-radius:10px;padding:8px 1
 .dim{color:var(--ink3);font-size:11px}
 .mig-note{font-size:11px;color:var(--ink3);margin-top:6px}
 .evtr td{background:none;border:0;padding:2px 8px 10px}
+.etl-row{display:flex;gap:12px;align-items:center;margin:0 0 20px}
+#etl-btn{background:var(--card);border:1px solid var(--line);color:var(--cyan);
+padding:6px 14px;border-radius:9px;font-size:13px;cursor:pointer}
+#etl-btn:disabled{color:var(--ink3);cursor:default}
+#etl-btn:hover:not(:disabled){border-color:rgba(34,211,238,.4);background:rgba(34,211,238,.08)}
 """
 
 
@@ -998,6 +1003,27 @@ def render_dashboard_html(
 <h1>langTrack 数据仪表盘</h1>
 <div class="sub">自用数据监控 · 数据源: events + ETL 事实表</div>
 <div class="nav">{nav}</div>
+<div class="etl-row"><button id="etl-btn" onclick="runEtl(this)">立即转换 (ETL)</button><span id="etl-status" class="dim"></span></div>
+<script>
+function runEtl(btn){{
+  var s = document.getElementById('etl-status');
+  btn.disabled = true;
+  s.textContent = 'ETL 启动中…';
+  fetch('/etl/run', {{method: 'POST'}}).then(function(r){{return r.json();}}).then(function(j){{
+    if (j.status === 'busy') {{ s.textContent = '已有 ETL 在运行…'; }}
+    var t = setInterval(function(){{
+      fetch('/etl/status').then(function(r){{return r.json();}}).then(function(st){{
+        if (!st.running) {{
+          clearInterval(t);
+          s.textContent = '上次 ETL ' + (st.last_finished_at || '') +
+            (st.last_ok === true ? ' 成功' : (st.last_ok === false ? ' 失败' : '')) + '，刷新页面…';
+          location.reload();
+        }} else {{ s.textContent = 'ETL 运行中…'; }}
+      }});
+    }}, 2000);
+  }}).catch(function(){{ btn.disabled = false; s.textContent = '触发失败，请重试'; }});
+}}
+</script>
 {body}
 <div class="sub" style="margin-top:30px">© 场景标签为 ETL 逆地理编码结果</div>
 </body></html>"""

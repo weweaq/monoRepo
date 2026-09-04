@@ -484,7 +484,7 @@ flowchart TD
 - **places 是唯一不完全重建的表**：UPSERT 累计统计 + label 优先级「已确认 > 别名 > 未知」。
 - **v2 不碰 v1**：shadow/prepare 只写 `*_v2` + 审计表，v1 事实表与 `data/place_labels.json` 原样保留；activate 前对外仍是 v1（回家/公司标签不丢的保证）。
 - CLI：`python -m gacore.langTrack.etl [--db PATH] [--purge] [--no-geocode] [--no-route] [--no-poi] [--incremental] [--location-shadow] [--location-prepare] [--location-activate] [--location-rollback] [--location-recover]`（参数定义 etl.py:2622-2645）；`--purge` 先清理异常事件再重建；`--location-rollback`/`--location-recover` 为 v2 迁移回滚/恢复（Task 4，etl.py:2642/2645）。
-- 三种触发：server 周期线程（§2.1）/ 手动 CLI / `langTrack_stats` 调用前 `_ensure_etl()`。
+- 四种触发：server 周期线程（§2.1）/ dashboard「立即转换」按钮（`POST /etl/run` 异步执行 + `GET /etl/status` 查询，与周期线程共用防重入守卫，Task 12c）/ 手动 CLI / `langTrack_stats` 调用前 `_ensure_etl()`。
 
 ### 6.1 双坐标边界（`location_facts.py:778-818`）
 

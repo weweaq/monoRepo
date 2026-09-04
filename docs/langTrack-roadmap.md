@@ -2354,3 +2354,17 @@ Task 11：三份文档同步 + 真实库**备份后**全量 ETL（v1 + v2 shadow
 ### 验证
 - 受影响面回归（server/anomalies/etl_location/fact_card/report_evidence/persona/dashboard/location_migration）：**169 passed**；ruff 前后对比 15→14（零新增，顺带消一条存量 I001）。
 - 真实库：ETL 重跑后 09-04 off_schedule 消失（anomalies 7→6）；服务重启（PID 34824）后新上报事件即以主设备入库。
+
+## 2026-09-04：Task 12c dashboard「立即转换 (ETL)」按钮
+
+### 背景
+用户提出：ETL 目前只有 30 分钟周期线程与手动 CLI 两个触发方式，客户端延迟上传（白天事件夜间补传）后要等下一个周期才能看到画像，希望 dashboard 上有立即触发按钮。
+
+### 改动
+1. `server.py`：`POST /etl/run`（异步后台执行，立即返回 started/busy）+ `GET /etl/status`（running/last_finished_at/last_ok）；新增 `_try_start_etl()` 防重入守卫（线程锁），**周期线程与手动按钮共用**，杜绝两个 ETL 子进程并发写库；`_run_etl_once` 返回 bool 供状态记录；顺带清理一处失效 noqa（RUF100）。
+2. `dashboard.py`：导航栏下新增「立即转换 (ETL)」按钮——点击后 fetch POST /etl/run，轮询 /etl/status（2s 间隔），完成后显示"上次 ETL <时刻> 成功/失败"并自动 reload 页面加载新事实。
+3. TDD：`test_etl_run_endpoint_triggers_and_guards`（started→busy→完成态，monkeypatch _run_etl_once 计数防真跑）、`test_etl_status_shape`、`test_dashboard_renders_manual_etl_button`——先失败后通过。
+
+### 验证
+- 回归：server/dashboard/anomalies/etl_location/fact_card/report_evidence/persona/location_migration **172 passed**；ruff server/dashboard 全绿（All checks passed）。
+- 真实系统实测（PID 20512）：POST → `{"status":"started"}`，连点第二次 → `{"status":"busy"}`，轮询至 `{"running":false,"last_finished_at":"2026-09-04 22:19:31","last_ok":true}`，etl_state 水位由 22:12 推进——手动触发的 ETL 真实处理了新数据。

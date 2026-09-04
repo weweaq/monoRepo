@@ -92,3 +92,47 @@ def test_ingest_normalizes_alias_device(client, tmp_path, monkeypatch):
     conn = storage._conn
     devs = [r[0] for r in conn.execute("SELECT DISTINCT device_id FROM events")]
     assert devs == ["dev1"]
+
+
+def test_etl_status_shape(client):
+    """/etl/status 暴露 running/last_finished_at/last_ok 三字段。"""
+    c, _ = client
+    st = c.get("/etl/status").json()
+    assert st["running"] is False
+    assert set(st) >= {"running", "last_finished_at", "last_ok"}
+
+
+def test_etl_run_endpoint_triggers_and_guards(client, monkeypatch):
+    """/etl/run 异步触发 ETL；运行期间重复请求返回 busy（防重入）。"""
+    import time as _time
+
+    from gacore.langTrack import server as server_mod
+
+    calls = []
+
+    def fake_once():
+        calls.append(1)
+        _time.sleep(0.3)
+        return True
+
+    monkeypatch.setattr(server_mod, "_run_etl_once", fake_once)
+
+    c, _ = client
+    r1 = c.post("/etl/run")
+    assert r1.status_code == 200
+    assert r1.json()["status"] == "started"
+
+    r2 = c.post("/etl/run")
+    assert r2.status_code == 200
+    assert r2.json()["status"] == "busy"
+
+    deadline = _time.time() + 5
+    while _time.time() < deadline:
+        st = c.get("/etl/status").json()
+        if not st["running"]:
+            break
+        _time.sleep(0.05)
+    assert st["running"] is False
+    assert st["last_ok"] is True
+    assert st["last_finished_at"]
+    assert len(calls) == 1

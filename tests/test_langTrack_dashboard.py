@@ -718,3 +718,11 @@ def test_dashboard_day_param_xss_escaped():
     assert "<script>alert(1)</script>" not in html
     assert "&lt;script&gt;" in html
     assert "&lt;/script&gt;" in html
+
+
+def test_dashboard_renders_manual_etl_button():
+    """dashboard 顶部渲染"立即转换"按钮与 /etl/run 触发脚本。"""
+    html = render_dashboard_html(_make_db(), "2026-08-18")
+    assert 'id="etl-btn"' in html
+    assert "/etl/run" in html
+    assert "/etl/status" in html
