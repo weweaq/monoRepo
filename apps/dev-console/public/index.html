@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Dev Console · 本地服务控制台</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='%233fb950'/%3E%3C/svg%3E" />
+<style>
+  :root { --bg:#0f1419; --card:#1a212b; --border:#2a3441; --green:#3fb950; --red:#f85149; --text:#e6edf3; --muted:#8b949e; --accent:#58a6ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family:-apple-system,Segoe UI,Roboto,"Microsoft YaHei",sans-serif; }
+  header { padding:18px 24px; border-bottom:1px solid var(--border); display:flex; align-items:center; justify-content:space-between; }
+  header h1 { font-size:18px; margin:0; font-weight:600; }
+  header .right { display:flex; align-items:center; gap:10px; }
+  header button { flex:none; width:auto; padding:6px 14px; font-size:12px; }
+  header .addr { color:var(--muted); font-size:13px; font-family:ui-monospace,Menlo,Consolas,monospace; }
+  main { padding:24px; display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:16px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:16px; }
+  .card .top { display:flex; align-items:center; gap:10px; }
+  .dot { width:10px; height:10px; border-radius:50%; background:var(--red); flex:none; }
+  .dot.on { background:var(--green); }
+  .dot.warn { background:#d29922; }
+  .card .name { font-weight:600; font-size:15px; }
+  .card .meta { color:var(--muted); font-size:12px; margin:10px 0 14px; font-family:ui-monospace,Menlo,Consolas,monospace; min-height:16px; }
+  .actions { display:flex; gap:8px; }
+  button { flex:1; padding:8px 0; border:1px solid var(--border); border-radius:7px; background:#21262d; color:var(--text); cursor:pointer; font-size:13px; }
+  button:hover:not(:disabled) { border-color:var(--accent); }
+  button.stop { color:var(--red); }
+  button.log { color:var(--accent); }
+  button.cfg { color:var(--muted); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  .cfg-body { padding:16px; overflow:auto; display:flex; flex-direction:column; gap:12px; }
+  .cfg-body label { display:flex; flex-direction:column; gap:6px; font-size:12px; color:var(--muted); }
+  .cfg-body input, .cfg-body textarea { background:#0f1419; border:1px solid var(--border); border-radius:6px; color:var(--text); padding:8px 10px; font:12px/1.5 ui-monospace,Menlo,Consolas,monospace; resize:vertical; }
+  .cfg-body input:focus, .cfg-body textarea:focus { outline:none; border-color:var(--accent); }
+  .cfg-actions { display:flex; gap:8px; margin-top:4px; }
+  .cfg-tip { margin:0; font-size:12px; color:var(--muted); line-height:1.6; }
+  .modal { position:fixed; inset:0; background:rgba(0,0,0,.55); display:none; align-items:center; justify-content:center; z-index:50; }
+  .modal.show { display:flex; }
+  .modal-box { width:min(880px,94vw); height:72vh; background:var(--card); border:1px solid var(--border); border-radius:10px; display:flex; flex-direction:column; overflow:hidden; }
+  .modal-head { display:flex; align-items:center; gap:10px; padding:12px 16px; border-bottom:1px solid var(--border); }
+  .modal-head .dot { width:9px; height:9px; }
+  .modal-title { font-weight:600; font-size:14px; flex:none; }
+  .modal-path { color:var(--muted); font-size:12px; font-family:ui-monospace,Menlo,Consolas,monospace; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #logClose { flex:none; width:auto; padding:6px 16px; }
+  #logContent { flex:1; margin:0; padding:12px 16px; overflow:auto; font:12px/1.65 ui-monospace,Menlo,Consolas,monospace; white-space:pre-wrap; word-break:break-all; }
+  #banner { margin:0 24px; padding:10px 14px; border-radius:8px; display:none; font-size:13px; }
+  #banner.err { background:#3d1518; color:#ffb3ae; border:1px solid #5c1f24; }
+  #banner.ok { background:#10261a; color:#9be3b0; border:1px solid #1c3d2a; }
+  #toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:#21262d; border:1px solid var(--border); padding:10px 18px; border-radius:8px; font-size:13px; opacity:0; transition:opacity .25s; pointer-events:none; }
+  #toast.show { opacity:1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Dev Console · 本地服务控制台</h1>
+  <div class="right">
+    <button id="startAll">全部启动</button>
+    <button id="stopAll">全部停止</button>
+    <span class="addr" id="addr">127.0.0.1:8787</span>
+  </div>
+</header>
+<div id="banner"></div>
+<main id="grid"></main>
+<div id="toast"></div>
+<div id="logModal" class="modal">
+  <div class="modal-box">
+    <div class="modal-head">
+      <span class="dot"></span>
+      <span class="modal-title"></span>
+      <span class="modal-path"></span>
+      <button id="logClose">关闭</button>
+    </div>
+    <pre id="logContent"></pre>
+  </div>
+</div>
+<div id="cfgModal" class="modal">
+  <div class="modal-box">
+    <div class="modal-head">
+      <span class="modal-title"></span>
+      <span class="modal-path" style="flex:1"></span>
+      <button id="cfgClose">关闭</button>
+    </div>
+    <div class="cfg-body">
+      <label>解释器 interpreter
+        <input id="cfgInterpreter" type="text" spellcheck="false" />
+      </label>
+      <label>参数 args（JSON 数组）
+        <textarea id="cfgArgs" rows="3" spellcheck="false"></textarea>
+      </label>
+      <label>端口 ports（逗号分隔，如 8080, 8443）
+        <input id="cfgPorts" type="text" spellcheck="false" />
+      </label>
+      <label>工作目录 cwd
+        <input id="cfgCwd" type="text" spellcheck="false" />
+      </label>
+      <label>环境变量 env（JSON 对象）
+        <textarea id="cfgEnv" rows="2" spellcheck="false"></textarea>
+      </label>
+      <div class="cfg-actions">
+        <button id="cfgReset">恢复默认</button>
+        <button id="cfgSaveRestart" style="flex:1.4">保存并重启</button>
+        <button id="cfgSave" style="flex:1.4">保存</button>
+      </div>
+      <p class="cfg-tip">保存即写入 services.local.json（不影响 services.json 模板）。已运行的服务需重启才生效；修改端口会自动同步 args 中的 --port。</p>
+    </div>
+  </div>
+</div>
+
+<script>
+const TOKEN_KEY = "devConsoleToken";
+let token = localStorage.getItem(TOKEN_KEY) || "";
+
+function getToken() {
+  if (!token) {
+    const v = prompt("输入控制台 Token（默认 dev-console-local）：", "dev-console-local");
+    if (v === null) return null;
+    token = v;
+    localStorage.setItem(TOKEN_KEY, token);
+  }
+  return token;
+}
+
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.classList.remove("show"), 2600);
+}
+
+function banner(type, msg) {
+  const b = document.getElementById("banner");
+  if (!msg) { b.style.display = "none"; return; }
+  b.className = type;
+  b.textContent = msg;
+  b.style.display = "block";
+}
+
+async function apiStatus() {
+  const r = await fetch("/api/status", { cache: "no-store" });
+  if (!r.ok) throw new Error("status " + r.status);
+  return r.json();
+}
+
+async function postAction(path, id) {
+  const tk = getToken();
+  if (tk === null) return { aborted: true };
+  const r = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-DevConsole-Token": tk },
+    body: JSON.stringify({ service: id }),
+  });
+  let data = {};
+  try { data = await r.json(); } catch (e) {}
+  if (r.status === 401) {
+    token = "";
+    localStorage.removeItem(TOKEN_KEY);
+    banner("err", "Token 错误，请重试");
+    return { unauthorized: true };
+  }
+  return { ok: !!data.ok, message: data.message || String(r.status) };
+}
+
+function svcById(id) {
+  return (currentList || []).find(x => x.id === id) || { id: id, name: id };
+}
+
+async function apiAction(path, id, opts) {
+  opts = opts || {};
+  let res;
+  try {
+    res = await postAction(path, id);
+  } catch (e) {
+    toast("✗ 请求失败：" + (e && e.message ? e.message : "网络错误"));
+    return;
+  }
+  if (!res || res.aborted || res.unauthorized) return;
+  if (!res.ok) {
+    // 始终展示后端原始消息——外来占口的拒绝原因（PID+命令行）必须可读；
+    // 只有真崩溃（消息含“未存活/日志尾部”）才追加打开日志弹窗，否则会
+    // 用一个无关的空弹窗把可操作信息顶掉。
+    toast("✗ " + res.message);
+    if (opts.autoLog !== false && /未存活|日志尾部/.test(res.message)) {
+      openLog(svcById(id));
+    }
+    return;
+  }
+  toast("✓ " + res.message);
+}
+
+async function runAction(path, id) {
+  busy = true;
+  render(currentList, true);
+  try {
+    await apiAction(path, id);
+  } finally {
+    // finally 保证任何异常（后端瞬断、fetch reject）都不会把按钮永久禁用
+    busy = false;
+    refresh(true);
+  }
+}
+
+let busy = false;
+let currentList = [];
+let lastRenderJson = null;
+
+function render(list, force) {
+  currentList = list;
+  const snapshot = JSON.stringify(list);
+  if (!force && snapshot === lastRenderJson) return; // 状态无变化时跳过重建，避免 hover/焦点丢失与点击落空
+  lastRenderJson = snapshot;
+  const grid = document.getElementById("grid");
+  grid.innerHTML = "";
+  list.forEach(s => {
+    const card = document.createElement("div");
+    card.className = "card";
+    const declared = s.ports || [];
+    const opened = s.ports_open || [];
+    const closed = declared.filter(p => !opened.includes(p));
+    let meta, dotCls = "";
+    if (!s.running) {
+      meta = "○ 已停止";
+    } else {
+      dotCls = closed.length ? "warn" : "on";
+      meta = "● 运行中 · PID " + (s.pid ?? "?");
+      meta += closed.length
+        ? " · 端口未就绪 :" + closed.join(", :")
+        : (declared.length ? " · :" + declared.join(", :") : "");
+    }
+    card.innerHTML =
+      '<div class="top"><span class="dot ' + dotCls + '"></span>' +
+      '<span class="name"></span></div>' +
+      '<div class="meta"></div>' +
+      '<div class="actions">' +
+      '<button class="start">启动</button>' +
+      '<button class="restart">重启</button>' +
+      '<button class="stop">停止</button>' +
+      '<button class="log">日志</button>' +
+      '<button class="cfg">配置</button></div>';
+    card.querySelector(".name").textContent = s.name;
+    card.querySelector(".meta").textContent = meta;
+    ["start", "restart", "stop"].forEach(cls => { card.querySelector("." + cls).disabled = busy; });
+    startBtnWire(card, s);
+    card.querySelector(".log").onclick = () => openLog(s);
+    card.querySelector(".cfg").onclick = () => openConfig(s);
+    grid.appendChild(card);
+  });
+}
+
+function startBtnWire(card, s) {
+  card.querySelector(".start").onclick = () => runAction("/api/start", s.id);
+  card.querySelector(".restart").onclick = () => runAction("/api/restart", s.id);
+  card.querySelector(".stop").onclick = () => {
+    if (!confirm("确定停止「" + s.name + "」？（强制结束进程）")) return;
+    runAction("/api/stop", s.id);
+  };
+}
+
+/* ---- 日志查看 ---- */
+let logTimer = null;
+let logStick = true;  // 用户未主动上翻时保持跟随底部
+const ANSI_RE = /\x1B\[[0-9;]*[A-Za-z]/g;  // 服务端彩色输出会以 [32m 形式裸奔，统一清洗
+
+function openLog(s) {
+  const m = document.getElementById("logModal");
+  m.classList.add("show");
+  m.querySelector(".modal-title").textContent = s.name + " · 运行日志";
+  m.querySelector(".modal-path").textContent = "";
+  document.getElementById("logContent").textContent = "加载中…";
+  const pre = document.getElementById("logContent");
+  pre.onscroll = () => {
+    const nearBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 60;
+    logStick = nearBottom;
+  };
+  pollLog(s.id);
+  clearInterval(logTimer);
+  logTimer = setInterval(() => pollLog(s.id), 2000);
+}
+
+function closeLog() {
+  clearInterval(logTimer);
+  logTimer = null;
+  document.getElementById("logModal").classList.remove("show");
+}
+
+async function pollLog(id) {
+  const m = document.getElementById("logModal");
+  const pre = document.getElementById("logContent");
+  try {
+    const r = await fetch("/api/log?service=" + encodeURIComponent(id) + "&lines=500", { cache: "no-store" });
+    const d = await r.json();
+    if (!d.ok) return;
+    m.querySelector(".modal-path").textContent = d.path || "";
+    m.querySelector(".modal-head .dot").classList.toggle("on", !!d.running);
+    const text = ((d.content || d.hint || "（暂无输出）") + "").replace(ANSI_RE, "");
+    if (pre.textContent !== text) {
+      const wasStuck = logStick;
+      pre.textContent = text;
+      if (wasStuck) pre.scrollTop = pre.scrollHeight;
+    }
+  } catch (e) { /* 后端暂不可达，保持现状 */ }
+}
+
+document.getElementById("logClose").onclick = closeLog;
+document.getElementById("logModal").addEventListener("click", (e) => {
+  if (e.target === document.getElementById("logModal")) closeLog();
+});
+
+/* ---- 配置编辑 ---- */
+let cfgServices = null;
+let cfgSid = null;
+
+async function loadConfigDefs() {
+  if (!cfgServices) {
+    const d = await (await fetch("/api/config", { cache: "no-store" })).json();
+    cfgServices = d.services;
+  }
+  return cfgServices;
+}
+
+async function openConfig(s) {
+  const defs = await loadConfigDefs();
+  const def = defs.find(x => x.id === s.id);
+  if (!def) return;
+  cfgSid = s.id;
+  document.getElementById("cfgModal").classList.add("show");
+  document.getElementById("cfgModal").querySelector(".modal-title").textContent = def.name + " · 配置";
+  document.getElementById("cfgInterpreter").value = def.interpreter || "";
+  document.getElementById("cfgArgs").value = JSON.stringify(def.args || []);
+  document.getElementById("cfgPorts").value = (def.ports || []).join(", ");
+  document.getElementById("cfgCwd").value = def.cwd || "";
+  document.getElementById("cfgEnv").value = JSON.stringify(def.env || {}, null, 2);
+}
+
+function closeCfg() {
+  document.getElementById("cfgModal").classList.remove("show");
+}
+
+function collectCfgFields() {
+  const fields = {};
+  fields.interpreter = document.getElementById("cfgInterpreter").value.trim();
+  try {
+    fields.args = JSON.parse(document.getElementById("cfgArgs").value || "[]");
+    if (!Array.isArray(fields.args)) throw new Error("not array");
+  } catch (e) { toast("✗ args 必须是 JSON 数组"); return null; }
+  fields.ports = document.getElementById("cfgPorts").value.split(",")
+    .map(x => x.trim()).filter(Boolean).map(Number);
+  fields.cwd = document.getElementById("cfgCwd").value.trim();
+  try {
+    fields.env = JSON.parse(document.getElementById("cfgEnv").value || "{}");
+    if (typeof fields.env !== "object" || Array.isArray(fields.env) || fields.env === null) throw new Error("not obj");
+  } catch (e) { toast("✗ env 必须是 JSON 对象"); return null; }
+  return fields;
+}
+
+async function saveCfg(andRestart) {
+  const fields = collectCfgFields();
+  if (!fields) return;
+  const tk = getToken();
+  if (tk === null) return;
+  let r, d;
+  try {
+    r = await fetch("/api/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-DevConsole-Token": tk },
+      body: JSON.stringify({ service: cfgSid, fields }),
+    });
+    d = await r.json().catch(() => ({}));
+  } catch (e) {
+    toast("✗ 保存失败：" + (e && e.message ? e.message : "网络错误"));
+    return;
+  }
+  toast((d.ok ? "✓ " : "✗ ") + (d.message || r.status));
+  cfgServices = null;
+  closeCfg();
+  if (d.ok && andRestart && cfgSid) runAction("/api/restart", cfgSid);
+  else refresh();
+}
+
+async function resetCfg() {
+  const tk = getToken();
+  if (tk === null) return;
+  if (!confirm("恢复该服务的默认配置？")) return;
+  let r, d;
+  try {
+    r = await fetch("/api/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-DevConsole-Token": tk },
+      body: JSON.stringify({ service: cfgSid, reset: true }),
+    });
+    d = await r.json().catch(() => ({}));
+  } catch (e) {
+    toast("✗ 重置失败：" + (e && e.message ? e.message : "网络错误"));
+    return;
+  }
+  toast((d.ok ? "✓ " : "✗ ") + (d.message || r.status));
+  cfgServices = null;
+  closeCfg();
+  refresh();
+}
+
+document.getElementById("cfgClose").onclick = closeCfg;
+document.getElementById("cfgSave").onclick = () => saveCfg(false);
+document.getElementById("cfgSaveRestart").onclick = () => saveCfg(true);
+document.getElementById("cfgReset").onclick = resetCfg;
+document.getElementById("cfgModal").addEventListener("click", (e) => {
+  if (e.target === document.getElementById("cfgModal")) closeCfg();
+});
+
+async function refresh(force) {
+  try {
+    const data = await apiStatus();
+    banner("");
+    render(data.services, force);
+  } catch (e) {
+    banner("err", "无法连接后端（127.0.0.1:8787 是否未启动？）");
+  }
+}
+
+/* ---- 批量启停 ---- */
+async function batch(path, label) {
+  if (busy) return;
+  const list = currentList || [];
+  if (!list.length) return;
+  if (path === "/api/stop" && !confirm("确定停止全部服务？（强制结束进程）")) return;
+  busy = true;
+  render(currentList, true);
+  let okN = 0;
+  const fails = [];
+  let abortReason = "";
+  try {
+    for (let i = 0; i < list.length; i++) {
+      toast(label + " (" + (i + 1) + "/" + list.length + ")…");
+      let res;
+      try {
+        res = await postAction(path, list[i].id);
+      } catch (e) {
+        fails.push(list[i].name + "（网络错误）");
+        continue;
+      }
+      if (!res || res.aborted) { abortReason = "已取消"; break; }
+      if (res.unauthorized) { abortReason = "Token 失效"; break; }
+      if (res.ok) okN++;
+      else fails.push(list[i].name + "（" + res.message + "）");
+    }
+  } finally {
+    busy = false;
+    refresh(true);
+  }
+  const bad = fails.length > 0 || !!abortReason;
+  toast((bad ? "✗ " : "✓ ") + label + "完成：" + okN + "/" + list.length +
+        (abortReason ? "；中断：" + abortReason : "") +
+        (fails.length ? "；失败：" + fails.join("；") : ""));
+}
+
+document.getElementById("startAll").onclick = () => batch("/api/start", "批量启动");
+document.getElementById("stopAll").onclick = () => batch("/api/stop", "批量停止");
+
+/* ---- 全局快捷键 ---- */
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") { closeLog(); closeCfg(); }
+});
+
+refresh();
+setInterval(() => refresh(false), 5000);
+</script>
+</body>
+</html>
