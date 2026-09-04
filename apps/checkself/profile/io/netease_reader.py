@@ -26,10 +26,8 @@
 import json
 import os
 import subprocess
-import time
 from collections import Counter
 from datetime import datetime
-from pathlib import Path
 from shutil import which
 
 from profile.config import PROJECT_ROOT

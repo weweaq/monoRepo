@@ -1,7 +1,3 @@
-import sqlite3
-import tempfile
-import os
-from pathlib import Path
 from profile.db.init_db import get_connection, init_db
 
 

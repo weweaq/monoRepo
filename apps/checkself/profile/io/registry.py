@@ -53,7 +53,6 @@ def _discover() -> dict[str, type[BaseReader]]:
     found: dict[str, type[BaseReader]] = {}
     for cls in _walk_subclasses(BaseReader):
         try:
-            instance_source = cls.__name__
             # 用 source_name 作为注册键，需实例化取属性（只读属性，无副作用）
             sample = cls()
             key = sample.source_name

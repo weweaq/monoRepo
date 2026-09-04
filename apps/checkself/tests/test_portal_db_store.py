@@ -1,4 +1,3 @@
-from datetime import datetime
 from profile.portal.db_store import (
     insert_task_run, update_task_run, get_task_run,
     query_task_runs, insert_llm_call, query_llm_calls,

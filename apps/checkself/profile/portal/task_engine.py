@@ -1,17 +1,14 @@
 ﻿"""Portal 任务引擎：进程内线程池执行 + 日志捕获 + contextvars。"""
 
 import contextvars
-import json
 import logging
 import threading
-import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 from profile.portal.db_store import (
     insert_task_run, update_task_run, get_task_run,
-    query_task_runs, recover_stale_tasks,
 )
 
 # === ContextVars: 在任务执行期间传递 task_run_id 和 step ===
@@ -206,22 +203,22 @@ class TaskRunner:
 
                 try:
                     if task_type == "ingest_single":
-                        result = step_fn(params.get("source", ""))
+                        step_fn(params.get("source", ""))
                     elif task_type == "ingest":
-                        result = step_fn(params.get("source", ""))
+                        step_fn(params.get("source", ""))
                     elif task_type == "refresh_all":
                         if idx == 0:
                             # refresh_all 是一整个 main() 调用，步骤 0 直接跑
-                            result = _run_cli("profile.cli.refresh_all",
-                                              ["--days", str(params.get("days", 7))])
+                            _run_cli("profile.cli.refresh_all",
+                                     ["--days", str(params.get("days", 7))])
                             steps_status.append({"name": "全链路刷新", "status": "done",
                                                 "started_at": step_started,
                                                 "finished_at": datetime.now().isoformat(timespec="seconds")})
                             break
                         else:
-                            result = step_fn()
+                            step_fn()
                     else:
-                        result = step_fn()
+                        step_fn()
 
                     step_finished = datetime.now().isoformat(timespec="seconds")
                     steps_status.append({"name": step_name, "status": "done",

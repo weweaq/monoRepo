@@ -14,9 +14,9 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from profile.db.init_db import init_db
-from profile.config import LOG_DIR, OBSIDIAN_OUTPUT_DIR, ensure_dirs
+from profile.config import LOG_DIR, ensure_dirs
 from profile.log import setup
-from profile.portal.task_engine import get_runner, recover_stale_tasks
+from profile.portal.db_store import recover_stale_tasks
 from profile.portal.routes import dashboard, tasks, data, llm, profiles
 
 app = FastAPI(title="checkSelf Portal")

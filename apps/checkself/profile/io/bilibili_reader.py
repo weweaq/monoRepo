@@ -224,7 +224,6 @@ class BilibiliReader(BaseReader):
     def read(self) -> list[ChatRecord]:
         records = []
         for item in self._fetch_all_history():
-            bvid = item.get("bvid") or item.get("id")
             viewed_at = item.get("viewed_at")
             if not viewed_at:
                 continue

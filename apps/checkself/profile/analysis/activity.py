@@ -1,7 +1,6 @@
 """活跃时段分析（规则版，无需 LLM）。"""
 
 from collections import Counter
-from datetime import datetime
 
 from profile.models import ChatRecord
 

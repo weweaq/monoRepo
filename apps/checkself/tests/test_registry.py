@@ -6,11 +6,9 @@
   - 新增源只需放一个 reader 文件即可被发现（外挂验证）。
 """
 
-import os
 import sys
 from pathlib import Path
 
-import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -61,7 +59,6 @@ def test_ingest_filters_unknown_names():
 
 def test_dropin_plugin_discovered(tmp_path):
     """外挂验证：在 io/ 放一个 reader 文件即可被自动发现，无需改中央注册。"""
-    import importlib
     import profile.io.registry as registry
 
     plugin = tmp_path / "myplugin_reader.py"

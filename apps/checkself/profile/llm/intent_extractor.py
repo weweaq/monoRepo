@@ -1,6 +1,6 @@
 import json
 
-from profile.config import LLM_FALLBACK_TO_RULES, LLM_MODEL
+from profile.config import LLM_MODEL
 from profile.db.store import get_unprocessed_raw_data, insert_intent
 from profile.llm.client import LLMClient
 from profile.llm.prompts import INTENT_SYSTEM
