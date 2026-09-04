@@ -7,6 +7,7 @@ members = [
     "dev-console",
     "gacore",
     "mono",
+    "profile",
 ]
 
 [[package]]
@@ -1227,6 +1228,28 @@ sdist = { url = "https://files.pythonhosted.org/packages/74/89/1f3e8e1fc3e97de0f
 wheels = [
     { url = "https://files.pythonhosted.org/packages/45/e2/bbb7129c9e7999a6b8ee9cca3b66486c25c423ab5a75f34071798b74ce94/pre_commit-4.6.2-py2.py3-none-any.whl", hash = "sha256:e2dde9a75d3bce11bd3831c26d134df00a2803c1d818be6a0383c3dcda25dc4e", size = 226202, upload-time = "2026-08-10T22:07:16.942Z" },
 ]
+
+[[package]]
+name = "profile"
+version = "0.1.0"
+source = { virtual = "apps/checkself" }
+dependencies = [
+    { name = "fastapi" },
+    { name = "uvicorn" },
+]
+
+[package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "fastapi", specifier = ">=0.100" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
+    { name = "uvicorn", specifier = ">=0.20" },
+]
+provides-extras = ["dev"]
 
 [[package]]
 name = "prompt-toolkit"

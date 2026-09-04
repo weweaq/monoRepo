@@ -7,7 +7,18 @@ dependencies = ["fastapi>=0.100", "uvicorn>=0.20"]
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
 
-[dependency-groups]
-dev = [
-    "httpx2>=2.0.0",
-]
+# mono 接线（与上游的差异，原因见 apps/checkself/ROADMAP.md）：
+# - 虚拟成员（不构建不安装）：包名 profile 与标准库同名，装进 site-packages 会被
+#   标准库 shadow，运行语义保持"应用目录内运行"（如 uv run --directory apps/checkself ...）
+# - 移除 dependency-groups 的 httpx2：测试从未 import（PyPI 上另有其包）；
+#   若后续要用 TestClient，工作区已有真 httpx（gacore 依赖）
+[tool.uv]
+package = false
+
+# 迁移基线 = 最小规则集（与 withlanggraph 一致），根配置全量规则下存量 106 处
+# （I001/RUF013/E501 等）记入 ROADMAP lint 债务，待专项整改。
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
