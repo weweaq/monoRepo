@@ -10,6 +10,7 @@ dist/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+tmp_pytest/
 
 # Runtime data (DBs, logs, exports) — only the README is tracked
 data/*

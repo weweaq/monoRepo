@@ -1,5 +1,7 @@
 # Quality gate for the mono workspace: ruff + pytest (R7 in AGENTS.md).
 # Usage: powershell -File tools/scripts/check.ps1 [-Fix]
+# --all-packages installs every workspace member so member tests can import
+# their own package (uv's default sync only installs the root project).
 
 param(
     [switch]$Fix
@@ -7,6 +9,12 @@ param(
 
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 Set-Location $repoRoot
+
+uv sync --all-packages
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[check] uv sync failed" -ForegroundColor Red
+    exit $LASTEXITCODE
+}
 
 if ($Fix) {
     uv run ruff check --fix apps packages tests
@@ -18,7 +26,7 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-uv run pytest
+uv run --all-packages pytest
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[check] pytest failed" -ForegroundColor Red
     exit $LASTEXITCODE

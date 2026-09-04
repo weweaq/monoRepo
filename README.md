@@ -6,10 +6,10 @@
 ## 快速开始
 
 ```powershell
-uv sync                            # 安装全部成员与 dev 依赖
-uv run pytest                      # 全仓测试
+uv sync --all-packages                # 安装全部成员与 dev 依赖
+uv run --all-packages pytest          # 全仓测试
 uv run ruff check apps packages tests
-tools/scripts/check.ps1            # 一键质量门禁（R7）
+tools/scripts/check.ps1               # 一键质量门禁（R7）
 ```
 
 ## 项目地图

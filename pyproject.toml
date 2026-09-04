@@ -32,3 +32,6 @@ ignore = ["RUF001", "RUF002", "RUF003", "UP031"]
 [tool.pytest.ini_options]
 testpaths = ["tests", "apps", "packages"]
 asyncio_mode = "auto"
+# 独立 basetemp：绕开共享 %TEMP%\pytest-of-* 目录（其中遗留的 ACL 拒绝符号链接
+# 会让 pytest 启动即崩溃，WinError 5）。每次运行自动清空该目录。
+addopts = "--basetemp=tmp_pytest"

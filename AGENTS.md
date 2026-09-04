@@ -81,14 +81,16 @@
 ## 3. 常用命令
 
 ```powershell
-uv sync                                          # 安装全部成员与 dev 依赖
-uv run pytest                                    # 全仓测试
-uv run ruff check apps packages tests            # 全仓 lint
-uv run pytest apps/<name>/tests                  # 只跑某个应用的测试
-uv run --package <name> <entry>                  # 运行某个应用入口
-tools/scripts/check.ps1                          # 一键质量门禁（可加 -Fix 自动修 lint）
-uv run pre-commit install                        # 启用 git 提交钩子（首次运行需联网拉取钩子环境）
+uv sync --all-packages                          # 安装全部成员与 dev 依赖（成员需显式 --all-packages）
+uv run --all-packages pytest                    # 全仓测试
+uv run ruff check apps packages tests           # 全仓 lint
+uv run pytest apps/<name>/tests                 # 只跑某个应用的测试（或 cd 进该应用后 uv run pytest）
+uv run --package <name> <entry>                 # 运行某个应用入口
+tools/scripts/check.ps1                         # 一键质量门禁（sync + ruff + pytest，可加 -Fix 自动修 lint）
+uv run pre-commit install                       # 启用 git 提交钩子（首次运行需联网拉取钩子环境）
 ```
+
+> 注意：uv 默认只安装根项目依赖，workspace 成员不会进环境——涉及成员的命令必须带 `--all-packages` 或 `--package <name>`。
 
 ## 4. 提交前检查清单
 
