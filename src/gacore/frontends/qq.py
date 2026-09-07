@@ -526,6 +526,40 @@ def _build_image_prompt(
 
 
 
+def _persist_chat_log(memory_dir: Path, chat_id: str, user_id: str, direction: str, text: str) -> None:
+    """Append one chat line to memory/qq_chat_log.jsonl — the daily-report chat source.
+
+    Schema per line: {"ts": iso+08, "chat_id", "user_id", "direction": "user"|"bot",
+    "text"}. The daily info pack's _build_chat reads direction=="user" entries for the
+    date; both directions are archived for debugging fidelity. Best-effort: OSError
+    only warns (chat must never be blocked by the archive).
+    """
+    try:
+        memory_dir.mkdir(parents=True, exist_ok=True)
+        path = memory_dir / "qq_chat_log.jsonl"
+        now = datetime.now().astimezone().isoformat(timespec="seconds")
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(
+                json.dumps(
+                    {
+                        "ts": now,
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "direction": direction,
+                        "text": text[:2000],
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+    except OSError as exc:
+        logger.error(
+            "QQ chat log persist failed",
+            error_type=type(exc).__name__,
+            stack_trace=str(exc),
+        )
+
+
 def _persist_ocr_history(memory_dir: Path, paths: list[str], ocr_texts: dict[str, str]) -> str | None:
 
     """Append this batch of OCR results to memory/ocr_history.jsonl; returns the file path.
@@ -864,6 +898,9 @@ class QQApp:
 
     async def send_text(self, chat_id: str, content: str, *, msg_id: str | None = None, is_group: bool = False) -> None:
 
+        # Chat archive: every outgoing bot message → memory/qq_chat_log.jsonl (bot side).
+        _persist_chat_log(Config.default().memory_dir, chat_id, "", "bot", content)
+
         await self._send_markdown(chat_id, content, is_group=is_group, msg_id=msg_id)
 
 
@@ -953,6 +990,10 @@ class QQApp:
 
 
             logger.info(f"QQ message from {user_id} ({'group' if is_group else 'c2c'}): {content[:80]}")
+
+            # Chat archive: every user text message → memory/qq_chat_log.jsonl, the
+            # first-person signal source for the daily-report info pack (2026-09-04).
+            _persist_chat_log(Config.default().memory_dir, chat_id, user_id, "user", content)
 
 
 

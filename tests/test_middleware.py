@@ -442,3 +442,75 @@ def test_graph_model_failure_injects_agent_error(tmp_cfg: Config, message_llm: A
     last = final["messages"][-1]
     assert isinstance(last, AIMessage)
     assert last.content.startswith("[Agent error: provider boom]")
+
+
+# ------------------------------------------------------- integration: LLM call log
+
+
+def test_graph_model_call_logged_to_llm_calls_jsonl(
+    tmp_cfg: Config, message_llm: Any
+) -> None:
+    """End to end: every model call appends one full request/response line to
+    logs/llm_calls/<date>.jsonl — the "what did we actually send the LLM" audit
+    trail added 2026-09-04 (daily-report 可排查性).
+    """
+    import json
+
+    from gacore.middleware import _LLM_LOG_DIRNAME
+
+    llm = message_llm([AIMessage(content="logged answer")])
+    graph = _graph(llm, tmp_cfg)
+    state = new_state("hello", tmp_cfg)
+
+    final = graph.invoke(state, {"configurable": {"thread_id": "e2e-llmlog"}})
+
+    assert final["exit_reason"] == "CURRENT_TASK_DONE"
+    today = datetime.now(_TZ8).strftime("%Y-%m-%d")
+    log_path = tmp_cfg.logs_dir / _LLM_LOG_DIRNAME / f"{today}.jsonl"
+    assert log_path.is_file()
+    lines = [ln for ln in log_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(lines) == 1  # 单次 model call → 单行日志
+    entry = json.loads(lines[0])
+    assert set(entry) >= {"ts", "model", "messages", "response"}
+    # 请求侧：GAPromptMiddleware 重建的 system prompt + 原始 user message
+    roles = [m["role"] for m in entry["messages"]]
+    assert roles[0] == "system"
+    assert "human" in roles
+    assert entry["messages"][-1]["content"] == "hello"
+    # 响应侧：fake model 的答案
+    assert entry["response"]["content"] == "logged answer"
+
+
+def test_graph_model_call_log_on_provider_exception(
+    tmp_cfg: Config, message_llm: Any
+) -> None:
+    """End to end: a provider exception still leaves a log line with response.error —
+    失败请求同样留痕，排查"日报为什么没生成"时有据可查。
+
+    注意链上不能挂 ModelRetryMiddleware：它会把异常转成 agent-error 消息，异常
+    就不会穿透到 GAPromptMiddleware 的 except 分支（生产链路同理，该分支兜的是
+    retry 之外的抛错形态）。
+    """
+    import json
+
+    llm = _CountingFake([AIMessage(content="unexpected")], raise_on_invoke=True)
+    graph = create_agent(
+        llm,
+        tools=[],
+        state_schema=GAState,
+        middleware=[GAPromptMiddleware(tmp_cfg), GATurnLogicMiddleware()],
+        checkpointer=MemorySaver(),
+        name="test-llmlog-err",
+    )
+    state = new_state("hello", tmp_cfg)
+
+    with pytest.raises(RuntimeError, match="provider boom"):
+        graph.invoke(state, {"configurable": {"thread_id": "e2e-llmlog-err"}})
+
+    today = datetime.now(_TZ8).strftime("%Y-%m-%d")
+    log_path = tmp_cfg.logs_dir / "llm_calls" / f"{today}.jsonl"
+    assert log_path.is_file()
+    lines = [ln for ln in log_path.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(lines) == 1
+    entry = json.loads(lines[0])
+    assert "provider boom" in entry["response"]["error"]

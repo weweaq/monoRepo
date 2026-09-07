@@ -15,11 +15,13 @@ prefixed), so production falls back to os.environ and tests pass a plain dict.
 
 from __future__ import annotations
 
+import mimetypes
 import os
 import smtplib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from email.header import Header
+from email.mime.application import MIMEApplication
 from email.mime.image import MIMEImage
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -59,6 +61,7 @@ class SendEmailResult(TypedDict):
     to: str
     subject: str
     image_count: int
+    attachment_count: int
 
 
 class SendEmailError(TypedDict):
@@ -138,6 +141,22 @@ def _image_subtype(path: str) -> str:
     return _IMAGE_SUBTYPES.get(ext, "jpeg")
 
 
+def _attachment_maintype_subtype(path: str) -> tuple[str, str]:
+    """Return (maintype, subtype) for an arbitrary attachment via mimetypes.
+
+    Falls back to application/octet-stream for unknown/included extensions (e.g. .apk),
+    except .apk which is a well-known Android package mime intentionally mapped here.
+    """
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".apk":
+        return "application", "vnd.android.package-archive"
+    guess, _ = mimetypes.guess_type(path)
+    if guess and "/" in guess:
+        main, sub = guess.split("/", 1)
+        return main, sub
+    return "application", "octet-stream"
+
+
 def _subject_header(subject: str) -> str | Header:
     """Return the subject as plain text for ASCII, RFC-2047 encoded only when non-ASCII (Chinese-safe)."""
     return subject if subject.isascii() else Header(subject, "utf-8")
@@ -149,14 +168,60 @@ def _build_message(
     from_addr: str,
     to_addr: str,
     image_paths: list[str] | None = None,
+    attachment_paths: list[str] | None = None,
 ) -> MIMEMultipart | MIMEText:
-    """Build an HTML email; existing image files are inlined as cid:photoN attachments."""
+    """Build an email; existing inline images (cid:photoN) plus arbitrary file attachments.
+
+    Uses a multipart/mixed wrapper when there are attachments, nesting the HTML+inline
+    images as multipart/related inside it — so attachments show as files, images inline.
+    With no images and no attachments a plain text/html message is returned.
+    """
     headers = {"Subject": _subject_header(subject), "From": from_addr, "To": to_addr}
+
+    # --- inner part: html (+ optional inline images, multipart/related) ---
+    inner: MIMEMultipart | MIMEText
+    inner = _build_html_part(body, image_paths)
+    for key, value in headers.items():
+        inner[key] = value
+
+    # --- attachments present: wrap inner in multipart/mixed and attach files ---
+    valid_attachments = [
+        path for path in (attachment_paths or []) if os.path.exists(path)
+    ]
+    missing = len(attachment_paths or []) - len(valid_attachments)
+    if missing:
+        logger.warning("send_email skipping missing attachments", missing=missing)
+
+    if not valid_attachments:
+        return inner
+
+    msg = MIMEMultipart("mixed")
+    for key, value in headers.items():
+        msg[key] = value
+    msg.attach(inner)
+    for path in valid_attachments:
+        main, sub = _attachment_maintype_subtype(path)
+        try:
+            with open(path, "rb") as fh:
+                part = MIMEApplication(fh.read(), _subtype=sub, _encoder=lambda x: x)
+            part.set_type(f"{main}/{sub}")
+            part.add_header(
+                "Content-Disposition", "attachment", filename=os.path.basename(path)
+            )
+            msg.attach(part)
+        except OSError as exc:
+            logger.warning(
+                "send_email failed to attach file", path=path, error=str(exc)
+            )
+    return msg
+
+
+def _build_html_part(
+    body: str, image_paths: list[str] | None
+) -> MIMEMultipart | MIMEText:
+    """Build the inner html part, inlining existing images as cid:photoN (multipart/related)."""
     if not image_paths:
-        msg: MIMEMultipart | MIMEText = MIMEText(body, "html", "utf-8")
-        for key, value in headers.items():
-            msg[key] = value
-        return msg
+        return MIMEText(body, "html", "utf-8")
 
     valid_images = [path for path in image_paths if os.path.exists(path)]
     missing = len(image_paths) - len(valid_images)
@@ -164,10 +229,7 @@ def _build_message(
         logger.warning("send_email skipping missing image files", missing=missing)
 
     if not valid_images:
-        msg = MIMEText(body, "html", "utf-8")
-        for key, value in headers.items():
-            msg[key] = value
-        return msg
+        return MIMEText(body, "html", "utf-8")
 
     img_tags = "".join(
         f'<img src="cid:photo{idx}" style="max-width:100%;height:auto;margin-top:16px;border-radius:8px;">'
@@ -179,8 +241,6 @@ def _build_message(
         body_with_images = body + img_tags
 
     msg = MIMEMultipart("related")
-    for key, value in headers.items():
-        msg[key] = value
     msg.attach(MIMEText(body_with_images, "html", "utf-8"))
 
     for idx, image_path in enumerate(valid_images):
@@ -202,6 +262,7 @@ def _send_sync(
     body: str,
     settings: _SmtpSettings,
     image_paths: list[str] | None = None,
+    attachment_paths: list[str] | None = None,
     smtp_factory: Callable[..., object] | None = None,
 ) -> SendEmailResult | SendEmailError:
     """Connect, authenticate and send; returns an error dict on any failure (never raises)."""
@@ -211,7 +272,7 @@ def _send_sync(
         if not settings.ssl:
             server.starttls()
         server.login(settings.user, settings.password)
-        msg = _build_message(subject, body, settings.user, to_addr, image_paths)
+        msg = _build_message(subject, body, settings.user, to_addr, image_paths, attachment_paths)
         server.sendmail(settings.user, [to_addr], msg.as_string())
         server.quit()
     except (smtplib.SMTPException, OSError) as exc:
@@ -224,8 +285,21 @@ def _send_sync(
         return SendEmailError(error="smtp_failed", message=str(exc), to=to_addr)
 
     image_count = len(image_paths) if image_paths else 0
-    logger.info("send_email sent", to=to_addr, subject=subject, image_count=image_count)
-    return SendEmailResult(status="sent", to=to_addr, subject=subject, image_count=image_count)
+    attachment_count = len(attachment_paths) if attachment_paths else 0
+    logger.info(
+        "send_email sent",
+        to=to_addr,
+        subject=subject,
+        image_count=image_count,
+        attachment_count=attachment_count,
+    )
+    return SendEmailResult(
+        status="sent",
+        to=to_addr,
+        subject=subject,
+        image_count=image_count,
+        attachment_count=attachment_count,
+    )
 
 
 @tool
@@ -234,14 +308,17 @@ def send_email(
     subject: str = "",
     body: str = "",
     image_paths: list[str] | None = None,
+    attachment_paths: list[str] | None = None,
     _env: Mapping[str, str] | None = None,
 ) -> SendEmailResult | SendEmailError:
-    """Send an email over SMTP; body is HTML and image_paths are inlined as images.
+    """Send an email over SMTP; body is HTML; image_paths inlined as images, attachment_paths attached as files.
 
     Credentials and SMTP server come from the environment (SMTP_USER / SMTP_PASSWORD /
     SMTP_TO / SMTP_HOST / SMTP_PORT / SMTP_SSL / SMTP_TIMEOUT); SMTP_HOST / SMTP_PORT /
     SMTP_SSL are optional and auto-detected from the sender domain when unset. When `to`
-    is empty the SMTP_TO default recipient is used. Returns an error dict, never raises.
+    is empty the SMTP_TO default recipient is used. attachment_paths may include any file
+    type (e.g. .apk, .pdf, .csv); only existing files are attached. Returns an error dict,
+    never raises.
     """
     env = os.environ if _env is None else _env
     settings = _resolve_settings(env)
@@ -259,4 +336,4 @@ def send_email(
         logger.warning("send_email skipped: no recipient")
         return SendEmailError(error="recipient_required", message="no `to` argument and no SMTP_TO default", to="")
 
-    return _send_sync(subject, recipient, body, settings, image_paths)
+    return _send_sync(subject, recipient, body, settings, image_paths, attachment_paths)

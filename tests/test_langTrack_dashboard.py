@@ -741,3 +741,211 @@ def test_dashboard_renders_time_space_matrix():
     assert "生活轨迹 · 时段分布" in html
     assert "00:00" in html
     assert _render_time_space(None).count("数据不足") == 1
+
+
+# ---------------------------------------------------------------------------
+# 当日定位采集明细 / 当日地图卡（Task 13）/ 迁移已解决计数
+# ---------------------------------------------------------------------------
+
+
+def _make_loc_db(dev: str = "dev1", day: str = "2026-08-18") -> sqlite3.Connection:
+    """明细卡与地图数据合成库：家/公司 canonical 地点 + 当日定位点 + stay + trip。"""
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
+    cur.execute(
+        "CREATE TABLE places (id INTEGER, device_id TEXT, place_id TEXT, label TEXT,"
+        "lat REAL, lon REAL, poi TEXT, poi_fallback TEXT, address TEXT, district TEXT,"
+        "township TEXT, business_area TEXT, parent_poi TEXT, name_confidence REAL,"
+        "name_evidence TEXT, geocoded_at INTEGER)"
+    )
+    cur.execute(
+        "CREATE TABLE events (id INTEGER, device_id TEXT, ts INTEGER, type TEXT,"
+        "payload TEXT, received_at INTEGER)"
+    )
+    cur.execute(
+        "CREATE TABLE stays (id INTEGER, device_id TEXT, place_id TEXT, start_ts INTEGER,"
+        "end_ts INTEGER, day TEXT, center_lat REAL, center_lon REAL,"
+        "source_coord_system TEXT)"
+    )
+    cur.execute(
+        "CREATE TABLE trips (id INTEGER, device_id TEXT, start_ts INTEGER, end_ts INTEGER,"
+        "day TEXT, route_mode TEXT, polyline TEXT)"
+    )
+    cur.execute(
+        "INSERT INTO places VALUES (1,?,?,'家',31.9928,118.7829,'康盛花园','','"
+        "江苏省南京市康盛花园4期','雨花台区','','','',0.9,'regeo:POI',1)",
+        (dev, "p_home"),
+    )
+    cur.execute(
+        "INSERT INTO places VALUES (2,?,?,'公司',31.9751,118.7670,'润东科创园','','"
+        "江苏省南京市众智路9号','雨花台区','','','',0.9,'regeo:POI',1)",
+        (dev, "p_work"),
+    )
+    evs = [
+        (1, dev, _ts(2026, 8, 18, 0, 5), "location",
+         json.dumps({"lat": 31.9927, "lon": 118.7828, "acc": 15, "provider": "gps"})),
+        (2, dev, _ts(2026, 8, 18, 0, 35), "location",
+         json.dumps({"lat": 31.9929, "lon": 118.7830, "acc": 30, "provider": "network"})),
+        (3, dev, _ts(2026, 8, 18, 10, 0), "location",
+         json.dumps({"lat": 31.9752, "lon": 118.7671, "acc": 22, "provider": "gps"})),
+        (4, dev, _ts(2026, 8, 18, 11, 0), "location", "{bad json"),
+        (5, dev, _ts(2026, 8, 18, 11, 30), "usage", json.dumps({"pkg": "com.x"})),
+    ]
+    cur.executemany(
+        "INSERT INTO events VALUES (?,?,?,?,?,?)",
+        [(i, d, t, ty, p, t) for i, d, t, ty, p in evs],
+    )
+    cur.execute(
+        "INSERT INTO stays VALUES (1,?,?,?,?,'2026-08-18',31.9928,118.7829,'wgs84')",
+        (dev, "p_home", _ts(2026, 8, 18, 0, 0), _ts(2026, 8, 18, 8, 0)),
+    )
+    cur.execute(
+        "INSERT INTO trips VALUES (1,?,?,?,'2026-08-18','walking',?)",
+        (dev, _ts(2026, 8, 18, 8, 0), _ts(2026, 8, 18, 9, 0),
+         json.dumps([[31.9928, 118.7829], [31.9840, 118.7750], [31.9751, 118.7670]])),
+    )
+    conn.commit()
+    return conn
+
+
+def test_location_points_detail_card():
+    """明细卡：点数/最近地点（§2.6 名）/精度/信号源；坏 payload 单独计数不混入。"""
+    from gacore.langTrack.dashboard import _render_location_points
+
+    html = _render_location_points(_make_loc_db(), "dev1", "2026-08-18")
+    assert "定位采集明细 · 2026-08-18" in html
+    assert "当日定位点 3 个" in html
+    assert "康盛花园〔家〕" in html          # 最近地点按 §2.6 显示（POI 名 + tag）
+    assert "15m" in html and "22m" in html  # 精度
+    assert "gps" in html and "network" in html
+    assert "另有 1 个事件 payload 解析失败" in html
+    assert "usage" not in html              # 非定位事件不混入
+
+
+def test_location_points_detail_card_empty_day():
+    from gacore.langTrack.dashboard import _render_location_points
+
+    html = _render_location_points(_make_loc_db(), "dev1", "2026-08-01")
+    assert "当日无定位事件" in html
+
+
+def test_map_card_degrades_without_js_key(monkeypatch):
+    """无 AMAP_JS_KEY：地图卡降级为配置指引，不输出 canvas、不外呼。"""
+    import gacore.langTrack.dashboard as dash
+
+    monkeypatch.setattr(dash, "_amap_js_key", lambda: "")
+    html = dash._render_map_card("2026-08-18", "dev1")
+    assert "地图未启用：未配置 AMAP_JS_KEY" in html
+    assert "Web端(JS API)" in html
+    assert 'id="map-canvas"' not in html
+
+
+def test_map_card_enabled_with_js_key(monkeypatch):
+    """配置 JS Key：渲染 canvas + langTrackMap 调用（Key 只出现在自有页面）。"""
+    import gacore.langTrack.dashboard as dash
+
+    monkeypatch.setattr(dash, "_amap_js_key", lambda: "js-key-1")
+    monkeypatch.setattr(dash, "_amap_js_security_code", lambda: "")
+    html = dash._render_map_card("2026-08-18", "dev1")
+    assert 'id="map-canvas"' in html
+    assert "langTrackMap(" in html
+    assert "js-key-1" in html
+
+
+def test_map_card_injects_security_code(monkeypatch):
+    """配置安全密钥：secCode 进调用签名；_AMapSecurityConfig 注入先于 JS API 加载。"""
+    import gacore.langTrack.dashboard as dash
+
+    monkeypatch.setattr(dash, "_amap_js_key", lambda: "js-key-1")
+    monkeypatch.setattr(dash, "_amap_js_security_code", lambda: "sec-1")
+    html = dash._render_map_card("2026-08-18", "dev1")
+    assert '"js-key-1", "sec-1", "2026-08-18", "dev1"' in html
+    # 注入语句在 _MAP_JS 里须先于 JS API script 加载（高德要求加载前设置）
+    assert dash._MAP_JS.index("_AMapSecurityConfig") < dash._MAP_JS.index(
+        "webapi.amap.com/maps"
+    )
+    assert "securityJsCode" in dash._MAP_JS
+
+
+def test_map_card_xss_escaped_with_key_enabled(monkeypatch):
+    """启用路径：day/device_id 注入 <script> 须被 \u003c 转义（不依赖 .env 配置状态）。"""
+    import gacore.langTrack.dashboard as dash
+
+    monkeypatch.setattr(dash, "_amap_js_key", lambda: "js-key-1")
+    monkeypatch.setattr(dash, "_amap_js_security_code", lambda: "")
+    html = dash._render_map_card('"><script>alert(1)</script>', "dev1")
+    assert "<script>alert(1)</script>" not in html
+    assert "\\u003cscript\\u003e" in html
+
+
+def test_build_map_day_data_structure(monkeypatch):
+    """地图数据：点按坐标制转换（wgs84→GCJ02）、stay 名走 §2.6、trip polyline 原样。"""
+    import gacore.langTrack.dashboard as dash
+    import gacore.langTrack.location_facts as lf
+
+    monkeypatch.setattr(
+        "gacore.langTrack.etl_config.load_coord_systems",
+        lambda: {"default": "wgs84", "periods": []},
+    )
+    d = dash.build_map_day_data(_make_loc_db(), "2026-08-18")
+    assert d["device_id"] == "dev1"
+    assert len(d["points"]) == 3
+    for p in d["points"]:
+        exp_lat, exp_lon = lf.to_amap_coord(
+            p["lat"], p["lon"], "gcj02"  # 已转过的值不再变化（gcj02 原样）
+        )
+        assert (p["lat"], p["lon"]) == (exp_lat, exp_lon)
+    # 第一原始点 (31.9927, 118.7828) wgs84 → GCJ02 偏移后 != 原值
+    assert d["points"][0]["lat"] != 31.9927
+    assert d["points"][0]["acc"] == 15 and d["points"][0]["p"] == "gps"
+    assert len(d["stays"]) == 1
+    assert d["stays"][0]["name"] == "康盛花园〔家〕"
+    assert d["stays"][0]["dur_h"] == 8.0
+    assert len(d["trips"]) == 1
+    assert d["trips"][0]["mode"] == "walking"
+    assert len(d["trips"][0]["path"]) == 3
+
+
+def test_build_map_day_data_ambiguous_and_empty():
+    import gacore.langTrack.dashboard as dash
+
+    conn = _make_loc_db()
+    conn.execute(
+        "INSERT INTO events VALUES (9,'dev2',?, 'location', ?, ?)",
+        (_ts(2026, 8, 18, 12, 0), json.dumps({"lat": 1.0, "lon": 2.0}),
+         _ts(2026, 8, 18, 12, 0)),
+    )
+    conn.commit()
+    d = dash.build_map_day_data(conn, "2026-08-18")
+    assert d["error"] == "ambiguous_device"
+    assert set(d["candidates"]) == {"dev1", "dev2"}
+
+    d2 = dash.build_map_day_data(_make_loc_db(), "2026-08-01")
+    assert d2["error"] == "no_data"
+
+
+def test_dashboard_renders_loc_points_and_map_cards(monkeypatch):
+    """整页渲染：明细卡与地图卡挂在定位健康卡之后；无 Key 时地图降级。"""
+    import gacore.langTrack.dashboard as dash
+
+    monkeypatch.setattr(dash, "_amap_js_key", lambda: "")
+    conn = _make_v2_db()
+    html = render_dashboard_html(conn, "2026-08-18")
+    assert "定位采集明细" in html
+    assert "当日地图" in html
+    assert "地图未启用" in html
+    assert html.index("定位健康") < html.index("定位采集明细") < html.index("当日地图")
+
+
+def test_migration_review_shows_resolved_count():
+    """迁移卡：open 按类计数 + 已解决数（审计存档语义）。"""
+    conn = _make_v2_db()
+    conn.execute(
+        "INSERT INTO location_migration_issues VALUES (?,?,?,?,?,?,?)",
+        (3, "unmapped_tag", None, "{}", "g_z", "家", "resolved"),
+    )
+    conn.commit()
+    html = _render_v2(conn)
+    assert "已解决 issue（审计存档）" in html
+    assert "tag_conflict×1" in html
