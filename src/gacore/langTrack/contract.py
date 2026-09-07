@@ -21,6 +21,7 @@ EXPECTED_EVENT_TYPES: dict[str, dict] = {
     "clipboard":     {"desc": "剪贴板",         "consumed": "false"},
     "input":         {"desc": "输入法",         "consumed": "false"},
     "media":         {"desc": "媒体播放",       "consumed": "false"},
+    "music_play":    {"desc": "听歌记录(通知监听拆出)", "consumed": "true"},
     "bt_device":     {"desc": "蓝牙设备",       "consumed": "false"},
     "battery":       {"desc": "电池",          "consumed": "false"},
     "network":       {"desc": "网络切换",       "consumed": "false"},

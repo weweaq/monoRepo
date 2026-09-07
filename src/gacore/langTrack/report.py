@@ -776,6 +776,65 @@ def _rhythm_weather(conn: sqlite3.Connection, day: str, device_id: str | None = 
 
     return result
 
+def _listen_music(conn: sqlite3.Connection, day: str, device_id: str | None = None) -> list:
+    """今日听歌记录：聚合当日 music_play 事件（网易云等，客户端通知监听拆出），
+    输出按歌累计次数 Top + 歌手 Top，作 C1 人物画像的一环。
+    返回 [(title, singer, count, last_state), ...]（按次数倒序）。
+    """
+    day_start_ms = int(datetime.datetime.fromisoformat(f"{day} 00:00").timestamp()) * 1000
+    day_end_ms = day_start_ms + 86400000
+    dev_frag, dev_args = _dev_bind(device_id)
+    rows = conn.execute(
+        f"SELECT ts, payload FROM events WHERE type='music_play' AND ts>=? AND ts<?"
+        f"{dev_frag} ORDER BY ts",
+        [day_start_ms, day_end_ms, *dev_args],
+    ).fetchall()
+    if not rows:
+        return []
+    song_seen: dict[str, int] = defaultdict(int)
+    singer_ms: dict[str, int] = defaultdict(int)
+    title_of: dict[str, str] = {}
+    singer_of: dict[str, str] = {}
+    last_state: dict[str, str] = {}
+    last_ts: dict[str, int] = {}
+    max_ts = 0
+    for r in rows:
+        try:
+            pl = json.loads(r["payload"])
+        except (TypeError, ValueError):
+            continue
+        title = (pl.get("title") or "").strip()
+        singer = (pl.get("singer") or "").strip()
+        if not title:
+            continue
+        song_seen[title] += 1
+        # payload 无 ts 字段；歌手按"该歌手名下每首歌出现的次数"累计（同一事件计数一次）
+        if singer:
+            singer_ms[singer] = singer_ms.get(singer, 0) + 1
+        title_of[title] = title
+        singer_of[title] = singer
+        last_state[title] = pl.get("state") or ""
+        if r["ts"] > max_ts:
+            max_ts = r["ts"]
+            last_ts[title] = r["ts"]
+    ranking = sorted(
+        ((title, singer_of[title], count) for title, count in song_seen.items()),
+        key=lambda x: -x[2],
+    )
+    print("\n■ 今日常听（音乐）")
+    if ranking:
+        for t, s, c in ranking[:10]:
+            disp = f"《{t}》" + (f" - {s}" if s else "")
+            print(f"  · {disp} × {c}")
+    singer_top = sorted(
+        ((s, cnt) for s, cnt in singer_ms.items() if s),
+        key=lambda x: -x[1],
+    )[:5]
+    if singer_top:
+        print("  常听歌手: " + " / ".join(f"{s}({c})" for s, c in singer_top))
+    return ranking
+
+
 def _write_snapshot(
     conn: sqlite3.Connection, day: str, profile: dict,
     device_id: str | None = None,
@@ -913,6 +972,10 @@ def report(
             t = datetime.datetime.fromtimestamp(s["start_ms"] / 1000).strftime("%H:%M")
 
             print(f"    {t} {s['app']} {fmt_dur(s['duration_ms'])}")
+
+    # ---------- 1.5 今日常听（C1 人物画像：音乐偏好） ----------
+
+    music_ranking = _listen_music(conn, day, device_id)
 
     # ---------- 2. 通知疲劳 ----------
 
@@ -1238,6 +1301,8 @@ def report(
         "scenes": scenes,
 
         "outings": outings,
+
+        "music": [{"title": t, "singer": s, "count": c} for t, s, c in music_ranking],
 
         "anomalies": anomaly_list,
 
