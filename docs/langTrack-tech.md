@@ -98,8 +98,12 @@ flowchart LR
 | 方法 | 路径 | 参数 | 响应 | 说明 |
 |---|---|---|---|---|
 | GET | `/health` | — | `{"status":"ok"}` | 存活探针 |
+| GET | `/api/client/version` | — | `{"app_version":"1.N","latest_apk_url":""}` | 客户端版本自查（Task 14）：服务端声明期望客户端版本。请求时读 `data/client_version.json`（存在优先，缺失回退 `server.py` 常量 `_EXPECTED_CLIENT_VERSION`）——该文件由 weiCheckApp `build.ps1` 打包后自动写入，故设置页版本对比随打包自动推进，**无需重启服务端**。客户端 `VersionChecker.kt` 拉取后与 PackageManager `versionName`（`versionName="{major}.{minor}.{buildNumber}"`，如 1.0.1；buildNumber 由 `version.properties` 存储、`build.ps1` 每次构建后递增）对比，设置页「关于」显示「已是最新 / 可更新→vX.X / 检查中」 |
 | POST | `/ingest` | body=`IngestRequest` | `{"status":"ok","inserted":N,"deduplicated":bool}` | 幂等：`batch_id` 重复时返回 `{"status":"ok","inserted":0,"deduplicated":true}` |
-| GET | `/dashboard` | `?day=YYYY-MM-DD`（可选） | `text/html` | 深色单页仪表盘，调 `render_dashboard_html(conn, day)`（`dashboard.py:237`），每次请求新开只读连接；含「事实审查块」（FactCard 逐项人眼核对，不跑 ETL）；含「生活轨迹 · 时段分布」卡（小时 × 家/公司/其他 30 天矩阵，`spatial_profile._time_space_matrix`，单小时 ≥15 分钟计入、跨午夜 stay 按自然日分摊、无数据不隐藏）与「立即转换 (ETL)」按钮 |
+| GET | `/dashboard` | `?day=YYYY-MM-DD`（可选） | `text/html` | 深色单页仪表盘，调 `render_dashboard_html(conn, day)`（`dashboard.py:237`），每次请求新开只读连接；含「事实审查块」（FactCard 逐项人眼核对，不跑 ETL）；含「生活轨迹 · 时段分布」卡（小时 × 家/公司/其他 30 天矩阵，`spatial_profile._time_space_matrix`，单小时 ≥15 分钟计入、跨午夜 stay 按自然日分摊、无数据不隐藏）、「定位采集明细」卡（当日原始层 location 事件逐点：时间\|最近地点·距离\|精度\|信号源，`_render_location_points`，最近地点按 canonical 地点 WGS84 球面距离最小、显示名走 §2.6）、「当日地图」卡（高德 JS API，`_render_map_card`）与「立即转换 (ETL)」按钮 |
+| POST | `/etl/run` | — | `{"status":"started"}` / `{"status":"busy"}` | 异步触发 ETL 子进程；与周期线程共用防重入守卫（Task 12c） |
+| GET | `/etl/status` | — | `{"running":bool,"last_finished_at":...,"last_ok":bool}` | ETL 运行状态查询（Task 12c） |
+| GET | `/api/map/day` | `?day=` `?device_id=`（均可选） | JSON：`{device_id, points[], stays[], trips[]}` 或 `{error:"ambiguous_device"\|"no_data", ...}` | 地图卡前端数据源（Task 13）。点按 `to_amap_coord` 转 GCJ02；stay 名走 §2.6；trip polyline 已是 GCJ02 原样；device_id 省略时按当日唯一设备解析，多设备返回 candidates |
 
 ### 2.1 幂等与事务语义（`storage.ingest_batch`, storage.py:89-115）
 
@@ -195,6 +199,9 @@ SQLite 单库 `data/langTrack.db`（gitignore）。分两层：**原始层**只�
 | received_at | INTEGER | 服务端接收时刻(ms)，区别于客户端 `ts` |
 
 索引：`idx_events_device_ts(device_id, ts)`。
+
+`music_play` 事件（客户端 `WeiNotificationListener` 从媒体通知拆出，日报「今日常听」消费）payload 字段：
+`pkg/app`（包名/显示名）、`title`=歌名、`singer`/`album`（由 `"歌手 - 专辑"` 拆分）、`state`=`playing|paused`；`ts`=客户端 `System.currentTimeMillis`（postTime 切歌不变）。**注意：payload 内无 `ts` 字段**，report 聚合用事件行 `ts`，勿读 payload.ts。
 
 旧库迁移：`_add_timestamp_columns`（storage.py:37-59）对三张表补 `created_at/updated_at` 并用各自业务时间列回填东八区可读时间。
 
@@ -407,9 +414,9 @@ agent 工具 `langTrack_stats(day)` 的返回结构（gacore 主 agent 日报自
 
 ### 5.3 采集契约 EXPECTED_EVENT_TYPES（`contract.py:11-33`）
 
-18 个期望类型 × consumed（`true`=ETL 消费 / `partial`=部分 / `false`=仅采集）：
+19 个期望类型 × consumed（`true`=ETL 消费 / `partial`=部分 / `false`=仅采集）：
 
-usage、session、notification、location、audio_env、audio_clip、accel(false)、snapshot(partial)、screen_content、clipboard、input、media、bt_device、battery、network、app_lifecycle、call、sms。`STALE_DAYS=7`。
+usage、session、notification、location、audio_env、audio_clip、accel(false)、snapshot(partial)、screen_content、clipboard、input、media、music_play、bt_device、battery、network、app_lifecycle、call、sms。`STALE_DAYS=7`。
 
 契约由人维护：客户端新增/废弃类型时显式更新此文件，ETL 校验产出 unexpected/missing。
 
@@ -442,7 +449,7 @@ flowchart LR
 | place_id | canonical 地点 ID（v2 shadow 前为 v1 place 网格生成的稳定 ID） |
 | grid_key | 代表网格 |
 | place_name / name_source | 显示名 / 来源（`poi\|poi_fallback\|address\|district\|unknown`） |
-| display_granularity / name_confidence | 显示粒度（venue/address/district/...）/ 置信度（仅选粒度，非到访置信） |
+| display_granularity / name_confidence | 显示粒度（venue/address/district/...）/ 置信度（仅选粒度，非到访置信）。生产侧来源：geocode regeo 按 matched_level 回填（Task 13 `_NAME_CONFIDENCE_BY_LEVEL`：POI=0.80/AOI=0.65/道路=0.45/行政区=0.30），`refresh_name_confidence()` 可对存量按已有 matched_level 补算；v1 旧库无该列时 `incremental_encode` 自动跳过 |
 | user_tag | 家 / 公司 / `""`（= `NULLIF(label,'未知')`） |
 | poi / poi_fallback / address / district / township / business_area / parent_poi / behavior | regeo 语义回填字段 |
 | name_evidence | 地名证据（供审计） |
@@ -505,12 +512,15 @@ flowchart TD
 | 项 | 位置 | 说明 |
 |---|---|---|
 | 高德 Key | `.env`（字节查找读取，容错混合编码，踩坑 #3） | regeo / 路径规划(walking 默认，`LANGTRACK_ROUTE_MODE` 可切 driving) / around POI |
+| `AMAP_JS_KEY` | `.env` 或环境变量（`dashboard._amap_js_key` → `_read_env_var` 字节查找） | 高德「**Web端(JS API)**」类型 Key，专供 dashboard 地图卡前端（Task 13）。与上行的 Web 服务型 Key **互不通用**；未配置时地图卡优雅降级为配置指引（不渲染 canvas、不外呼），配置后自动启用 |
+| `AMAP_JS_SECURITY_CODE` | `.env` 或环境变量（`dashboard._amap_js_security_code`） | JS API **安全密钥**（与 Key 同页生成）。2021-12 后申请的 Key 在 JS API 2.0 必配：缺失报 INVALID_USER_SCODE；前端在加载 JS API 前注入 `window._AMapSecurityConfig.securityJsCode`（`_MAP_JS` 函数首行）。旧 Key 无密钥可不配（前端跳过注入） |
 | `LANGTRACK_ETL_INTERVAL_SECONDS` | env | 周期 ETL 间隔，默认 1800s |
 | `LANGTRACK_ETL_TIMEOUT_SECONDS` | env | 单次 ETL 子进程超时，默认 120s |
 | `data/place_labels.json` | 文件 | 人工确认的家/公司标签持久化（v3：`(device_id, place_id)` 主键 + anchor_grid_key 追溯；ETL 重跑恢复） |
 | `data/location_coord_systems.json` | 文件 | 设备坐标制声明（`default=unknown` + periods 按设备/历史区间；2026-09-04 起两台 device_id 声明 wgs84；重叠 period 拒绝 ETL） |
 | `data/app_categories.json` | 文件（gitignore） | App 分类映射；缺失时代码内置默认兜底 |
 | `data/profiles/langTrack_profile_<day>.json` | 文件 | report L5 画像快照（含 coverage/persona） |
+| 高德 Android 定位 SDK（`com.amap.api:location:6.1.0`，weiCheckApp 仓库） | gradle（`settings.gradle.kts` 加 `https://developer.amap.com/maven/` 仓库）+ Manifest | **客户端采集定位源**（v1.0.8 起，Task 高德定位）：裸 `LocationManager` 后台被国产 ROM/ColorOS 静默抑制（GPS 几近零回调、只剩 network 缓存点）→ 叠加 `AMapLocationClient`（Hight_Accuracy 连续定位/关缓存/关 mock）作主动可靠 fix 源，回调转 android `Location` 喂同一 `locationListener`，复用位置驱动切档 + haversine 速度判定。Key 用 `meta-data com.amap.api.v2.apikey` 单源（权限补充 `ACCESS_BACKGROUND_LOCATION` + 声明 `com.amap.api.location.APSService`）。详见 weiCheckApp `SensorCollector.kt` 与 roadmap 2026-09-07 节 |
 
 ---
 
@@ -990,3 +1000,144 @@ flowchart LR
 - 全量 `pytest tests/` = **514 passed / 12 failed**（原 504 + 新增 10；12 失败与基线一致：test_cli 11 个 pygraphviz 环境缺失 + test_qq 1 个 MagicMock await，经 git stash 还原验证非本次引入）。
 - `ruff check src/gacore/proactive.py tests/test_proactive_p3.py` 全过。
 - 未 kill/重启 bot；未改 `.ps1/.bat`；未执行 git 提交。同步更新 roadmap 2026-08-30 P3 段。
+
+## 9.20 日报生成链路 v2.1：当日信息包 + QQ 对话源 + LLM 留痕 + 双归档（2026-09-04）
+
+> v2（09-02，预算 2000）设计定稿于 `output/daily-report-redesign-v2.md`，实现日志 `docs/daily-report-v2-implementation-log.md`；本节为 v2.1 扩容与可排查性改造后的**当前生效实现**。
+
+### 数据流
+
+```mermaid
+flowchart TD
+    subgraph QQ["QQ 前端 (qq.py)"]
+        U["用户消息 / bot 回复"] --> PL["_persist_chat_log<br/>append memory/qq_chat_log.jsonl"]
+    end
+    subgraph SCHED["scheduler.run_job (23:50)"]
+        IP["build_info_pack(today)<br/>daily_info_pack.py"]
+        SRC["9 路信号源<br/>画像compact/QQ对话/langTrack/<br/>B站/Edge/git/文件/ncm/前日日报"]
+        SRC --> IP
+        IP --> BP["_build_job_prompt<br/>信息包前置到 user prompt"]
+        BP --> GR["_default_graph_runner<br/>(create_agent)"]
+    end
+    PL -.第9路读取.-> SRC
+    subgraph MW["middleware (每次 model call)"]
+        GR --> LCL["LLM 调用留痕<br/>append logs/llm_calls/<date>.jsonl"]
+    end
+    GR --> SAN["_sanitize_reply + _is_incomplete_reply"]
+    SAN --> OUT["logs/scheduled/daily-report_<ts>.md<br/>五段式双归档"]
+    SAN --> MAIL["邮件正文 (deliver_to=email)"]
+```
+
+### 信息包（`daily_info_pack.py`）
+
+- 入口唯一：`build_info_pack(date, cfg=None) -> str`，PACK_BUDGET=**8000**（v2.1 由 2000 扩容）。逐源 try/except 兜底，单源失败只标注「该源失败」，全源失败仍返回最小可用包。
+- 9 路信号源与 cap：长期画像 compact 1600（≤40 行）｜**QQ 当日对话（第 9 路，v2.1 新增）** 1200（≤15 条用户消息）｜langTrack 800｜B站 top20 1200｜Edge 域名 top10 900｜git 当日提交 700｜文件活动 top15 1000｜ncm 基线 700｜前日日报摘要 900。整体熔断：超出预算截断加省略号。
+- 消费指令块（≤400 字符）随包输出：时间戳语义、素材须引用不入文、整包预算说明。
+
+### QQ 对话源落盘（`qq.py:_persist_chat_log`）
+
+- `on_message` 收到用户文本与 `send_text` 发出回复时各落一行到 `memory/qq_chat_log.jsonl`：`{ts: iso+08, chat_id, user_id, direction: "user"|"bot", text(≤2000)}`。
+- 双向都存（排查保真），信息包只取 `direction=="user"`；OSError 仅 logger.error，绝不阻塞聊天主链路。
+
+### LLM 调用留痕（`middleware.py`，区别于 §9.13 的 llm_requests.jsonl）
+
+| 日志 | 挂点层 | 粒度 |
+| --- | --- | --- |
+| `logs/{date}/llm_requests.jsonl`（§9.13） | `llm.py get_llm` monkey-patch | 每个 invoke/ainvoke/stream 调用点（含 trivial 回应） |
+| `logs/llm_calls/{date}.jsonl`（v2.1 新增） | `GATurnLogicMiddleware` wrap_model_call | graph 内**每次 model call**：完整请求 messages（单条 20k 字符封顶）+ 响应 content/tool_calls/usage + model |
+
+- 序列化注意：`ModelResponse.result` 是消息列表时取**末位消息**再取 content。
+- append 失败只 warning，不影响主链路。
+
+### 日报双归档（`scheduler.py:_write_output`）
+
+`logs/scheduled/daily-report_<ts>.md` 五段式（"到底用什么生成了日报"的排查物证）：
+
+1. metadata（时间/schedule/error/llm_call_log 路径指引）
+2. System Prompt（`_reconstruct_system_prompt` best-effort 重建，失败留空不阻塞）
+3. User Prompt（**实际发送体**：信息包 + job prompt，非裸 prompt）
+4. Reply（清洗后 = 实际交付的邮件正文）
+5. Reply (raw)（清洗前原文，对照 sanitize 是否误伤）
+
+`_sanitize_reply`：剥完整 `<summary>...</summary>` 块（跨行正则）→ 未闭合 `<summary>` 残渣清到结尾 → 剥工具调用 DSL 残尾行。`_is_incomplete_reply`：原始非空但清洗后为空 → `exit_reason=INCOMPLETE_REPLY`，残渣不再冒充正文发出。
+
+### 验证
+
+- 单测：`tests/test_daily_info_pack.py`（对话源空/满/截断、预算契约 8000、熔断路径 monkeypatch 2000）、`tests/test_scheduler.py`（sanitize/INCOMPLETE/归档五段式）、`tests/test_middleware.py`（llm_calls.jsonl 端到端）。
+- 四文件合跑 129 passed；全量 978 passed / 11 failed（test_cli pygraphviz 环境缺失，基线遗留）。
+- prompt 侧（`config/schedule.json` jobs[0]）：素材=信息包 9 路源说明 + 邮件密度硬规则（结构化 Markdown、单 bullet 单事实 ~60 字、括号嵌套 ≤1 层）。
+
+## 9.21 日报失败自动重试一次 + 9/4 事故（2026-09-05）
+
+### 事故：正文只有思考块残渣
+9/4 23:53 邮件正文只有一段未闭合 `<summary>` + 全角竖线 DSML 残渣，无正文。两层根因：**①旧代码没进昨晚进程**（`logs/llm_calls/` 不存在，v2.1 的 LLM 留痕/sanitize/INCOMPLETE 全部未生效）；**②模型单轮没产出正文**——只吐思考块就"完成"了。旧 sanitize 不懂剥未闭合 `<summary>`，垃圾被当正文发出、标题仍标成功。
+
+### 重试机制（scheduler.py）
+`scheduler.run_job` 执行段改最多 2 次循环（`_MAX_JOB_ATTEMPTS=2`）：
+
+```mermaid
+flowchart TD
+    A["_build_job_prompt<br/>(信息包+prompt)"] --> B["run graph 第1次"]
+    B --> C{"exit_reason ∈<br/>INCOMPLETE/EMPTY?"}
+    C -- 否 --> D["成功：发正常日报"]
+    C -- 是 且 是日报job --> E["_make_retry_prompt<br/>(追加强约束后缀)"]
+    E --> F["run graph 第2次"]
+    F --> G{"仍有残渣?"}
+    G -- 是 --> H["判败 · 发 [gacore][FAILED]"]
+    G -- 否 --> D
+```
+
+- `_RETRYABLE_REASONS = {"INCOMPLETE_REPLY","EMPTY_REPLY"}`；仅 `_is_daily_job` 触发重试（普通 job 不双倍消耗）。
+- 重试只追加 `_RETRY_PROMPT_SUFFIX`（硬约束：严禁 `<summary>`/XML 思考块、禁止再调工具、按分节直接输出 Markdown 正文），**不重新 `build_info_pack`**——信息包已在首次 prompt 装配，省一次 B站/Edge 取数耗时。
+- 访问点：`_make_retry_prompt(prompt)`、`_MAX_JOB_ATTEMPTS` 模块常量。
+
+### 实证
+- 9/4 真实残渣喂当前 `_sanitize_reply` → `cleaned=''`、`incomplete=True`（现在能拦）。
+- 测试：`TestRunJobRetry` 6 例 + `TestMakeRetryPrompt` 1 例；三件套 113 passed。
+- **真实补跑验证（9/4 手动作，08:41-08:46）**：第一次生成**复现事故** `INCOMPLETE_REPLY`（模型又只吐思考块），重试机制自动触发 → 第二次 `CURRENT_TASK_DONE` 产出 1014 字符正文并成功发信（subject `[gacore] daily-report · 2026-09-05`）。归档 `logs/scheduled/daily-report_20260905_084612.md` 正文干净无残渣；`logs/llm_calls/2026-09-05.jsonl` 首次落盘（reconstruct 的 system prompt 中仍见 9/4 daily note 的旧 `<summary>` 残渣——已随 9/4 note 清理）。证实：模型"只吐思考块"是**反复发生**的，自动重试一次是必要兜底，且硬约束二次基本能成篇。
+
+## 9.22 日报邮件 Markdown→HTML 渲染（2026-09-05 晚）
+
+### 问题
+`_email_body_html` 旧实现 = `html.escape(reply)` 塞 `<pre>`，Markdown 从未转换——手机邮箱里 `#`、`**`、`-` 全是裸字符。`send_email` 一直支持 HTML（`MIMEText(body,"html")`），缺的只是正文构造层。
+
+### 实现（scheduler.py，零第三方依赖）
+- `_md_to_email_html(md)`：确定性子集转换——`#{1-6}` 标题→`<h1-6>`（带层级样式）、连续 `-/*/+` bullet 合组 `<ul>`（空行/标题切分）、`**bold**`→`<b>`、`` `code` ``→`<code>`、其余行降级 `<p>`。
+- `_md_inline(text)`：**先 `html.escape` 再套行内变换**——模型输出里的 `<script>` 等永不穿透（XSS 安全）。
+- 样式全部**内联**（`style='...'`）：邮箱客户端普遍剥离 `<style>` 块。容器 680px 移动端友好、行高 1.75、标题下划线分隔、FAILED 红字横幅置顶。
+- 消费点：`_deliver_email → send_email(body=_email_body_html(reply, error))`；`send_email`/`_send_sync` 签名（含 `attachment_paths`）见 `tools/email_tools.py`（测试 fake 需对齐该签名）。
+
+### 验证
+- `TestEmailBodyHtml` 9 用例（渲染/合组/分节/XSS/降级/横幅）；scheduler 69 passed；ruff 零告警。
+- 真实重发：9/4 正文 1014 字符 → 2671 字符 HTML，成功送达。
+
+## 9.23 运动轨迹进日报（trajectory_map + 高德静态图，2026-09-07）
+
+### 数据源
+- **trips**（`data/langTrack.db`）：已由 ETL 归并主设备；关键列 `polyline`（JSON 数组，每点 `[lat,lon]`，**GCJ02**）、`dist_m`、`duration_ms`、`route_mode`、`start_ts`。dashboard 用高德 JS API 在浏览器画线；邮件不支持 JS，故改用静态图接口。
+- `route_grids` / `grid_pois`：按天路径网格（本模块未用，轨迹取 trips.polyline 路径线）。
+
+### 模块 src/gacore/langTrack/trajectory_map.py
+- `render_day_trajectory(conn, day, out_path, device_id=None) -> Path|None`：调 `restapi.amap.com/v3/staticmap`，把当日所有 trips 折线画成一张 PNG；设备空则读当日全部（ETL 已归一）。**任何失败返回 None**（缺图不拖垮日报，C2 语义）。
+- `trip_summary_text(conn, day, device_id=None)`：一行行程摘要（段数/累计 km/分钟），用 trips 真实 `dist_m`/`duration_ms`（不重算 polyline，避免估算漂移）。
+- Key：**`AMAP_KEY`（WebService 型）**，静态图接口只认它；`AMAP_JS_KEY`（JS 型）会 `10009 USERKEY_PLAT_NOMATCH`。`.env` 用字节查找读取规避 GBK/UTF-8 编码坑。
+- 坐标顺序：API 要 `lon,lat`；trips 存 `[lat,lon]`，**必须反转**。
+
+### 关键坑（实踩）
+1. **URL 长度硬限**：单条 URL 超约 8K 高德返回 `20003 INVALID_USER_KEY`（误导性，实际是 URL 过长）。修复：抽稀到总点数 ≤70、单段 ≤40，URL 从 18K → 2K。
+2. **取景**：不传 `location`/`zoom`，让接口按覆盖物几何**自动取景**（手算 center/zoom 会把轨迹挤出视口）。
+3. **渲染顺序**：`lon,lat` 反转 + 自动取景两者都要对，否则轨迹偏出视野 / 瓦片空。
+
+### scheduler 接线
+- `run_job` / `_build_job_prompt` / `_deliver` / `_deliver_email` 新增 `for_day: str|None`（补跑历史天，默认 None=今天，向后兼容）：
+  - `_build_job_prompt(for_day)`：信息包按历史天组装。
+  - `_deliver_email`：daily job 且无错误时，`trajectory_map.render_day_trajectory(conn, day, logs/trajectory/{day}.png)` + `trip_summary_text`，正文追加 `## 当日行程`，轨迹图经 send_email `image_paths=[png]` 内嵌为 `cid:photo0`（出现在邮件末尾）。
+- 补跑入口：根目录 `rerun_daily.py <YYYY-MM-DD> [<YYYY-MM-DD> ...]` → `run_job(job, cfg, for_day=day)`。
+
+### 验证
+- 9/5、9/6 轨迹图渲染成功并内嵌两封补跑邮件（`image_count:1`）；9/5 南京→马鞍山跨市 48.1km/164min，9/6 本地三段 7.8km/39min。
+- TestDeliverRouting 4 passed（新增 `for_day` 透传用例）。
+
+### 已知边界
+- 运行中的 gacore 进程为旧代码，重启后才正式生效；补跑用独立新进程。
+- 补跑时 `context.sysprompt` 仍注入"今天"的 fact card（补跑制单天系统提示未切换）；信息包/轨迹本身按对应天，可用于人工回看。

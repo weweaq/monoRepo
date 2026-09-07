@@ -2382,3 +2382,396 @@ Task 11：三份文档同步 + 真实库**备份后**全量 ETL（v1 + v2 shadow
 ### 验证
 - 回归 spatial_profile/dashboard/fact_card/tools/report_evidence/persona/server/anomalies **159 passed**；ruff 与基线一致零新增。
 - 真实数据渲染（30 天窗口）：凌晨家 23-27%、09-18 时公司 20-33%、22-23 时回家 13-23%；无数据列如实显示 57-73%（客户端上报断供的直接映射）。
+
+## 2026-09-04：Task 13 会话报告遗留四项（"未知"显示/迁移清理/定位明细卡/高德地图卡）
+
+### 背景
+`docs/2026-09-04-langtrack-session-report.md` §7 列出 4 项"刚提出、尚未动工"的任务（原子 agent 排队被取消），本节补齐执行记录。执行中测试断言暴露一个 SQL 拼接真 bug（见改动 5），顺带修复。
+
+### 改动
+1. **"未知"显示修复（spatial_profile）**：`_frequent_places` 原先 `name = pl.get("label") or pl.get("poi")` 用 tag 顶掉真实 POI；改为统一走 `resolve_place_name`（§2.6 契约：地名只来自 poi/poi_fallback/address 等地理字段，label 仅作 user_tag），无地理证据时 place_name 置空——显示层只出 tag，不再冒充"未知"。
+2. **geocode name_confidence 回填**：新增 `_NAME_CONFIDENCE_BY_LEVEL`（POI=0.80/AOI=0.65/道路=0.45/行政区=0.30），`_parse_regeocode` 按 regeo 命中粒度写 name_confidence + name_evidence；`refresh_name_confidence()` 对存量 places 按已有 matched_level 补算（本次实际回填走 incremental_encode 触发）；`incremental_encode` 改 v1/v2 列自适应（旧库无 name_confidence 列时跳过该列）。
+3. **迁移审查清理**：4 条 open 的 unmapped_tag（同一住宅 65m 内重复家锚点，家 tag 已由存活锚点迁移）标记 resolution_status=resolved；dashboard 迁移卡新增「已解决 issue（审计存档）」行，open 分组与 resolved 计数分开显示。实测：unmapped_tag resolved=4 / open=0。
+4. **当日定位采集明细卡 + 高德 JS API 地图卡（dashboard/server）**：
+   - `_render_location_points`：当日原始层 location 事件逐点表格（时间 | 最近地点·距离 | 精度 | 信号源），最近地点按 canonical 地点 WGS84 球面距离取最小、显示名走 §2.6；坏 payload 单独计数不混入。
+   - `_amap_js_key`（环境变量 AMAP_JS_KEY 或 .env 字节查找，编码无关）、`_MAP_JS` 前端脚本、`build_map_day_data`（点按坐标制转 GCJ02、stay 名走 §2.6、trip polyline 原样）、`_render_map_card`（无 Key 时优雅降级为配置指引，不渲染 canvas 不外呼；绝不把 Web 服务型 AMAP_KEY 混用于 JS API）。
+   - server 新增 `GET /api/map/day`（day/device_id 参数，device_id 省略时按当日唯一设备解析，多设备返回 ambiguous_device）。
+5. **顺手修真 bug `_nearest_place_index` SQL 拼接**：原实现 `base + extra` 把 extra 列名拼到了**含 WHERE 的完整 SQL 尾部**（`...lon IS NOT NULL, parent_poi, name_confidence`）→ 第一轮（带 name_confidence 列）必然语法错 → 静默降级到第二轮（name_confidence 恒 0）→ 最近地点永远显示 address 级而非 POI 名。改为列清单与 FROM/WHERE 分离拼接（`SELECT {base}{extra}{tail}`）。该 bug 测试断言（期望「康盛花园〔家〕」实得「江苏省南京市康盛花园4期〔家〕」）暴露，生产同在。教训：**SQL 拼接降级循环吞 OperationalError 时，语法错与"缺列"不可分辨——拼接点必须在列清单内**。
+
+### 验证
+- TDD 新增测试：明细卡（点数/§2.6 最近地点/精度/信号源/坏 payload 计数/空日降级）、地图卡（无 Key 降级不外呼/有 Key 渲染 canvas）、`build_map_day_data`（wgs84→GCJ02 转换/stay 名/polyline/多设备 ambiguous/无数据 no_data）、迁移已解决计数。
+- langTrack 全量回归 **435 passed**（dashboard 单文件 40 passed）；期间修复测试合成库 `_make_loc_db` 两处 INSERT 值数与列数不匹配（places 17→16、trips 8→7）。
+- ruff 零新增：本次改动文件对 HEAD 基线比对，新增 3 处（dashboard ISC004 一处已改元组换行；SIM118 两处把 `"col" in r.keys()` 改为检查自控的 `cols` 列名字符串）。**SIM118 不能照提示改成 `"col" in row`——`sqlite3.Row` 迭代产出的是值不是键，`in` 会变成值包含检查**；判断列存在要么 `in row.keys()` 要么查自控的 SELECT 列清单。修后 14 处全部为基线存量（geocode 8 + spatial_profile 6，仅行号平移），dashboard/server/测试文件零告警。
+- 真实库渲染实测（2026-09-04 当日数据，只读）：`_nearest_place_index` 输出「康盛花园〔家〕/润东科创园〔公司〕」POI 级名（SQL 修复前会落 address 级「江苏省南京市康盛花园4期」）；明细卡逐点 `00:04 康盛花园〔家〕 · 3m` 等、无坏 payload；地图卡未配 Key 正确降级（无 canvas 不外呼）；迁移卡「已解决 issue（审计存档）= 4」。
+- 环境说明：tests 全目录另有 test_cli 11 failed（pygraphviz 未装，.venv 环境限制）与 test_qq 1 failed，均与 langTrack 无关。
+
+### 待办更新
+- ✅ 会话报告 §7 四项（地图可视化/定位采集明细/"未知"显示/迁移审查清理）全部完成。
+- ✅ **AMAP_JS_KEY 已配置（2026-09-05）**：高德「Web端(JS API)」Key + 安全密钥已配到 .env，地图卡正式启用（安全密钥接入与激活时暴露的 XSS 修复见下节）。
+- 计划内遗留不变：I7 accuracy filter、A3 人工停留核对、A10 有用性访谈、weiCheckApp 客户端断供/保活排查。
+
+## 2026-09-05：地图卡正式启用——安全密钥接入 + 激活暴露的 XSS 修复
+
+### 背景
+用户在高德控制台申请到「Web端(JS API)」类型 Key（weiTrack-web）及配套安全密钥，配置到 .env 后地图卡从降级路径切到启用路径。高德 2021-12 后申请的 Key 在 JS API 2.0 中**必须配安全密钥**（加载 JS API 前设 `window._AMapSecurityConfig.securityJsCode`，否则报 INVALID_USER_SCODE）。
+
+### 改动
+1. **.env 新增配置**：`AMAP_JS_KEY`（Web端 JS Key）+ `AMAP_JS_SECURITY_CODE`（安全密钥），纯 ASCII 追加（编码安全）。
+2. **dashboard 安全密钥接入**：
+   - `_read_env_var(name)` 泛化「环境变量 → .env 字节查找」读取（原 `_amap_js_key` 内联逻辑抽出），`_amap_js_key` / `_amap_js_security_code`（新）共用。
+   - `_MAP_JS` 的 `langTrackMap` 签名改为 `(key, secCode, day, dev)`，函数体首行 `if (secCode) { window._AMapSecurityConfig = { securityJsCode: secCode }; }`——注入先于动态加载 `webapi.amap.com/maps` script（高德硬性要求）；旧 Key 无安全密钥时传空串跳过注入。
+   - 渲染失败提示补「缺少安全密钥」可能因；降级指引文案补 AMAP_JS_SECURITY_CODE 说明。
+3. **顺手修真 XSS 向量（`_render_map_card` 启用路径）**：Key 配置激活启用路径后，既有 XSS 测试 `test_dashboard_day_param_xss_escaped` 立即失败——`json.dumps(day)` 不转义 `<`/`>`，day/device_id（URL 可控参数）内嵌 `<script>alert(1)</script>` 会在内联 script 块中原样输出，`</script>` 字符串可提前终止脚本块（经典 JSON-in-HTML 逃逸）。新增 `_json_for_html`：json.dumps 后把 `<`/`>`/`&` 替换为 `\u003c`/`\u003e`/`\u0026`，四个调用参数全部改用它。
+   - **教训**：该 XSS 在代码合入时就存在，此前测试通过只因 .env 没配 Key、地图卡走降级路径根本不碰 day——「测试依赖环境状态」的隐蔽形态。新增确定性测试 `test_map_card_xss_escaped_with_key_enabled`（monkeypatch 强制启用路径），不再依赖 .env 配置状态。
+
+### 验证
+- langTrack 全量回归 **437 passed**（较昨日 +2：安全密钥注入测试、启用路径 XSS 确定性测试）；dashboard 单文件 42 passed；ruff 零告警。
+- 真实库 smoke（2026-09-04 当日，只读）：Key/安全密钥从 .env 正确读取；地图卡启用（canvas 渲染、不再降级）；调用参数 `"Key", "安全密钥", "2026-09-04", "c2b6198c-…"` 完整；`_AMapSecurityConfig` 出现在整页 JS；`build_map_day_data` 输出 79 点 / 2 停留 / 1 路线。
+
+## 2026-09-04：日报 v2.1 可排查性四件套（预算扩容 / QQ 对话源 / LLM 留痕 / sanitize 修复）
+
+### 背景
+v2「当日信息包」（09-02，见 `docs/daily-report-v2-implementation-log.md`）上线后复盘出四个问题：①2000 字预算太紧，真实数据下 ncm/前日日报摘要常被熔断挤出；②日报观感差——排查发现 `_sanitize_reply` 把正文当残渣剥掉；③答不出"这封日报到底用什么生成的"——归档只有清洗后文本，LLM 调用无完整请求留痕；④韩立的 QQ 对话（画像链路里唯一的第一人称信号）不在素材里。
+
+### 改动
+1. **信息包预算 2000→8000**（`daily_info_pack.py`）：`PACK_BUDGET=8000`，各源 cap 扩容（画像 1600/对话 1200/B站 1200/langTrack 800/文件 1000/Edge 900/前日摘要 900/git 700/ncm 700），8 路被动信号 + 第 9 路对话源全量进包。
+2. **QQ 对话源（第 9 路）**：`qq.py` 新增 `_persist_chat_log`——收发双向消息落盘 `memory/qq_chat_log.jsonl`（`ts/chat_id/user_id/direction/text`≤2000 字符，OSError 仅告警绝不阻塞聊天）；`daily_info_pack._build_chat` 取当日 `direction=user` 消息最多 15 条、总数提示。
+3. **LLM 调用全量留痕**（`middleware.py`）：每次 model call 追加一行到 `logs/llm_calls/<YYYY-MM-DD>.jsonl`——完整请求 messages（单条 20k 字符封顶）+ 响应（content/tool_calls/usage）+ model。修复 `ModelResponse.result` 是消息列表时的序列化（取末位消息）；append 失败只 warning 不影响主链路。与 09-02 的 `llm_requests.jsonl`（llm.py 挂点层）互补：一个记调用点、一个记 graph 内每次 model call。
+4. **日报输入/输出双归档**（`scheduler.py`）：`logs/scheduled/daily-report_<ts>.md` 五段式——metadata（含指向 llm_calls 日志的路径）→ System Prompt（重建）→ User Prompt（信息包前置后的实际发送体）→ Reply（清洗后，实际交付）→ Reply（raw，清洗前）。`_sanitize_reply` 重写：完整 `<summary>` 块正则跨行剥离 + 未闭合 `<summary>` 残渣清到结尾 + 工具 DSL 残尾行；`_is_incomplete_reply`：原始非空但清洗后为空 → `exit_reason=INCOMPLETE_REPLY`，不再把残渣当正文发出。
+5. **schedule.json 邮件密度硬规则**：结构化 Markdown 排版（标题层级/分节/加粗）+ 每条 bullet 只说一个事实 ~60 字 + 括号嵌套 ≤1 层；素材说明补对话源。
+6. **顺手修基线失败 test_qq 角色切换测试**（2026-08-30 起基线 12 failed 之一）：`graph.checkpointer.adelete_thread = AsyncMock()`——原 MagicMock 属性不可 await，`TypeError` 逃出 `except (KeyError,ValueError,LookupError)` 使整段切换逻辑被吞。
+
+### 验证
+- 新增/修改测试：`test_daily_info_pack`（QQ 源空/满/前 15 截断、预算契约 `PACK_BUDGET==8000`、monkeypatch 2000 验证熔断路径）、`test_scheduler`（`TestSanitizeReply` 6 例 + `TestIsIncompleteReply` + 归档五段式断言）、`test_middleware`（llm_calls.jsonl 端到端单行全字段 + 异常路径日志）。
+- 四文件合跑（qq/daily_info_pack/scheduler/middleware）**129 passed**。
+- 全量 `pytest tests/` = **978 passed / 11 failed**：test_cli 11 个 pygraphviz 环境缺失（.venv 装不上，基线遗留）；test_qq 修复后基线 12→11 failed。期间 pytest 临时目录遇 `WinError 5` 拒绝访问 → `--basetemp` 指到项目内目录规避。
+- ruff：8 个改动文件 7 告警 = HEAD 基线 7（qq.py 存量 I001/RUF100/S110/DTZ005），**零新增**；两个新文件（daily_info_pack.py / test_daily_info_pack.py）39 告警全清（无效 noqa E402 / 未用 import / header→_header / import 排序等，ruff --fix 后 0 告警），lint 后测试 107 passed 复验。
+- 遗留：Edge `database is locked` 降级路径不变（browser_history 层问题，不在本模块职责内）。
+
+### 待办更新
+- ✅ 日报 v2.1 四件套完成（预算/对话源/LLM 留痕/双归档+sanitize）。
+- [ ] 下一封真实日报（23:50）实测观察：邮件密度是否达标、对话源是否被用进人物速写、`logs/llm_calls` 单日日志量级、双归档文件可读性。
+- [ ] pygraphviz 缺失（test_cli 11 failed）长期遗留，Windows 编译困难暂不处理。
+
+## 2026-09-05：日报失败自动重试一次 + 9/4 事故归因（"乱搞日报"根因）
+
+### 事故现象（用户反馈）
+9/4 23:53 发出的日报，邮件正文只有一段 `<summary>` 思考块 + 未闭合的全角竖线 DSML 残渣（`</｜+｜parameter>` / `</++invoke>` / `</++tool_calls>`），**没有真正的邮件正文**，标题还标成成功态。
+
+### 根因（两层）
+1. **旧代码没进昨晚进程**：昨晚运行的调度器加载的是本次 v2.1 改造**之前**的代码。`logs/llm_calls/` 目录根本不存在是铁证——LLM 留痕、五段式归档、未闭合 `<summary>` 处理、INCOMPLETE 兜底全都没生效。旧 sanitize 遇到「未闭合 `<summary>`」不会剥离，残渣被当正文原样发出，且旧代码没有 `INCOMPLETE_REPLY` 判定，邮件标题仍按成功发。
+2. **更深的层：模型那轮压根没产出正文**。只输出一段 `<summary>` 思考块（连 `</summary>` 都没闭合）就"完成"了。max_turns=25 足够，不是轮次耗尽，是模型单轮偷懒/误判完成。这类问题 sanitize 只能"不发垃圾"，不能"补产出"——当天日报仍会断档。
+
+### 修复（scheduler.py）
+- **失败自动重试一次**：`run_job` 执行段改为最多 2 次循环。首次仅得 INCOMPLETE_REPLY / EMPTY_REPLY（`_RETRYABLE_REASONS`）且是日报 job → 换 `_make_retry_prompt`（在原 prompt 末尾追加硬约束：严禁输出 `<summary>`/XML 思考块、禁止再调工具、直接输出既定分节的 Markdown 正文）重跑一次。信息包已在首次 prompt 装配，重试只追加后缀，**不重复组装信息包**（省一次 B站/Edge 取数耗时）。二次仍失败才判败。
+- 重试仅对日报 job 生效（`_is_daily_job`），普通 job 不双倍消耗。
+- `_RETRY_PROMPT_SUFFIX` 文案强调：禁止思考块、禁止调工具、按分节直接写正文。
+
+### 验证
+- 新增 `TestRunJobRetry` 6 用例 + `TestMakeRetryPrompt` 1 用例：首次 INCOMPLETE 二次成功（exit_reason=CURRENT_TASK_DONE、error=None、重试 prompt 含硬约束）、首次成功不重试、二次都 INCOMPLETE 判败、EMPTY 重试成功、非日报不重试。
+- scheduler 单文件 60 passed；核心三件套（scheduler/daily_info_pack/middleware）合跑 113 passed。
+- 实证：9/4 的真实残渣输入喂给当前 `_sanitize_reply` → `cleaned=''`、`incomplete=True`，确认现在能拦。
+
+### 补跑 9/4 日报
+- 手动补跑脚本 `tmp_backfill_0904.py`（临时，不入仓，用后已删）：固定 `DATE="2026-09-04"` 手工组装信息包 + 生产 `_default_graph_runner` + 重试 + `_write_output` 归档 + `_deliver` 重发邮件。
+- **结果（真实运行）**：第一次生成**复现事故**——`INCOMPLETE_REPLY`（模型又只吐思考块残渣），**重试机制真实触发**，第二次 `CURRENT_TASK_DONE` 产出 1014 字符正文并成功发信（`1773465183@qq.com`，subject `[gacore] daily-report · 2026-09-05`）。归档 `logs/scheduled/daily-report_20260905_084612.md`。正文干净、质量高（位置 v2 激活、花少2 七连深挖、山地车调试、工学椅计划兑现等人物速写完整）。`logs/llm_calls/2026-09-05.jsonl` 首次落盘（v2.1 留痕生效）。
+- **连带清理**：9/4 残渣曾被记成 `[scheduled:daily-report] OK — <summary>...` 写进 daily note，会循环污染同日期/后续注入，已修正为「OK(补跑重发)」干净审计行。
+
+### 待办更新
+- ✅ 日报失败自动重试机制 + 9/4 补跑成功重发（首次残渣→重试正篇，真实验证）。
+- [ ] 今晚 23:50 真实运行：确认重试只在必要时触发、日志无异常；首日 `logs/llm_calls` 正常写入；邮件正文干净。
+
+## 2026-09-05（晚）：日报邮件 Markdown 渲染修复（"格式还是有问题"二诊）
+
+### 现象（用户 21:59 反馈）
+早间补发的 9/4 日报内容已干净，但邮件里 `# 今日状态`、`**加粗**`、`- 列表` 全是**裸字符**——无标题层级、无加粗、无列表排版。
+
+### 根因
+`scheduler._email_body_html` 旧实现只做 `html.escape(reply)` 后塞进 `<pre>` 等宽标签——Markdown 从未转换，邮箱里显示的就是 Markdown 源码。`send_email` 本身支持 HTML（MIMEText "html"），问题纯在正文构造层。
+
+### 修复（scheduler.py）
+- 新增 `_md_inline` + `_md_to_email_html`：确定性 Markdown 子集转换器（不引第三方库）——h1-h6 / 无序列表（连续 bullet 合组 `<ul>`，空行分节）/ `**加粗**` / `` `行内码` `` / 段落降级。**先 html.escape 再变换**（XSS 安全），未识别行降级为段落不抛异常。
+- `_email_body_html` 重写：渲染后的 HTML 装进内联样式容器（邮箱客户端普遍剥离 `<style>` 块，故全部内联）——680px 移动端友好、标题带下划线分隔、行高 1.75；FAILED 红字横幅保留。
+- 顺带修复：白天某会话给 `email_tools._send_sync` 加了 `attachment_paths` 参数（未提交改动），test_scheduler 的两处 fake 还是旧 5 参签名 → 4 个 TestDeliverEmail 用例 TypeError。fake 已对齐新签名（`attachment_paths`/`smtp_factory`）。
+
+### 验证
+- 新增 `TestEmailBodyHtml` 9 用例：标题/bullet/加粗渲染、连续 bullet 合组、空行分节拆 `<ul>`、XSS 转义（`<script>`/`<img onerror>` 不穿透）、行内码、空回复占位、FAILED 横幅、多级标题映射。
+- scheduler 单文件 **69 passed**（含修好的 4 个 fake 签名用例）；ruff 零告警。
+- **真实重发验证**：9/4 日报正文（1014 字符）经新渲染器产出 2671 字符 HTML 邮件并成功发送（subject `[gacore] daily-report · 2026-09-04（排版修复重发）`），用户手机可直接查看新排版效果。
+
+### 待办更新
+- ✅ 邮件 Markdown→HTML 渲染修复 + 9/4 排版修复重发。
+- ✅ **gacore 进程重启生效**（22:22）：杀掉 9/3 22:55 启动的旧进程（PID 27596，未含任何修复——正是 9/4 晚事故根因），按 AGENTS.md 隐藏窗口模式重启（PID 37816，py12 + `logs/gacore_start.log`）。验证：Scheduler 线程启动、QQ bot「韩立」重连成功。今晚 23:50 日报将首次全链路使用新代码。
+- [ ] 今晚 23:50 日报为首次全链路新排版（信息包 v2.1 + 重试 + 渲染），明早验收观感。
+
+## 2026-09-05：客户端采集进程保活（weiCheckApp）——修复"熄屏整段断供"
+
+### 背景（用户 9/5 早报实测）
+用户 OPPO（Android 16，ColorOS）手机实测：9/5 早晨 07:32:02 之后 **33 分钟整段无任何数据**，连 coord 详表/`snapshot`/`accel`/`usage`/`session` 全停在 07:32。08:05 亮屏/点 App 才恢复。
+- 不是定位采样档位问题（`SensorCollector` 的 `speed>1.2 m/s` 会秒切回 active 档 10s/15m）。
+- 根因：**OPPO/ColorOS（及大多数国产 ROM）在熄屏省电、后台限制时，把整个采集进程冻结/杀掉**。定位 `requestLocationUpdates` 回调、计步 sensor、60s 协程采集循环（`CollectorService`）全是**进程内**的，进程一停全部静默停供。原代码无任何系统级保活：无 WakeLock、无 AlarmManager/WorkManager 兜底、无开机自启、无白名单引导。
+
+### 改动（weiCheckApp 客户端，均为新增/接入）
+1. **`KeepAliveController.kt`（新）**：2 分钟一次 `setExactAndAllowWhileIdle` 自愈闹钟 + 触发窗口短持 WakeLock（20s），到点把采集进程拉起重建并补齐；Android 12+ 检测 `canScheduleExactAlarms()`，不可精确时降级 `setAndAllowWhileIdle`（Doze 下仍唤醒）。
+2. **`BootReceiver.kt`（新）**：`BOOT_COMPLETED` / `MY_PACKAGE_REPLACED` 后自动拉起 `CollectorService` 并恢复心跳（国产 ROM 重启不保留已启服务）。
+3. **`SensorCollector`/`CollectorService`**：`onCreate` 调度心跳，`onDestroy` 取消；服务被杀由心跳闹钟兜底重建。
+4. **manifest**：加 `WAKE_LOCK` / `SCHEDULE_EXACT_ALARM` / `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` / `RECEIVE_BOOT_COMPLETED` 权限与两个 receiver 声明。
+5. **`PermissionHelper` + `SettingsScreen`**：新增「后台保活」卡片，展示电池优化白名单状态并一键跳转设置；`isIgnoringBatteryOptimizations()` 检测白名单。
+
+### 验证
+- `:app:assembleDebug` BUILD SUCCESSFUL（唯一 warning 为既有 `unsafeCheckOpNoThrow` 弃用，非本改动）。
+- 未破坏既有 7 个单测依赖（无针对新类的测试，KeepAlive 核心依赖真实系统 Alarm 行为，robolectric 价值低不补）。
+
+### 待办更新
+- ✅ 客户端采集进程保活（心跳自愈 + 开机自启 + 白名单引导）落地。
+- [ ] **安装到 OPPO 实机后验证**：白名单加入 → 熄屏 30+ 分钟 → 确认坐标/用机/计步不再整段断供。
+- [ ] 用户手动把 App 加入 OPPO「自启动 / 允许后台运行」白名单（仅 Settings 引导不够，ColorOS 需手动双保险）。
+- [ ] 跟踪「每日凌晨无亮度窗口」是否仍出现小空隙（心跳兜底应把间隙压到 2 分钟级）。
+
+## 2026-09-05：客户端版本自查——"装的是不是最新版"一眼确认
+
+### 背景
+纯自用场景下没有应用商店，手动 adb/装 APK，用户无法确认手机上装的 weiCheckApp 是不是最新版（此前「关于」区写死 v1.0，App 自身是"哑"的）。
+
+### 方案
+让服务端成为"版本真相源"，客户端拉取对比：
+1. **服务端** `server.py` 新增 `GET /api/client/version`，返回 `{app_version, latest_apk_url}`，由 `_EXPECTED_CLIENT_VERSION` 常量声明（与客户端 build.gradle versionName 保持一致，发版要同步 Bump）。测试 `test_langTrack_server.py::test_client_version`。
+2. **客户端** 新增 `VersionChecker.kt`：读 PackageManager 本机 versionName + 异步 GET 服务端（复用 SyncManager 的 serverUrl），对比得出 upToDate/unreachable。
+3. **设置页「关于」**：显示 `本机版本 + 已是最新/可更新→vX.X/检查中`；进入页面自动触发自查。
+
+### 验证
+- `:app:assembleDebug` BUILD SUCCESSFUL（修了一处 null→非空 String 的 Kotlin 编译错误）。
+- `test_langTrack_server.py` 9 passed（含新 test_client_version）；pytest 临时目录清理 PermissionError 为 Windows 噪音，非失败。
+- 服务端重启（PID 4176→31628，`python -m gacore.langTrack --host 0.0.0.0 --port 8000`），`GET http://127.0.0.1:8000/api/client/version` → 200 `{"app_version":"1.0","latest_apk_url":""}`。
+
+### 待办更新
+- ✅ 客户端版本自查落地（服务端 /api/client/version + VersionChecker + 设置页展示）。
+- [ ] 下次发版 Bump 时 `_EXPECTED_CLIENT_VERSION` 与 build.gradle `versionName` 必须同步（否则误报"可更新/最新"）。
+- [ ] 可选增强：`latest_apk_url` 指向真实 APK，配合静态目录实现「设置页点一下跳下载」。
+
+## 2026-09-05：版本号自动递增规则——"每次打包版本必变"
+
+### 背景
+上一方案（服务端 /api/client/version 做版本自查）有个死穴：build.gradle 里 `versionCode=1/versionName="1.0"` 写死，打多少次新包装上去都显示 v1.0、服务端也期望 1.0，版本自查永远判「已是最新」，等于失效。用户指出"版本号每次打包应该变，这是规则"。
+
+### 方案（客户端 + 服务端协同）
+1. **客户端自动递增**（build.gradle.kts）：
+   - 新增 `weiCheckApp/version.properties` 存整数 `buildNumber`（初值 1）。
+   - 加载时读它 → `versionCode=buildNumber`，`versionName="1.{buildNumber}"`。
+   - 注册 `bumpBuildNumber` task，`preBuild` `finalizedBy` 触发，每次构建后 `buildNumber+1` 写回 → 下次构建用新版本号。**每次打包版本必变，硬规则**。
+   - 踩坑：Kotlin DSL 里 `java.util.Properties()` 全限定名报 Unresolved reference，需 `import java.util.Properties`（顶部 import 后显式局部变量）。
+2. **打包脚本 `build.ps1`（新，纯 ASCII）**：调 `gradlew assembleDebug` → 读新 buildNumber → 生成 `WithLangGraph/data/client_version.json`（`{"app_version":"1.N","latest_apk_url":""}`）。
+3. **服务端读 config**（server.py）：`/api/client/version` 请求时读 `_PROJECT_ROOT/data/client_version.json`（存在优先，缺失回退内置常量），因此无须重启——build.ps1 写完后接口立即返回新版本。
+4. **VersionChecker**（上一步已建）保持不变：设置页「关于」对照显示「已是最新 / 可更新→vX.X / 检查中」，随打包自动推进。
+
+### 验证
+- `build.ps1` 端到端跑通：BUILD SUCCESSFUL → versionName=1.2 → 服务端 config 同步为 1.2。
+- 重启服务端后 `GET /api/client/version` → `{"app_version":"1.2","latest_apk_url":""}`。
+- `test_langTrack_server.py` 11 passed（含 `test_client_version_reads_config_file` 验证 config 优先于内置常量）；pytest 清理 PermissionError 为 Windows 噪音。
+
+### 2026-09-05 二次优化：三段式版本号（1.0.1 / 1.0.2 …）
+用户要求"都是 1.0.1、1.0.2 这种三位控制"。基于上面的两段式（`1.{buildNumber}`）改造：
+1. **version.properties 改三段**：存 `major=1 / minor=0 / buildNumber=N`。
+2. **build.gradle.kts**：`versionName = "{major}.{minor}.{buildNumber}"`，`versionCode = major*10000 + minor*100 + buildNumber`（合成保证单调递增，且远超旧 versionCode，覆盖安装不降级）。
+3. **buildNumber 递增从 gradle 移到 build.ps1**（关键修正，避免错位）：原方案 `bumpBuildNumber` 挂 `preBuild.finalizedBy`，构建完成前文件已被改，APK 实际版本号会与服务端同步的 config 对不上。现改为——gradle 每次构建**只读** version.properties 生成版本号；build.ps1 在 `assembleDebug` 成功后，先读本次版本号同步服务端 config，**之后再**把 `buildNumber+1` 写回供下次构建。锁定同步。
+4. major/minor 手动升（feature/release 时改 version.properties），buildNumber 自动升。
+
+### 验证（三段式）
+- `build.ps1` 端到端：BUILD SUCCESSFUL → versionName=1.0.1 → 服务端 config 同步 `app_version=1.0.1` → version.properties 递增为下次 1.0.2。
+- 服务端 `GET /api/client/version` → `{"app_version":"1.0.1","latest_apk_url":""}`（build.ps1 写 config 后立即生效，无需重启）。
+- 踩坑记录：Kotlin DSL 中 `java.util.Properties()` 全限定名在脚本内报 Unresolved reference，须 `import java.util.Properties` 后显式局部变量。
+
+### 规则（发版约定）
+- **打包一律用 `build.ps1`**（或 gradlew assembleDebug 后手动同步 config），不能只 BUILD 不同步，否则设置页会误报。
+- version.properties 提交进 git，保证多机/历次打包序号连续。
+- 服务端 `latest_apk_url` 暂空，字符串走通后可填真实 APK 下载路径实现 OTA。
+
+### 待办更新
+- ✅ 版本号自动递增规则落地（build.gradle + version.properties + build.ps1 + 服务端读 config）。
+- [ ] 用 build.ps1 打个新包装 OPPO 实机，验证设置页「已是最新」（本地 1.2 = 服务端 1.2）。
+- [ ] 保活改造后 OPPO 熄屏 30 分钟断供验证（v1.0.3 起加主动定位兜底后再实测）。
+
+## 2026-09-05：定位断档根因重定位 + 主动定位兜底（SensorCollector，v1.0.3）
+
+### 用户实测现象（关键数据）
+用户在 OPPO 实机看到：**待上传 location 仅 23 条，且集中在 12:34-12:37 + 一条 14:20，09:04~12:34 约 3.5 小时空窗**。同时 usage 673 条、session 668 条——60s 主循环一直在采。
+
+**结论（推翻"进程被冻"的简单归因）**：
+- 这台手机**采集进程根本没死**（usage/session 持续在采）。
+- location 少 ≠ 保活失效。保活（KeepAliveController）解决"进程被冻结"，但这里进程没死，所以它"管不着"。
+- 真正根因在 **SensorCollector 定位采样逻辑**：`requestLocationUpdates` 只是被动等系统回调，`minTime=300s` 是"最早回调下限"不是保证；且配套的 `updateMotionSampling` 用 `lastAccelMotion` 压档——**但 accel 只在亮屏采样**。
+
+### 关键洞察（用户强调）：运动时必然是息屏的
+用户骑车/运动时手机在口袋里**熄屏**，accel 已停、`lastAccelMotion` 停在灭屏前旧值 `still` → 每 60s 判定静止 → 一旦 120s 无 fix 锁死 idle 档 → 系统更抑制回调 → 死锁，永远采不到点。
+
+### 改动（SensorCollector.kt，v1.0.3）
+1. **新增主动定位兜底**：`requestActiveFix()`，用 `requestSingleUpdate(GPS+NETWORK)` 主动拉 fix，不依赖 `requestLocationUpdates` 被动回调。节流周期 `ACTIVE_POLL_INTERVAL_MS=90s`，由 `updateMotionSampling`（CollectorService 每 60s 调）触发（`staleFix && pollDue` 保证不塞爆 provider）。
+2. **修正档位校正**：`updateMotionSampling` 里仅当 `accelRegistered=true`（accel 正在采样/亮屏）时才用 accel 压档；灭屏期间 `lastAccelMotion=still` 不再把档位锁死，交由主动兜底保证低频有点。
+3. 静止+亮屏（accel=still）场景保留原省电逻辑（120s 无 fix 降 idle），不误伤。
+
+### 验证
+- `build.ps1` 构建通过，产物 v1.0.3（时间 14:31），服务端 config 同步 `1.0.3`，version.properties 已递增 buildNumber=4（下次 v1.0.4）。
+- 逻辑自检：移动+息屏 → accel 不采样不压档 + `lastFixMs` 超 90s → 主动拉 fix；静止+亮屏 → accel=still → 省电压档 + 有 fix 不重复拉。闭环。
+
+### 待办更新
+- [x] SensorCollector 定位断档根因重定位 + 主动定位兜底改造（v1.0.3）。
+- [x] v1.0.4 强化主动拉取条件：距上次 fix 超周期就持续强拉（不设"必须无 fix"），确保骑行等移动段初段靠位置速度驱动切回高频，而非被动回调漏采。
+- [ ] v1.0.3/1.0.4 装 OPPO 实机，骑车/运动（息屏）验证 location 有低频点覆盖，不再 3.5h 空窗。
+- [ ] 后续确认：主动 requestSingleUpdate 是否触发 GPS 高耗电，必要时降频（如 120s）。
+
+## 2026-09-05：v1.0.6 前台定位(A) + 后台限制引导(B)——针对息屏 GPS 全 network、无 GPS 点
+
+### 用户实测（v1.0.5 装机后）
+- 版本确认装上 v1.0.5（设置页显示 v1.0.5，版本自查正常）。
+- location 序列：`15:20:52 → 15:20:50(2s) → 15:12:00(9min) → 15:11:24(36s) → 14:34:08(37min)`。
+- **全部 provider=network、acc=15、坐标静止相同**，GPS 一个点没有。
+
+### 根因（数据实证）
+- 主动拉取已生效（时序跳动），但 **GPS 在 OPPO 息屏+后台被系统按功耗抑制，单次 requestSingleUpdate 也多给缓存 network 定位**——前台定位类型 FGS 无法突破对 GPS 引擎的电源限流。
+- 截图全 network 点 => 后台 GPS 被掐死的铁证。
+
+### 方案 A —— 前台定位 + 主动拉取强化（SensorCollector.kt）
+- 前置：Manifest 已声明 `FOREGROUND_SERVICE_LOCATION` + `foregroundServiceType="location"`，startForegroundCompat 在有定位权限时全类型启动（已有基础，本次未改）。
+- 主动拉取优化：去掉 90s 稀疏节流，`ACTIVE_POLL_INTERVAL_MS` 改 60s（配合主循环），`ACTIVE_FRESH_SKIP_MS=30s`（30s 内刚拿过新 fix 才跳过）。`freshFix` 判断替换原 `fixStale`，保证每轮主循环都尝试强拉，GPS 慢 fix 也能反复触发。
+
+### 方案 B —— 系统后台限制引导
+- `PermissionHelper.openAppDetailsSettings()`：跳系统应用详情页（OPPO 的自启动管理/后台运行/省电策略都在应用详情里，无法精确 ACTION 跳转）。
+- 设置页「后台保活」区新增「后台运行 / 自启动管理」入口，desc 提示到应用详情→自启动管理设允许、关省电策略限制。
+
+### 验证
+- build.ps1 已重新打包（产物 v1.0.6，待确认编译通过后写 config 同步）。
+- 待实机：用户按新入口到 OPPO 应用详情「自启动管理 + 省电策略」放行后，再测息屏骑车 GPS 是否出点。
+
+### 待办更新
+- [x] 方案 A+B 落地（v1.0.6）。
+- [ ] v1.0.6 装 OPPO，按设置页新入口完成「自启动管理 + 省电策略」放行，息屏骑车验证 GPS 出点、不再全 network。
+- [ ] 若后台 GPS 仍被系统硬掐（部分 ROM 无解），降级预期改主动拉取接受 network 低频点保证轨迹不断链。
+
+## 2026-09-05：邮件工具丰富化——send_email 支持任意文件附件
+
+### 背景
+- APK 用邮件发送频繁，此前多次用一次性临时脚本 `tmp_apk_email.py` 绕开。
+- 发现已有成熟工具：`weiCheckApp/deploy/send_apk_email.py`（自动找最新 APK、复用 WithLangGraph SMTP 配置、支持 --dry-run），但长期 untracked。
+
+### 改动
+- **weCheckApp/deploy/send_apk_email.py**：纳入 git 管理（此前 untracked）。
+- **服务端 send_email（src/gacore/tools/email_tools.py）**：新增 `attachment_paths` 参数，支持任意文件附件。
+  - `_build_message` 重构为 multipart/mixed + 嵌套 multipart/related（附件当文件、图片内联）。
+  - 新增 `_attachment_maintype_subtype`：.apk→application/vnd.android.package-archive，其余走 mimetypes，未知回退 octet-stream。
+  - `SendEmailResult` 增 `attachment_count`；工具 docstring 更新。
+
+### 验证
+- tests/test_tools_email.py 新增附件用例（apk/pdf/通用/缺失跳过/图片+附件共存），**18 passed**。
+- 实测 `send_apk_email.py --dry-run` 正常；真发 v1.0.6 APK 到 QQ 邮箱成功。
+- 踩坑：pytest 在 Windows 清理 `pytest-current` 符号链接目录报 PermissionError，掩盖结果；改用 `--basetemp` 独立目录 + `-p no:cacheprovider` 恢复可读。csv 的 mimetypes 映射在 Windows 是 application/vnd.ms-excel（注册表影响），断言改用 .txt。
+
+## 2026-09-05：v1.0.7 修复「后台保活」卡片权限行 UI 重叠
+
+### 现象（用户截图实证）
+- v1.0.6 设置页「后台保活」卡片内两行文字互相重叠渲染（电池优化白名单 + 后台运行/自启动管理的文字压在一起）。
+
+### 根因
+- `PanelCard`（Components.kt）内容槽是 **`Box`（Z 轴叠放）**；v1.0.6 我往里面直接平铺了两个 `PermissionRow` + Spacer，Box 把它们全叠在同一位置 → 文字压文字。
+- 「采集权限」卡片没问题是因为其行包在 `Column(verticalArrangement = spacedBy)` 里；v1.0.2 单行用法也不触发（单个 Box 子项无叠放对象）。
+
+### 修复
+- SettingsScreen 后台保活块：两行 PermissionRow 包进 `Column(verticalArrangement = Arrangement.spacedBy(6.dp))`，与采集权限卡片同构；去掉多余 Spacer。
+- 已扫全文件其余 PanelCard 用法（85/116/191/283/298 行），均正确包 Column/单 Row，无同类问题。
+
+### 踩坑记录（Compose）
+- **PanelCard 是 Box 容器，内容槽放多个平级子项会 Z 轴叠放**，不会报编译错/运行错，只表现为文字重叠——以后往 PanelCard 放多项内容必须包 Column。
+
+### 待办更新
+- [x] v1.0.7 重叠修复 + 打包 + 邮件发送。
+- [ ] v1.0.7 装机确认「后台保活」两行正常显示，并完成 OPPO 自启动/省电策略放行验证息屏 GPS。
+
+## 2026-09-07：运动轨迹进日报（trajectory_map）——高德静态图内嵌轨迹图 + 补跑 9/5、9/6
+
+### 背景
+- 用户想把运动轨迹放到日报里。确认 langTrack 早有完整轨迹数据：trips（polyline, GCJ02）+ route_grids（路径网格），dashboard 用高德 JS API 在浏览器画线，但邮件不支持 JS，日报里看不到轨迹图。
+- A（文字行程）与 B（路线级轨迹）本是同一份 trips 数据的两层呈现，故一并落地。
+
+### 改动
+- **新增 src/gacore/langTrack/trajectory_map.py**：直接用 trips.polyline 调高德「静态地图」接口（restapi.amap.com/v3/staticmap）渲染当日轨迹 PNG。
+  - 坐标顺序：API 要 lon,lat；trips 存 [lat,lon]，须反转。
+  - 取景：不传 location/zoom，靠接口按覆盖物几何自动取景。
+  - Key：WebService 型 AMAP_KEY（AMAP_JS_KEY 是 JS 型不可用于静态图）；.env 字节查找规避 GBK。
+  - **URL 长度硬坑**：单条 URL 超约 8K 返回 20003 INVALID_USER_KEY（误导性）。抽稀到总点数 ≤70、单 paths 段 40 点解决（18K→2K）。
+  - 提供 
+ender_day_trajectory（出 PNG，失败返回 None）与 	rip_summary_text（当日行程文字，用 trips 真实 dist_m/duration_ms）。
+  - 设备：trips 已由 ETL 归并主设备，device_id 可空则读当日全部。
+- **src/gacore/scheduler.py**：
+  - 
+un_job/_build_job_prompt/_deliver/_deliver_email 新增 or_day 参数（补跑历史天用，默认 None=今天，向后兼容）。
+  - _deliver_email：daily job 且无错误时渲染当日轨迹图 + 追加行程文字，通过 send_email image_paths=[...] 内嵌为 cid:photo0。
+- **rerun_daily.py**（根目录）：补跑脚本，加载 schedule.json 的 daily-report job，对指定天 
+un_job(for_day=...)。
+- **tests/test_scheduler.py**：TestDeliverRouting 修 lambda mock 收 **kwargs（for_day），新增 	est_run_job_forwards_for_day_to_deliver_email。
+
+### 验证
+- 9/5、9/6 轨迹图均渲染成功（94KB，南京→马鞍山跨市路线 / 本地三段），轨迹线完整、起终点清晰、底图正常。
+- **补跑 9/5、9/6 两封日报邮件已发出**，均 CURRENT_TASK_DONE，image_count:1（轨迹图内嵌），正文含「当日行程」小节、信息包按对应天取数。
+- TestDeliverRouting 4 passed（含新 for_day 透传用例）。
+- 待办更新见下方。
+
+### 已知边界（诚实记录）
+- 运行中的 gacore 进程仍是旧代码（未重启）；下次 start.py 重启后轨迹能力才正式生效。补跑用的是新代码（独立进程）。
+- 补跑邮件正文用的是当日信息包（对），但 agent 会话内 context.sysprompt 仍注入今天(9/7)的 fact card（补跑时制单天系统提示未切）；行程/轨迹数据本身对。
+
+### 待办更新
+- [x] 用户：补跑 9/5、9/6 日报并带轨迹图。
+- [x] 轨迹图：高德静态图内嵌日报邮件（A 文字行程 + B 路线级轨迹）。
+- [ ] 正式生效：重启 gacore 进程后再验证 23:50 日报带轨迹图。
+- [ ] 可选：query 轨迹是跨市/本地异常时在日报标注提醒。
+
+## 2026-09-07：客户端定位接入高德 SDK 根治后台断链（weiCheckApp，SensorCollector）
+
+### 背景
+用户在 OPPO（ColorOS）上实测：白名单/自启动均开启，但**进程一直活着（usage 全天连续），location 仍 11:30~21:09 近 10h 空窗且全为 network 缓存点（GPS 全程零出点）**。结论修正：不是进程被冻结、也不是采样档位错，而是**裸 `LocationManager` 在后台被系统静默抑制**——`requestLocationUpdates`/`requestSingleUpdate` 的 minTime 只是"最早回调下限"不是保证，系统熄屏/省电直接不回调，`onLocationChanged` 不被触发，位置驱动切档无从谈起。用户拍板集成高德定位 SDK（已申请 Android 平台定位 Key：`072775a5...5978`，绑定 debug SHA1 `2B:CB:AD:D2:00:DA:BD:F2:0B:C0:A7:4E:44:96:AA:C8:18:FA:27:B9` + 包名 `com.wei.checkapp`）。
+
+### 已完成（v1.0.8）
+1. **gradle 依赖**：`settings.gradle.kts` 加高德仓库 `maven("https://developer.amap.com/maven/")`（FAIL_ON_PROJECT_REPOS 模式下需在此声明）；`libs.versions.toml` 加 `amapLocation=6.1.0` 与 `amap-location` 引用；`app/build.gradle.kts` 加 `implementation(libs.amap.location)`。
+2. **Manifest**：补 `ACCESS_BACKGROUND_LOCATION`（Android 11 后台定位必需）；声明 `com.amap.api.location.APSService`；`<application>` 内 `meta-data com.amap.api.v2.apikey` 单源配置 Key（**不用 buildConfig 双源**，避免不一致）。
+3. **SensorCollector 叠加高德 fix 源**（核心）：新增 `amapLocationClient` + `amapLocationListener`，把裸 `LocationManager` 作为低成本 latent 源**保留**，同时叠加 `AMapLocationClient`（Hight_Accuracy 高精度 / 连续定位 / 关缓存关 mock / 需主线程初始化）作为**主动可靠 fix 源**。高德回调 `AMapLocation`（errorCode==0 才算有效）转成 android `Location`，喂给**同一个 `locationListener`** → 复用现有"位置驱动切档 + haversine 速度判定 + 入库"整条链路，改动面最小、风险最低。
+4. **档位联动**：`buildAmapOption(active)` 按档位设 `interval`（active=10s / idle=300s，最低 1000ms）；`startLocation` 拉高德、`stopLocation` 拉低并 `onDestroy`、`setSamplingActive/Idle` 同步 `applyAmapSampling()`。
+5. **已验证**：`build.ps1` 打包 **v1.0.8 BUILD SUCCESSFUL**，服务端 config 已同步 `app_version=1.0.8`。
+
+### 设计要点（健康）
+- 不删裸 LocationManager：作为高德异常/降级时的兜底，双源互备。
+- 复用同一 listener，状态机/入库/切档零改动 → 回归风险小。
+- 体验 case 充足：验证 Key 用调试版 SHA1，debug 包直接可用；release 用 release 签名（当前未上架/未配 release keystore，先忽略）。
+
+### 待办更新
+- [x] 客户端集成高德定位 SDK（gradle + Manifest + SensorCollector 叠加层），v1.0.8 打包成功。
+- [ ] **实机验证**：装 v1.0.8，熄屏/骑车放一段时间，看 location 是否仍有大段空窗（重点白天骑车段）。
+- [ ] 若后台仍稀疏：退而评估高德 `setInterval` 主动高频档 + 位置速度联动已生效与否，必要时放开 `Battery_Saving` 基线。
+- [ ] 提交前过 codegraph sync + 同步 `langTrack-tech.md`（客户端定位技术细节）。
+
+## 2026-09-07：听歌记录采集（客户端通知监听拆出 + 日报「今日常听」）
+
+### 背景
+用户痛点：网易云用得多，但每日数据体现不出听歌记录。网易云无开放后台接口给三方持续读播放历史，而系统有官方通道——媒体播放器挂的 ongoing 通知（歌名/歌手/专辑/播放按钮都在 Notification extras 里），`NotificationListenerService` 可实时读取。项目**已有此基础设施**（`WeiNotificationListener` + `PermissionHelper` 通知使用权），唯一缺口是其在第 22 行 `if (sbn.isOngoing) return` **把媒体播放通知当常驻通知丢弃**——所以网易云通知一直在采（日报通知源里出现「网易云音乐 81 条」）却没进听歌记录。
+
+### 已完成
+客户端（weiCheckApp，v1.0.9）：
+1. **改造 `WeiNotificationListener`**：`isOngoing` 不再一律跳过。媒体通知（extras 含 `android.media.session`/`EXTRA_MEDIA_SESSION`）单独拆成 `music_play` 事件（payload: pkg/app/title=song/singer/album/state=playing|paused，ts=System.currentTimeMillis 区分连续播放）；非媒体 ongoing 照旧忽略。普通通知逻辑不变。切歌/暂停通过通知 actions 的播放/暂停按钮判 state（不依赖高 API 字段，编译兼容）。
+2. **设置页「采集权限」卡片**加提示：开启通知采集后网易云等大 App 的播放通知自动拆成听歌记录进日报「今日常听」。
+3. 打包 **v1.0.9 BUILD SUCCESSFUL**，服务端 client_version.json 同步 1.0.9。
+
+服务端（WithLangGraph）：
+4. **report.py 新增 `_listen_music`**：聚合当日 `type='music_play'` 事件 → 歌×次数 Top10 + 常听歌手 Top5，插入报告「1.5 今日常听（音乐）」节；结果也进 L5 画像快照 `profile["music"]`。
+5. **contract.py 登记 `music_play`**（consumed=true，消除 coverage "unexpected"）。ingest 本身无需改：events 表接受任意 type，`music_play` 自动落库。
+6. 服务端重启（py12 + PYTHONPATH=src，后台）至新进程；langTrack 测试 **17 passed**；report 运行无报错（今日尚无 music_play 为预期空态）。
+
+### 设计要点
+- 复用现有 NotificationListenerService，不在 Manifest 加新服务/权限——通知使用权用户已为通知采集开过一次。
+- `music_play` 与 `notification` 两条 parallel 事件：媒体通知即记 music_play 也不再记普通 notification（避免重复刷通知疲劳计数）。实际实现中事件库分开，`notification` 的 ongoing 走 `return` 不落库，故不重复。
+
+### 待办更新
+- [x] 客户端通知监听把媒体播放拆成 music_play 事件，设置页引导，v1.0.9 打包。
+- [x] 服务端 report「今日常听」+ contract 登记 + L5 快照，测试通过、服务重启。
+- [x] **实机验证（v1.0.10）**：网易云 `category=transport`，新判断（category 优先）生效，music_play 正常产出、singer/album 拆分准确。
+- [x] **同曲去重（v1.0.11）**：媒体 progress/状态刷新导致 onNotificationPosted 对同一条通知重复回调 → 同秒重复计数（日报 `《丝路》×6`）；加 5s 同曲(pkg+title)去重，实机验证 23:46:41 三首歌各只记一次。
+- [x] 服务端清洗今日脏数据（v1.0.10 时代写入的同秒重复 music_play 22 条）+ 修 report.py 歌手计数 bug（误用不存在的 payload `ts` → 恒为 0，改为按歌出现次数累计）。
+- [ ] 待定：若要更准的播放时长（不只看出现次数），可加 duration 预估（基于通知状态切换间隔），列入 C1 增强。
+- [ ] 提交前 codegraph sync + 同步 langTrack-tech.md（听歌采集契约）。
