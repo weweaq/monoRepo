@@ -1,4 +1,4 @@
-.env
+﻿.env
 .codegraph/
 notes.txt
 h.txt
@@ -27,3 +27,15 @@ docs/sre/
 docs/superpowers/
 .pytest_tmp/
 .tmpp/
+
+# 本机调试/临时产物（不入库）
+tmp*.py
+tmp_*/
+tmp_pytest*.txt
+*.bak
+server.log
+server.log.err
+adb_reconnect.ps1
+rerun_daily.py
+memory/qq_chat_log.jsonl
+git_commit_msg.txt

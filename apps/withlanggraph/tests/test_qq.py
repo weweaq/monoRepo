@@ -305,6 +305,7 @@ async def test_role_command_switches_card_and_clears_thread():
 
     graph = MagicMock()
     graph.checkpointer = MagicMock()
+    graph.checkpointer.adelete_thread = AsyncMock()
     app = QQApp(graph)
     app.client = MagicMock()
     app.send_text = AsyncMock()

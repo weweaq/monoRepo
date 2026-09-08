@@ -139,6 +139,17 @@ def behavior_of(poi_type: str, poi_name: str = "") -> str:
     return BEHAVIOR_MAP.get(head, "未知")
 
 
+# §2.6 命名置信度：按 regeo 命中粒度回填（matched_level → name_confidence）。
+# 阈值含义：0.80 ≥ 0.75 → venue 级具体 POI；0.65 → area 级（AOI）；
+# 0.45/0.30 → 道路/行政区，低于 area 门槛 → resolve_place_name 落 address/district。
+_NAME_CONFIDENCE_BY_LEVEL = {
+    "POI": 0.80,
+    "AOI": 0.65,
+    "道路": 0.45,
+    "行政区": 0.30,
+}
+
+
 def _parse_regeocode(rc: dict) -> dict:
     """解析单个点的 regeocode（兼容批量 regeocodes[i].regeocode 与单点 regeocode 两种结构）。"""
     inner = rc.get("regeocode") or rc
@@ -186,23 +197,25 @@ def _parse_regeocode(rc: dict) -> dict:
         if district or township:
             parts.append(f"{district}{township}")
         fallback_desc = "；".join(p for p in parts if p) or formatted
-    return {
-        "formatted": formatted,
-        "poi": name,
-        "poi_type": poi_type,
-        "poi_l1": poi_l1,
-        "poi_l2": poi_l2,
-        "poi_l3": poi_l3,
-        "poi_signal": poi_signal,
-        "poi_fallback": fallback_desc,
-        "province": address.get("province", ""),
-        "city": address.get("city", "") or address.get("province", ""),
-        "district": district,
-        "township": township,
-        "business_area": (business[0].get("name", "") if business else ""),
-        "road": (roads[0].get("name", "") if roads else ""),
-        "aoi": aoi.get("name", ""),
-        "matched_level": matched_level,
+    return {
+        "formatted": formatted,
+        "poi": name,
+        "poi_type": poi_type,
+        "poi_l1": poi_l1,
+        "poi_l2": poi_l2,
+        "poi_l3": poi_l3,
+        "poi_signal": poi_signal,
+        "poi_fallback": fallback_desc,
+        "province": address.get("province", ""),
+        "city": address.get("city", "") or address.get("province", ""),
+        "district": district,
+        "township": township,
+        "business_area": (business[0].get("name", "") if business else ""),
+        "road": (roads[0].get("name", "") if roads else ""),
+        "aoi": aoi.get("name", ""),
+        "matched_level": matched_level,
+        "name_confidence": _NAME_CONFIDENCE_BY_LEVEL.get(matched_level, 0.30),
+        "name_evidence": f"regeo:{matched_level}",
     }
 
 
@@ -445,6 +458,12 @@ def incremental_encode(db_path: Path = DB_PATH, force_all: bool = False) -> int:
         failed.extend(idxs[j] for j in failed_local)
 
     now = int(time.time() * 1000)
+    # v1 库 places 无命名证据列（name_confidence 系 v2 表列）；按列存在自适应，
+    # v1 库跳过置信回填（resolve_place_name 以 0 兜底落 address，属契约设计行为）
+    from gacore.langTrack.location_reader import table_columns
+    place_cols = table_columns(conn, "places")
+    name_cols = {"name_confidence", "name_evidence"}
+    has_name_cols = name_cols <= place_cols
     n = 0
     for i, r in enumerate(rows):
         if i not in results:
@@ -465,22 +484,45 @@ def incremental_encode(db_path: Path = DB_PATH, force_all: bool = False) -> int:
                     if _kw in (info.get("poi") or ""):
                         sig = _kw
                         break
-                info.setdefault("poi_signal", sig)
-                info.setdefault("poi_fallback", info.get("poi") or "")
-        behavior = behavior_of(info.get("poi_type", ""), info.get("poi", ""))
-        conn.execute(
-            "UPDATE places SET address=?, poi=?, district=?, township=?, business_area=?, "
-            "poi_type=?, matched_level=?, behavior=?, poi_l1=?, poi_l2=?, poi_l3=?, "
-            "poi_signal=?, poi_fallback=?, geocoded_at=? WHERE id=?",
-            (
-                info.get("formatted", ""), info.get("poi", ""), info.get("district", ""),
-                info.get("township", ""), info.get("business_area", ""),
-                info.get("poi_type", ""), info.get("matched_level", ""),
-                behavior, info.get("poi_l1", ""), info.get("poi_l2", ""),
-                info.get("poi_l3", ""), info.get("poi_signal", ""),
-                info.get("poi_fallback", ""), now, r["id"],
-            ),
-        )
+                info.setdefault("poi_signal", sig)
+                info.setdefault("poi_fallback", info.get("poi") or "")
+                # around 命中的是半径内最近 POI（非确认所在地）：给 area 级置信，
+                # 不足 venue 门槛 0.75，显示层落 business_area/address 而非冒充具体地点
+                info["name_confidence"] = 0.55
+                info["name_evidence"] = "regeo:around"
+        behavior = behavior_of(info.get("poi_type", ""), info.get("poi", ""))
+        if has_name_cols:
+            conn.execute(
+                "UPDATE places SET address=?, poi=?, district=?, township=?, business_area=?, "
+                "poi_type=?, matched_level=?, behavior=?, poi_l1=?, poi_l2=?, poi_l3=?, "
+                "poi_signal=?, poi_fallback=?, name_confidence=?, name_evidence=?, "
+                "geocoded_at=?, updated_at=datetime('now','+8 hours') WHERE id=?",
+                (
+                    info.get("formatted", ""), info.get("poi", ""), info.get("district", ""),
+                    info.get("township", ""), info.get("business_area", ""),
+                    info.get("poi_type", ""), info.get("matched_level", ""),
+                    behavior, info.get("poi_l1", ""), info.get("poi_l2", ""),
+                    info.get("poi_l3", ""), info.get("poi_signal", ""),
+                    info.get("poi_fallback", ""),
+                    float(info.get("name_confidence") or 0.0),
+                    info.get("name_evidence", ""),
+                    now, r["id"],
+                ),
+            )
+        else:
+            conn.execute(
+                "UPDATE places SET address=?, poi=?, district=?, township=?, business_area=?, "
+                "poi_type=?, matched_level=?, behavior=?, poi_l1=?, poi_l2=?, poi_l3=?, "
+                "poi_signal=?, poi_fallback=?, geocoded_at=? WHERE id=?",
+                (
+                    info.get("formatted", ""), info.get("poi", ""), info.get("district", ""),
+                    info.get("township", ""), info.get("business_area", ""),
+                    info.get("poi_type", ""), info.get("matched_level", ""),
+                    behavior, info.get("poi_l1", ""), info.get("poi_l2", ""),
+                    info.get("poi_l3", ""), info.get("poi_signal", ""),
+                    info.get("poi_fallback", ""), now, r["id"],
+                ),
+            )
         n += 1
     conn.commit()
     conn.close()
@@ -545,6 +587,35 @@ def enrich_business_area(db_path: Path = DB_PATH) -> int:
     return n
 
 
+def refresh_name_confidence(db_path: Path = DB_PATH) -> int:
+    """存量回填 name_confidence/name_evidence（不调 API）。
+
+    v2 激活前 geocode 不写命名置信 → 全部地点 name_confidence=0，resolve_place_name
+    一律落 address 长串显示（§2.6 契约行为正确但观感差）。本函数按已有 matched_level
+    映射回填；只处理 name_evidence 为空的行，不覆盖 legacy_cache / regeo:* 既有证据。
+    """
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    n = 0
+    for r in conn.execute(
+        "SELECT id, matched_level FROM places "
+        "WHERE geocoded_at IS NOT NULL AND (name_evidence IS NULL OR name_evidence='')"
+    ).fetchall():
+        level = r["matched_level"] or ""
+        conf = _NAME_CONFIDENCE_BY_LEVEL.get(level)
+        if conf is None:
+            continue
+        conn.execute(
+            "UPDATE places SET name_confidence=?, name_evidence=?, "
+            "updated_at=datetime('now','+8 hours') WHERE id=?",
+            (conf, f"regeo:{level}", r["id"]),
+        )
+        n += 1
+    conn.commit()
+    conn.close()
+    return n
+
+
 def run(db_path: Path = DB_PATH, label: str | None = None, force_all: bool = False) -> None:
     key = _amap_key()  # 提前校验 key，避免走到一半才发现缺配置
     n = incremental_encode(db_path, force_all=force_all)
@@ -566,12 +637,18 @@ def main() -> None:
                         help="给已编码常驻点强制统一标标签（如 家/公司），不传则不覆盖 label")
     parser.add_argument("--rebehavior", action="store_true",
                         help="仅刷新已编码点的 behavior（不调 API），基于 poi_type 中文大类重算")
-    parser.add_argument("--enrich-business", action="store_true",
-                        help="P2-1：对消费/活动类常驻点用周边搜索补商圈(business_area)")
-    args = parser.parse_args()
-    if args.rebehavior:
-        n = refresh_behavior(args.db)
-        print(f"[geocode] 刷新 behavior 完成: {n} 条")
+    parser.add_argument("--enrich-business", action="store_true",
+                        help="P2-1：对消费/活动类常驻点用周边搜索补商圈(business_area)")
+    parser.add_argument("--backfill-name-confidence", action="store_true",
+                        help="Backfill name_confidence/name_evidence from matched_level (no API calls)")
+    args = parser.parse_args()
+    if args.rebehavior:
+        n = refresh_behavior(args.db)
+        print(f"[geocode] 刷新 behavior 完成: {n} 条")
+        return
+    if args.backfill_name_confidence:
+        n = refresh_name_confidence(args.db)
+        print(f"[geocode] name_confidence backfill done: {n} rows")
         return
     if args.enrich_business:
         n = enrich_business_area(args.db)

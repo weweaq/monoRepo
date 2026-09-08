@@ -21,8 +21,10 @@ that reads the ``jump_to`` channel, so returning ``{"jump_to": "end"}`` / ``{"ju
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Final
 
 from langchain.agents.middleware import (
@@ -36,11 +38,22 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from gacore.config import Config
 from gacore.context import build_system_prompt
+from gacore.jsonl_logger import get_logger
 from gacore.state import GAState
+
+logger = get_logger("middleware")
 
 _EMPTY_PROMPT: Final = "[Empty response. Please respond or call a tool.]"
 _MAX_EMPTY_RETRIES: Final = 3
 _AGENT_ERROR_PREFIX: Final = "[Agent error:"
+
+# --- LLM 调用全量留痕（2026-09-04） ------------------------------------------
+# 每次 model call 往 logs/llm_calls/<YYYY-MM-DD>.jsonl 追加一行：
+# 完整请求消息（system + history，单条 20k 字符封顶）+ 响应摘要/全文 + token 用量。
+# 用途：排查"到底用什么生成了日报/回复"——请求原文可复现。日志 append 失败只 warning，
+# 绝不影响主链路。
+_LLM_LOG_DIRNAME: Final = "llm_calls"
+_LLM_LOG_MSG_CAP: Final = 20_000  # 单条消息在日志里的字符上限（防巨型 tool 结果撑爆行）
 
 # --- Output-side time guard ------------------------------------------------
 # Asia/Shanghai (UTC+8): the project's canonical clock — the exact source the
@@ -198,6 +211,98 @@ def check_reply_time_assertions(
     return problems
 
 
+def _cap_llm_log_content(content: str) -> str:
+    """Cap a single message's logged content; mark the truncation inline."""
+    if len(content) <= _LLM_LOG_MSG_CAP:
+        return content
+    return content[:_LLM_LOG_MSG_CAP] + f"…[truncated {len(content) - _LLM_LOG_MSG_CAP} chars]"
+
+
+def _llm_log_path(cfg: Config) -> Path:
+    return cfg.logs_dir / _LLM_LOG_DIRNAME / f"{datetime.now(_TZ).strftime('%Y-%m-%d')}.jsonl"
+
+
+def _serialize_llm_messages(request: ModelRequest[None]) -> list[dict[str, Any]]:
+    """Serialize the full request message list (system + history) for the call log."""
+    out: list[dict[str, Any]] = []
+    sys_msg = getattr(request, "system_message", None)
+    if sys_msg is not None:
+        content = sys_msg.content if isinstance(sys_msg.content, str) else str(sys_msg.content or "")
+        out.append({"role": "system", "chars": len(content), "content": _cap_llm_log_content(content)})
+    for m in request.messages or []:
+        content = m.content if isinstance(m.content, str) else str(m.content or "")
+        entry: dict[str, Any] = {"role": getattr(m, "type", "unknown"), "chars": len(content),
+                                 "content": _cap_llm_log_content(content)}
+        tool_calls = getattr(m, "tool_calls", None)
+        if tool_calls:
+            entry["tool_calls"] = [
+                {"name": tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", ""),
+                 "args": _cap_llm_log_content(json.dumps(tc.get("args", {}), ensure_ascii=False, default=str))
+                         if isinstance(tc, dict) else ""}
+                for tc in tool_calls
+            ]
+        out.append(entry)
+    return out
+
+
+def _serialize_llm_response(response: ModelResponse[Any] | AIMessage) -> dict[str, Any]:
+    """Serialize the model response (content / tool_calls / usage) for the call log.
+
+    ModelResponse.result is a *list* of BaseMessage (usually one AIMessage) — take the
+    last message as the model's answer; a bare AIMessage is used as-is.
+    """
+    msg = getattr(response, "result", None) or response
+    if isinstance(msg, list):
+        msg = msg[-1] if msg else None
+    content = getattr(msg, "content", "") or ""
+    if not isinstance(content, str):
+        content = str(content or "")
+    out: dict[str, Any] = {"chars": len(content), "content": _cap_llm_log_content(content)}
+    tool_calls = getattr(msg, "tool_calls", None)
+    if tool_calls:
+        out["tool_calls"] = [
+            tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", "") for tc in tool_calls
+        ]
+    usage = getattr(msg, "usage_metadata", None) or getattr(response, "usage_metadata", None)
+    if isinstance(usage, dict):
+        out["usage"] = {k: usage.get(k) for k in ("input_tokens", "output_tokens", "total_tokens") if k in usage}
+    return out
+
+
+def _append_llm_call_log(cfg: Config, entry: dict[str, Any]) -> None:
+    """Append one call-log line; OSError degrades to a warning, never raises."""
+    try:
+        path = _llm_log_path(cfg)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, ensure_ascii=False, default=str) + "\n")
+    except OSError as exc:
+        logger.warning("llm call log append failed", error_type=type(exc).__name__, stack_trace=str(exc))
+
+
+def _build_llm_log_entry(request: ModelRequest[None]) -> dict[str, Any]:
+    """Build the request-side half of the call-log entry (response filled by caller)."""
+    state = getattr(request, "state", None) or {}
+    turn = state.get("current_turn") if isinstance(state, dict) else None
+    model_obj = getattr(request, "model", None)
+    model_name = getattr(model_obj, "model_name", None) or getattr(model_obj, "model", None) or ""
+    if not isinstance(model_name, str):
+        model_name = str(model_name)
+    user_head = ""
+    for m in reversed(list(request.messages or [])):
+        if getattr(m, "type", "") == "human":
+            c = m.content if isinstance(m.content, str) else str(m.content or "")
+            user_head = c[:80]
+            break
+    return {
+        "ts": datetime.now(_TZ).isoformat(timespec="seconds"),
+        "model": model_name,
+        "turn": turn,
+        "user_head": user_head,
+        "messages": _serialize_llm_messages(request),
+    }
+
+
 class GAPromptMiddleware(AgentMiddleware[GAState, None, Any]):
     """Rebuild the per-turn system prompt (rules + working checkpoint + hints).
 
@@ -217,16 +322,39 @@ class GAPromptMiddleware(AgentMiddleware[GAState, None, Any]):
     def wrap_model_call(
         self, request: ModelRequest[None], handler: Any
     ) -> ModelResponse[Any] | AIMessage:
-        """Replace the request's system message with the GA per-turn prompt."""
+        """Replace the request's system message with the GA per-turn prompt.
+
+        Also appends one full request/response line to logs/llm_calls/<date>.jsonl —
+        the "what did we actually send the LLM" audit trail (2026-09-04). Logging
+        failures degrade to warnings and never break the call.
+        """
         req = self._inject_prompt(request)
-        return handler(req)
+        entry = _build_llm_log_entry(req)
+        try:
+            response = handler(req)
+        except Exception as exc:  # log the failure, then re-raise untouched
+            entry["response"] = {"error": f"{type(exc).__name__}: {exc}"}
+            _append_llm_call_log(self.cfg, entry)
+            raise
+        entry["response"] = _serialize_llm_response(response)
+        _append_llm_call_log(self.cfg, entry)
+        return response
 
     async def awrap_model_call(
         self, request: ModelRequest[None], handler: Any
     ) -> ModelResponse[Any] | AIMessage:
         """Async twin of wrap_model_call — required when the graph runs via astream()."""
         req = self._inject_prompt(request)
-        return await handler(req)
+        entry = _build_llm_log_entry(req)
+        try:
+            response = await handler(req)
+        except Exception as exc:  # log the failure, then re-raise untouched
+            entry["response"] = {"error": f"{type(exc).__name__}: {exc}"}
+            _append_llm_call_log(self.cfg, entry)
+            raise
+        entry["response"] = _serialize_llm_response(response)
+        _append_llm_call_log(self.cfg, entry)
+        return response
 
     def _inject_prompt(self, request: ModelRequest[None]) -> ModelRequest[None]:
         """Build the per-turn system message and return an overridden request.

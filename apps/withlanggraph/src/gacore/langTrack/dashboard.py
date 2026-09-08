@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 import sqlite3
 import urllib.parse
 from html import escape
@@ -16,6 +17,12 @@ from pathlib import Path
 
 from gacore.langTrack import fact_card
 from gacore.langTrack import location_reader as lr
+from gacore.langTrack.location_facts import (
+    format_place,
+    haversine_m,
+    resolve_place_name,
+    user_tag_of,
+)
 
 DB_PATH = Path(__file__).resolve().parents[3] / "data" / "langTrack.db"
 _TZ = datetime.timezone(datetime.timedelta(hours=8))
@@ -476,6 +483,368 @@ def _render_location_health(conn: sqlite3.Connection, device_id: str, day: str) 
     )
 
 
+def _nearest_place_index(conn: sqlite3.Connection) -> list[tuple[str, float, float]]:
+    """canonical 地点（§2.6 显示名 + WGS84 坐标），供最近地点计算；无表返回空。"""
+    out: list[tuple[str, float, float]] = []
+    base = ("label, poi, poi_fallback, address, district, township, "
+            "business_area, lat, lon")
+    tail = " FROM places WHERE lat IS NOT NULL AND lon IS NOT NULL"
+    for extra in (", parent_poi, name_confidence", ""):
+        try:
+            rows = conn.execute(f"SELECT {base}{extra}{tail}").fetchall()
+        except sqlite3.OperationalError:
+            continue
+        for r in rows:
+            name, src, _gran = resolve_place_name(
+                poi=r["poi"] or "", poi_fallback=r["poi_fallback"] or "",
+                address=r["address"] or "", district=r["district"] or "",
+                township=r["township"] or "", business_area=r["business_area"] or "",
+                parent_poi=(r["parent_poi"] or "") if extra else "",
+                name_confidence=float(r["name_confidence"] or 0) if extra else 0.0,
+                label=r["label"] or "",
+            )
+            name = "" if src == "unknown" else name
+            out.append((
+                format_place(name, user_tag_of(r["label"] or "")),
+                float(r["lat"]), float(r["lon"]),
+            ))
+        break
+    return out
+
+
+def _fmt_dist(m: float) -> str:
+    return f"{m:.0f}m" if m < 1000 else f"{m / 1000:.1f}km"
+
+
+def _render_location_points(conn: sqlite3.Connection, device_id: str, day: str) -> str:
+    """当日定位采集明细：时间 | 最近地点+距离 | 精度 | 信号源（原始层逐点）。"""
+    try:
+        rows = conn.execute(
+            "SELECT ts, payload FROM events WHERE type='location' AND device_id=? "
+            "AND date(ts/1000,'unixepoch','+8 hours')=? ORDER BY ts",
+            (device_id, day),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    if not rows:
+        return (
+            f'<div class="card"><h2>定位采集明细 · {escape(day)}</h2>'
+            '<div class="empty">当日无定位事件</div></div>'
+        )
+
+    places = _nearest_place_index(conn)
+    pts: list[tuple[int, float, float, object, object]] = []
+    bad = 0
+    for r in rows:
+        try:
+            p = json.loads(r["payload"] or "{}")
+            lat, lon = float(p["lat"]), float(p["lon"])
+        except (ValueError, TypeError, KeyError, AttributeError):
+            bad += 1
+            continue
+        pts.append((int(r["ts"]), lat, lon, p.get("acc"), p.get("provider")))
+
+    trs = ""
+    for ts, lat, lon, acc, prov in pts:
+        nearest_txt = "-"
+        if places:
+            best = min(places, key=lambda pl: haversine_m(lat, lon, pl[1], pl[2]))
+            d = haversine_m(lat, lon, best[1], best[2])
+            nearest_txt = f"{escape(best[0])} · {_fmt_dist(d)}"
+        try:
+            acc_txt = f"{float(acc):.0f}m" if acc is not None else "-"
+        except (TypeError, ValueError):
+            acc_txt = "-"
+        trs += (
+            f'<tr><td>{_fmt_time(ts)}</td><td>{nearest_txt}</td>'
+            f'<td>{acc_txt}</td><td>{escape(str(prov or "-"))}</td></tr>'
+        )
+
+    span_txt = ""
+    if pts:
+        span_txt = f'（{_fmt_time(pts[0][0])}–{_fmt_time(pts[-1][0])}）'
+    bad_txt = f'<div class="warn">另有 {bad} 个事件 payload 解析失败，未计入</div>' if bad else ""
+    return (
+        f'<div class="card"><h2>定位采集明细 · {escape(day)}</h2>'
+        f'<details><summary class="dim" style="cursor:pointer">当日定位点 {len(pts)} 个'
+        f'{escape(span_txt)}，点击展开逐点明细</summary>'
+        f'<div style="max-height:360px;overflow-y:auto;margin-top:8px">'
+        f'<table class="tbl"><tr><th>时间</th><th>最近地点 · 距离</th>'
+        f'<th>精度</th><th>信号源</th></tr>{trs}</table></div></details>'
+        f'{bad_txt}'
+        f'<div class="mig-note">逐点列出原始层 location 事件；最近地点按 canonical 地点'
+        f'（WGS84）球面距离取最小；精度=设备上报 acc。</div></div>'
+    )
+
+
+def _read_env_var(name: str) -> str:
+    """环境变量或 .env 字节查找读取（编码无关，踩坑 #3：.env 可能混编码）。"""
+    val = os.environ.get(name, "").strip()
+    if not val:
+        env_path = Path(__file__).resolve().parents[3] / ".env"
+        if env_path.exists():
+            raw = env_path.read_bytes()
+            marker = name.encode("ascii") + b"="
+            idx = raw.find(marker)
+            if idx >= 0:
+                rest = raw[idx + len(marker):]
+                end = rest.find(b"\n")
+                if end >= 0:
+                    rest = rest[:end]
+                val = rest.decode("utf-8", errors="ignore").strip().strip('"').strip("'")
+    return val
+
+
+def _amap_js_key() -> str:
+    """高德「Web端(JS API)」Key：环境变量 AMAP_JS_KEY 或 .env（字节查找，编码无关）。
+
+    未配置返回空串——地图卡据此优雅降级，绝不把 Web 服务型 AMAP_KEY 混用于 JS API。
+    """
+    return _read_env_var("AMAP_JS_KEY")
+
+
+def _amap_js_security_code() -> str:
+    """JS API 安全密钥：2021-12 后申请的 Key 在 JS API 2.0 必配（缺失报
+    INVALID_USER_SCODE），须在加载 JS API 前设 window._AMapSecurityConfig。
+    旧 Key 无安全密钥，未配置返回空串（前端跳过注入）。"""
+    return _read_env_var("AMAP_JS_SECURITY_CODE")
+
+
+_MAP_JS = """
+function langTrackMap(key, secCode, day, dev){
+  if (secCode) { window._AMapSecurityConfig = { securityJsCode: secCode }; }
+  var note = document.getElementById('map-note');
+  var fail = function(msg){ note.textContent = msg; note.style.color = 'var(--amber)'; };
+  fetch('/api/map/day?day=' + encodeURIComponent(day) + (dev ? '&device_id=' + encodeURIComponent(dev) : ''))
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if (d.error) { fail('地图数据不可用：' + d.error); return; }
+      if (!d.points.length && !d.stays.length && !d.trips.length) { note.textContent = '当日无定位数据'; return; }
+      var s = document.createElement('script');
+      s.src = 'https://webapi.amap.com/maps?v=2.0&key=' + encodeURIComponent(key);
+      s.onload = function(){ try { draw(d); } catch (e) { fail('地图渲染失败（Key 类型不匹配、缺少安全密钥或浏览器不支持）：' + e); } };
+      s.onerror = function(){ fail('高德 JS API 加载失败（网络不可达或 Key 无效）'); };
+      document.head.appendChild(s);
+    })
+    .catch(function(){ fail('地图数据加载失败'); });
+  function draw(d){
+    var map = new AMap.Map('map-canvas', {mapStyle:'amap://styles/dark', zoom:13});
+    (d.trips || []).forEach(function(t){
+      map.add(new AMap.Polyline({
+        path: t.path.map(function(p){ return [p[1], p[0]]; }),
+        strokeColor:'#22D3EE', strokeWeight:4, strokeOpacity:0.85, lineJoin:'round',
+        showDir:true
+      }));
+    });
+    (d.points || []).forEach(function(p){
+      var c = (p.acc == null) ? '#96A0B4' : (p.acc <= 50 ? '#3FBF8F' : (p.acc <= 150 ? '#F2A65A' : '#F26B5C'));
+      map.add(new AMap.CircleMarker({
+        center:[p.lon, p.lat], radius:4, strokeColor:c, strokeWeight:1,
+        fillColor:c, fillOpacity:0.85
+      }));
+    });
+    (d.stays || []).forEach(function(s){
+      map.add(new AMap.CircleMarker({
+        center:[s.lon, s.lat], radius:11, strokeColor:'#8A7AD8', strokeWeight:2,
+        fillColor:'#8A7AD8', fillOpacity:0.35
+      }));
+      map.add(new AMap.Text({
+        text: s.name + ' ' + s.start + '-' + s.end + '（' + s.dur_h + 'h）',
+        position:[s.lon, s.lat], offset:new AMap.Pixel(14, -6),
+        style:{'color':'#E9EDF6','font-size':'11px','background':'rgba(17,21,31,.85)',
+               'border':'1px solid #1C2333','padding':'1px 5px','border-radius':'5px'}
+      }));
+    });
+    map.setFitView();
+    note.textContent = '点 ' + (d.points || []).length + ' · 停留 ' + (d.stays || []).length +
+      ' · 路线 ' + (d.trips || []).length + '（绿 ≤50m / 黄 ≤150m / 红 >150m / 灰 未知精度）';
+  }
+}
+"""
+
+
+def _map_safe(s: str) -> str:
+    """地图 Text 字段去标签（AMap.Text 按文本渲染，防御性清洗）。"""
+    return (s or "").replace("<", "‹").replace(">", "›")
+
+
+def _json_for_html(val: str) -> str:
+    """JSON 编码后转义 <>&，供内联 <script> 嵌入（防 </script> 字符串逃逸 XSS）。"""
+    return (
+        json.dumps(val)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+
+
+def build_map_day_data(
+    conn: sqlite3.Connection, day: str, device_id: str | None = None
+) -> dict:
+    """当日地图数据（点/停留/路线），坐标全部转为 GCJ02 供 JS API 渲染。
+
+    点按事件 ts 逐点解析坐标制（§3.3）；stays 中心按 source_coord_system 转换；
+    trips.polyline 已是 GCJ02（路线编码缓存域）原样输出。
+    """
+    from gacore.langTrack.etl_config import load_coord_systems, resolve_coord_system
+    from gacore.langTrack.location_facts import to_amap_coord
+
+    conn.row_factory = sqlite3.Row
+    out: dict = {"day": day, "points": [], "stays": [], "trips": []}
+    if not device_id:
+        try:
+            devs = [
+                r[0] for r in conn.execute(
+                    "SELECT DISTINCT device_id FROM events WHERE type='location' "
+                    "AND date(ts/1000,'unixepoch','+8 hours')=?", (day,)
+                )
+            ]
+        except sqlite3.OperationalError:
+            devs = []
+        if len(devs) != 1:
+            out["error"] = "ambiguous_device" if devs else "no_data"
+            out["candidates"] = devs
+            return out
+        device_id = devs[0]
+    out["device_id"] = device_id
+
+    try:
+        cfg = load_coord_systems()
+    except Exception:  # noqa: BLE001 - 配置损坏按 unknown 逐点放行
+        cfg = {"default": "unknown", "periods": []}
+
+    # canonical 地点名（place_id → §2.6 显示名）
+    pnames: dict[str, str] = {}
+    for cols in (
+        ("place_id, label, poi, poi_fallback, address, district, township, "
+         "business_area, parent_poi, name_confidence"),
+        "place_id, label, poi, poi_fallback, address, district, township, business_area",
+    ):
+        try:
+            prows = conn.execute(f"SELECT {cols} FROM places").fetchall()
+        except sqlite3.OperationalError:
+            continue
+        for r in prows:
+            name, src, _gran = resolve_place_name(
+                poi=r["poi"] or "", poi_fallback=r["poi_fallback"] or "",
+                address=r["address"] or "", district=r["district"] or "",
+                township=r["township"] or "", business_area=r["business_area"] or "",
+                parent_poi=(r["parent_poi"] or "") if "parent_poi" in cols else "",
+                name_confidence=(
+                    float(r["name_confidence"] or 0)
+                    if "name_confidence" in cols else 0.0
+                ),
+                label=r["label"] or "",
+            )
+            name = "" if src == "unknown" else name
+            pnames[r["place_id"]] = _map_safe(
+                format_place(name, user_tag_of(r["label"] or ""))
+            )
+        break
+
+    try:
+        rows = conn.execute(
+            "SELECT ts, payload FROM events WHERE type='location' AND device_id=? "
+            "AND date(ts/1000,'unixepoch','+8 hours')=? ORDER BY ts",
+            (device_id, day),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    for r in rows:
+        try:
+            p = json.loads(r["payload"] or "{}")
+            lat, lon = float(p["lat"]), float(p["lon"])
+        except (ValueError, TypeError, KeyError, AttributeError):
+            continue
+        ts = int(r["ts"])
+        cs = resolve_coord_system(device_id, ts, cfg)
+        glat, glon = to_amap_coord(lat, lon, cs)
+        acc = p.get("acc")
+        out["points"].append({
+            "t": _fmt_time(ts),
+            "lat": round(glat, 6), "lon": round(glon, 6),
+            "acc": acc if isinstance(acc, (int, float)) else None,
+            "p": str(p.get("provider") or ""),
+        })
+
+    try:
+        srows = conn.execute(
+            "SELECT place_id, start_ts, end_ts, center_lat, center_lon, "
+            "source_coord_system FROM stays "
+            "WHERE day=? AND device_id=? AND center_lat IS NOT NULL "
+            "AND center_lon IS NOT NULL ORDER BY start_ts",
+            (day, device_id),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        srows = []
+    for r in srows:
+        cs = (r["source_coord_system"] or "unknown").strip().lower() or "unknown"
+        glat, glon = to_amap_coord(float(r["center_lat"]), float(r["center_lon"]), cs)
+        out["stays"].append({
+            "name": pnames.get(r["place_id"]) or "停留",
+            "lat": round(glat, 6), "lon": round(glon, 6),
+            "start": _fmt_time(int(r["start_ts"])), "end": _fmt_time(int(r["end_ts"])),
+            "dur_h": round((int(r["end_ts"]) - int(r["start_ts"])) / 3600000, 1),
+        })
+
+    try:
+        trows = conn.execute(
+            "SELECT start_ts, end_ts, route_mode, polyline FROM trips "
+            "WHERE day=? AND device_id=? AND polyline IS NOT NULL AND polyline!='' "
+            "ORDER BY start_ts",
+            (day, device_id),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        trows = []
+    for r in trows:
+        try:
+            raw = json.loads(r["polyline"] or "[]")
+            path = [
+                [float(p[0]), float(p[1])]
+                for p in raw if isinstance(p, (list, tuple)) and len(p) == 2
+            ]
+        except (ValueError, TypeError):
+            continue
+        if not path:
+            continue
+        out["trips"].append({
+            "mode": r["route_mode"] or "",
+            "start": _fmt_time(int(r["start_ts"])), "end": _fmt_time(int(r["end_ts"])),
+            "path": path,
+        })
+    return out
+
+
+def _render_map_card(day: str, device_id: str | None) -> str:
+    """当日地图卡：高德 JS API 渲染点/停留/路线；未配置 JS Key 时优雅降级。"""
+    key = _amap_js_key()
+    if not key:
+        return (
+            '<div class="card"><h2>当日地图 · 定位点 / 停留 / 路线</h2>'
+            '<div class="empty">地图未启用：未配置 AMAP_JS_KEY。<br>'
+            '需要高德「<b>Web端(JS API)</b>」类型 Key（现有 AMAP_KEY 为 Web服务型，'
+            'JS 端不兼容）；<br>在高德开放平台申请后，于 .env 添加 '
+            '<b>AMAP_JS_KEY=你的Key</b>（2021-12 后申请的 Key 还需 '
+            '<b>AMAP_JS_SECURITY_CODE=对应安全密钥</b>）并刷新本页即可启用。</div></div>'
+        )
+    sec = _amap_js_security_code()
+    call = (
+        f"window.addEventListener('load', function(){{langTrackMap("
+        f"{_json_for_html(key)}, {_json_for_html(sec)}, {_json_for_html(day)}, "
+        f"{_json_for_html(device_id or '')});}});"
+    )
+    return (
+        '<div class="card"><h2>当日地图 · 定位点 / 停留 / 路线</h2>'
+        '<div id="map-canvas" style="height:420px;border-radius:12px;'
+        'background:#0B0F18"></div>'
+        '<div id="map-note" class="dim" style="margin-top:8px">地图加载中…</div>'
+        f'<script>{call}</script>'
+        '<div class="mig-note">点=当日原始定位（按精度着色，已按坐标制转 GCJ02）；'
+        '紫圈+文字=停留（地点+起止+时长）；青色线=路线 polyline（路线编码缓存，GCJ02）。</div>'
+        '</div>'
+    )
+
+
 def _fmt_sec(sec) -> str:
     if sec is None:
         return "-"
@@ -839,6 +1208,7 @@ def _render_migration(conn: sqlite3.Connection, device_id: str) -> str:
         pass
 
     issues: dict[str, int] = {}
+    resolved_n: int = 0
     orphan_n: int | None = None
     try:
         for r in conn.execute(
@@ -848,6 +1218,10 @@ def _render_migration(conn: sqlite3.Connection, device_id: str) -> str:
             (device_id,),
         ):
             issues[r["kind"]] = r["n"]
+        resolved_n = conn.execute(
+            "SELECT COUNT(*) FROM location_migration_issues "
+            "WHERE resolution_status='resolved'"
+        ).fetchone()[0]
     except sqlite3.OperationalError:
         pass
     # 孤儿 stay：正式 stays 引用了不存在 place 的 stay 数（NOT EXISTS 避免全表扫）
@@ -889,6 +1263,8 @@ def _render_migration(conn: sqlite3.Connection, device_id: str) -> str:
         f'{mapping_rows or "<tr><td colspan=4 class=\"empty\">无映射</td></tr>"}</table>'
         f'<div class="row"><span class="name">孤儿 stay</span><span class="val">{orphan_txt}</span></div>'
         f'<div class="row"><span class="name">未解决迁移 issue</span><span class="val">{issue_txt}</span></div>'
+        f'<div class="row"><span class="name">已解决 issue（审计存档）</span>'
+        f'<span class="val">{resolved_n}</span></div>'
         f'<div class="row"><span class="name">迁移 metrics（最新 run）</span><span class="val">{metric_txt}</span></div>'
         f'</div>'
     )
@@ -1026,6 +1402,8 @@ def render_dashboard_html(
         {_render_persona(card.get("persona"))}
         {_render_coverage(conn)}
         {_render_location_health(conn, dev, requested)}
+        {_render_location_points(conn, dev, requested)}
+        {_render_map_card(requested, dev)}
         {_render_time_space(sp)}
         {_render_kpi30(sp)}
         {_render_frequent_places(conn, card, sp, window)}
@@ -1063,6 +1441,7 @@ function runEtl(btn){{
     }}, 2000);
   }}).catch(function(){{ btn.disabled = false; s.textContent = '触发失败，请重试'; }});
 }}
+{_MAP_JS}
 </script>
 {body}
 <div class="sub" style="margin-top:30px">© 场景标签为 ETL 逆地理编码结果</div>

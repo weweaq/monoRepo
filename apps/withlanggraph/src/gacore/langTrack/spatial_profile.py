@@ -39,7 +39,11 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import TypedDict
 
 from gacore.langTrack import location_reader as lr
-from gacore.langTrack.location_facts import haversine_m
+from gacore.langTrack.location_facts import (
+    haversine_m,
+    resolve_place_name,
+    user_tag_of,
+)
 
 _TZ_CST = timezone(timedelta(hours=8))
 _HALF_HOUR_MS = 30 * 60 * 1000
@@ -462,7 +466,21 @@ def _frequent_places(
     out = []
     for pid, g in by_place.items():
         pl = places_by_id.get(pid) or {}
-        name = pl.get("label") or pl.get("poi") or "未知地点"
+        # §2.6 契约：地名只来自 poi/poi_fallback/address 等地理字段（resolve_place_name），
+        # label 仅作 user_tag；无地理证据时 place_name 置空（显示层只出 tag，不冒充"未知"）
+        pn, _src, _gran = resolve_place_name(
+            poi=pl.get("poi") or "",
+            poi_fallback=pl.get("poi_fallback") or "",
+            address=pl.get("address") or "",
+            district=pl.get("district") or "",
+            township=pl.get("township") or "",
+            business_area=pl.get("business_area") or "",
+            parent_poi=pl.get("parent_poi") or "",
+            name_confidence=float(pl.get("name_confidence") or 0.0),
+            label=pl.get("label") or "",
+        )
+        name = "" if _src == "unknown" else pn
+        tag = user_tag_of(pl.get("label") or "")
         seg = dict(g["seg"])
         for key in list(seg):
             if seg[key] == 0:
@@ -471,7 +489,7 @@ def _frequent_places(
             "window_days": int(win_str),
             "place_id": pid,
             "place_name": name,
-            "user_tag": pl.get("label") or None,
+            "user_tag": tag or None,
             "poi": pl.get("poi") or "",
             "poi_l1": pl.get("poi_l1") or "",
             "visit_days": len(g["day_set"]),

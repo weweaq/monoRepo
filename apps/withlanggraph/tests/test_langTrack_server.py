@@ -16,9 +16,18 @@ def client(tmp_path):
     storage.close()
 
 
-def test_health(client):
-    c, _ = client
-    assert c.get("/health").json() == {"status": "ok"}
+def test_health(client):
+    c, _ = client
+    assert c.get("/health").json() == {"status": "ok"}
+
+
+def test_client_version(client):
+    """版本自查接口：返回非空 app_version，且与客户端 build.gradle versionName 一致。"""
+    c, _ = client
+    body = c.get("/api/client/version").json()
+    assert isinstance(body.get("app_version"), str)
+    assert body["app_version"]  # 非空
+    assert "latest_apk_url" in body
 
 
 def test_ingest_inserts(client):
@@ -136,3 +145,21 @@ def test_etl_run_endpoint_triggers_and_guards(client, monkeypatch):
     assert st["last_ok"] is True
     assert st["last_finished_at"]
     assert len(calls) == 1
+
+
+def test_client_version_reads_config_file(client, tmp_path, monkeypatch):
+    """/api/client/version 优先读 data/client_version.json（打包脚本自动写入）。"""
+    from gacore.langTrack import server as server_mod
+
+    cfg_dir = tmp_path / "data"
+    cfg_dir.mkdir()
+    (cfg_dir / "client_version.json").write_text(
+        '{"app_version":"9.9","latest_apk_url":"/static/app-debug.apk"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(server_mod, "_PROJECT_ROOT", tmp_path)
+
+    c, _ = client
+    body = c.get("/api/client/version").json()
+    assert body["app_version"] == "9.9"
+    assert body["latest_apk_url"] == "/static/app-debug.apk"

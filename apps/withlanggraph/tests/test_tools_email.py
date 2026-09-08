@@ -77,13 +77,16 @@ def _ssl_settings(**overrides: str) -> _SmtpSettings:
 
 
 def _decoded_text_part(msg: Any) -> str:
-    """Decode the html text part of a (possibly multipart) message to a string."""
+    """Decode the html text part of a (possibly nested multipart) message to a string."""
     payload = msg.get_payload()
     if isinstance(payload, list):
-        text_part = next(p for p in payload if p.get_content_type() == "text/html")
-        raw = text_part.get_payload(decode=True)
-    else:
-        raw = msg.get_payload(decode=True)
+        # msg.walk() descends the whole tree (mixed -> related -> text), so use it
+        for part in msg.walk():
+            if part.get_content_type() == "text/html":
+                raw = part.get_payload(decode=True)
+                return raw.decode("utf-8")
+        return ""
+    raw = msg.get_payload(decode=True)
     return raw.decode("utf-8")
 
 
@@ -114,7 +117,8 @@ def test_send_sync_sends_via_ssl_and_reports_sent() -> None:
     assert parsed["To"] == "to@example.com"
     assert _decoded_subject(parsed) == "Hello"
     assert _decoded_text_part(parsed) == "<p>hi</p>"
-    assert result == {"status": "sent", "to": "to@example.com", "subject": "Hello", "image_count": 0}
+    assert result == {"status": "sent", "to": "to@example.com", "subject": "Hello",
+                      "image_count": 0, "attachment_count": 0}
 
 
 def test_send_sync_uses_starttls_when_ssl_disabled() -> None:
@@ -227,7 +231,7 @@ def test_send_email_returns_recipient_error_when_no_recipient_available() -> Non
 def test_send_email_uses_smtp_to_default_when_to_omitted(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
-    def fake_send_sync(subject: str, to_addr: str, body: str, settings: _SmtpSettings, image_paths: list[str] | None = None) -> SendEmailResult:
+    def fake_send_sync(subject: str, to_addr: str, body: str, settings: _SmtpSettings, image_paths: list[str] | None = None, attachment_paths: list[str] | None = None) -> SendEmailResult:
         captured["to"] = to_addr
         return SendEmailResult(status="sent", to=to_addr, subject=subject, image_count=0)
 
@@ -243,7 +247,7 @@ def test_send_email_uses_smtp_to_default_when_to_omitted(monkeypatch: pytest.Mon
 def test_send_email_explicit_to_overrides_default_recipient(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: dict[str, object] = {}
 
-    def fake_send_sync(subject: str, to_addr: str, body: str, settings: _SmtpSettings, image_paths: list[str] | None = None) -> SendEmailResult:
+    def fake_send_sync(subject: str, to_addr: str, body: str, settings: _SmtpSettings, image_paths: list[str] | None = None, attachment_paths: list[str] | None = None) -> SendEmailResult:
         captured["to"] = to_addr
         return SendEmailResult(status="sent", to=to_addr, subject=subject, image_count=0)
 
@@ -263,4 +267,85 @@ def test_send_email_schema_exposes_public_args_but_excludes_env_seam() -> None:
     assert "subject" in props
     assert "body" in props
     assert "image_paths" in props
+    assert "attachment_paths" in props
     assert "_env" not in props
+
+
+def _attachment_parts(msg: Any) -> list[Any]:
+    """Return the leaf parts carrying a Content-Disposition attachment."""
+    return [p for p in msg.walk() if "attachment" in str(p.get("Content-Disposition", ""))]
+
+
+def test_send_sync_reports_attachment_count() -> None:
+    settings = _ssl_settings()
+    server = FakeSmtpServer()
+
+    result = _send_sync(
+        "Hello", "to@example.com", "<p>hi</p>", settings,
+        attachment_paths=[], smtp_factory=make_smtp_factory(server),
+    )
+
+    assert result == {
+        "status": "sent", "to": "to@example.com", "subject": "Hello",
+        "image_count": 0, "attachment_count": 0,
+    }
+
+
+def test_build_message_attaches_apk_with_android_mime(tmp_path: Path) -> None:
+    apk = tmp_path / "app-debug.apk"
+    apk.write_bytes(b"\x50\x4b\x03\x04fakeapk")
+
+    msg = _build_message("s", "<p>b</p>", "a@qq.com", "b@qq.com", attachment_paths=[str(apk)])
+
+    assert msg.get_content_type() == "multipart/mixed"
+    parts = _attachment_parts(msg)
+    assert len(parts) == 1
+    assert parts[0].get_content_type() == "application/vnd.android.package-archive"
+    assert parts[0]["Content-Disposition"].split(";")[1].strip() == 'filename="app-debug.apk"'
+    # inner html still present and intact
+    text = _decoded_text_part(msg)
+    assert "<p>b</p>" in text
+
+
+def test_build_message_attaches_pdf_and_keeps_html(tmp_path: Path) -> None:
+    pdf = tmp_path / "report.pdf"
+    pdf.write_bytes(b"%PDF-1.4 fake")
+
+    msg = _build_message("s", "<p>hi</p>", "a@qq.com", "b@qq.com", attachment_paths=[str(pdf)])
+
+    parts = _attachment_parts(msg)
+    assert len(parts) == 1
+    assert parts[0].get_content_type() == "application/pdf"
+    assert _decoded_text_part(msg) == "<p>hi</p>"
+
+
+def test_build_message_skips_missing_attachments(tmp_path: Path) -> None:
+    apk = tmp_path / "real.apk"
+    apk.write_bytes(b"\x50\x4bfake")
+
+    msg = _build_message(
+        "s", "<p>b</p>", "a@qq.com", "b@qq.com",
+        attachment_paths=[str(apk), str(tmp_path / "missing.apk")],
+    )
+
+    parts = _attachment_parts(msg)
+    assert [p for p in parts] and len(parts) == 1
+    assert parts[0]["Content-Disposition"] is not None
+
+
+def test_build_message_images_inline_and_attachment_both(tmp_path: Path) -> None:
+    img = tmp_path / "c.png"
+    img.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    txt = tmp_path / "note.txt"
+    txt.write_bytes(b"hello")
+
+    msg = _build_message(
+        "s", "<p>b</p>", "a@qq.com", "b@qq.com",
+        image_paths=[str(img)], attachment_paths=[str(txt)],
+    )
+
+    text = _decoded_text_part(msg)
+    assert 'src="cid:photo0"' in text
+    atts = _attachment_parts(msg)
+    assert len(atts) == 1
+    assert atts[0].get_content_type() == "text/plain"

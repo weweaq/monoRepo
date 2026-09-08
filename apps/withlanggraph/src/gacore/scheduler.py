@@ -25,6 +25,7 @@ import html
 import json
 import os
 import re
+import sqlite3
 import time
 import uuid
 from collections.abc import Callable, Mapping
@@ -45,6 +46,70 @@ _OUTPUT_SUBDIR: Final = "scheduled"
 _TIME_RE: Final = re.compile(r"^(\d{1,2}):(\d{2})$")
 _INTERVAL_RE: Final = re.compile(r"^every\s+(\d+)\s*([dhm])$", re.IGNORECASE)
 _POLL_INTERVAL_SECONDS: Final = 30
+
+# ---- 调度回复清洗与完成性校验（修复 2026-09-03 日报正文被 <summary>/DSML 标签污染）----
+# <summary>...</summary> 完整块（GA 协议思考块）：qq.py 流式路径已在发送前剥离，调度/邮件路径补齐。
+_SUMMARY_BLOCK_RE: Final = re.compile(r"<summary>.*?</summary>", re.DOTALL)
+# 工具调用 DSL 的闭合标签残尾行：形如 </｜｜DSML｜｜parameter> / </||DSML||invoke> / </｜｜tool_calls>
+# （｜=U+FF5C 全角竖线；兼容 0~1 个 ASCII "DSML" 中间标记，以及全角/半角竖线变体）。
+# 仅匹配"整行只有闭合 + 标签关键字"的形式，避免误删正文普通文本。
+# 正常开标签会以结构化 tool_calls 走 tools 节点、不落入 content，故此处只处理残尾闭合标签。
+_TOOL_DSL_LINE_RE: Final = re.compile(
+    r"(?m)^[ \t]*</[｜|\s]*D?S?M?L?[｜|\s]*(?:parameter|invoke|tool_calls)[｜|\s]*>[ \t]*$"
+)
+
+
+def _sanitize_reply(reply: str) -> str:
+    """清洗调度产出正文：剥 <summary> 完整块、未闭合 <summary> 残渣、工具调用 DSL 残尾行。
+
+    幂等：已清洗文本二次调用结果不变；任一类缺失（无 summary / 无 DSL 残标）均安全跳过。
+    """
+    if not reply:
+        return reply
+    text = reply
+    # 1) 完整 <summary>...</summary> 思考块（跨行）
+    text = _SUMMARY_BLOCK_RE.sub("", text)
+    # 2) 若仍残留未闭合 <summary>（无对应闭合标签，其后即为思考残渣，正文本体未产出）-> 清到结尾
+    if "<summary>" in text and "</summary>" not in text:
+        text = text.split("<summary>", 1)[0]
+    # 3) 工具调用 DSL 闭合标签残尾行（</...parameter|invoke|tool_calls>）
+    text = _TOOL_DSL_LINE_RE.sub("", text)
+    return text.strip()
+
+
+def _is_incomplete_reply(raw: str, cleaned: str) -> bool:
+    """是否"形似正文、实为残渣"：原始内容非空，但清洗后为空，说明只是 summary/DSML 残渣。"""
+    return bool((raw or "").strip() and not (cleaned or "").strip())
+
+
+# ---- 日报失败自动重试一次（2026-09-05，9/4 事故修复）----
+# 触发：模型末条消息仅为 <summary>/DSML 残渣（INCOMPLETE）或空（EMPTY）——这类"没产出正文"
+# 往往是模型单轮偷懒/误判完成，信息包素材是好的，重跑一次大概率能成篇。第二次仍失败才判败。
+_RETRYABLE_REASONS: Final = frozenset({"INCOMPLETE_REPLY", "EMPTY_REPLY"})
+_MAX_JOB_ATTEMPTS: Final = 2
+# 重试 prompt：在已装配好信息包的 prompt 末尾追加强硬输出约束，Info Pack 只预取一次不重复组装。
+_RETRY_PROMPT_SUFFIX: Final = (
+    "\n\n[二次生成·硬约束] 上一轮你只输出了内部思考块(<summary>)或空内容，没有产出正式的日报正文。"
+    "本次必须正常作答：\n"
+    "1. 严禁输出 <summary> 或任何 XML/类标签样式的思考过程，也不要再调用任何工具，直接干干净净写正文。\n"
+    "2. 正文是结构化 Markdown，按既定分节输出：# 今日状态 / # 工作日志 / # 个人观察 / "
+    "# 关键变化 / # 明日计划（没内容的节连同标题一起整节省略）。\n"
+    "3. 不要开场白、不要解释你在做什么，直接输出可阅读的邮件正文。"
+)
+
+
+def _make_retry_prompt(prompt: str) -> str:
+    """Info Pack 已内嵌在 prompt 里，重试只需追加硬约束后缀，避免重复组装信息包。"""
+    return prompt + _RETRY_PROMPT_SUFFIX
+
+
+# 日报 job 的命名标记：凡 job.name 含该子串即视为"日报类"，触发信息包注入与跨日 onboard 导出。
+_DAILY_JOB_MARKER: Final = "daily"
+
+
+def _is_daily_job(job: Job) -> bool:
+    """日报类 job 判定（命名嗅探，命中 _DAILY_JOB_MARKER）。"""
+    return _DAILY_JOB_MARKER in job.name.lower()
 
 
 @dataclass(slots=True)
@@ -249,15 +314,58 @@ def is_due(job: Job, state: JobState, now: datetime) -> bool:
     return now >= nxt
 
 
+def _build_job_prompt(job: Job, cfg: Config, for_day: str | None = None) -> str:
+    """Compose the user prompt for one job.
+
+    For the daily-report job, prepend the precomputed "当日信息包" (daily info pack) as
+    a leading section of the user message — the main channel chosen in
+    daily-report-redesign-v2: zero change to GAState / context.py. The pack carries the
+    deterministic daily facts (B站/Edge/git/文件活动/画像素材/ncm 基线/前日日报) so the
+    LLM can focus on dynamic retrieval (search_daily) and writing. Any failure while
+    building the pack falls back to the plain prompt so the job still runs.
+
+    for_day: ISO date — when set (historical re-run), the info pack is built for that
+    day instead of today. Defaults to today so scheduled runs are unchanged.
+    """
+    prompt = job.prompt
+    if "daily" in job.name.lower():
+        try:
+            from gacore.daily_info_pack import build_info_pack
+
+            today = for_day or datetime.now(UTC).astimezone().date().isoformat()
+            info_pack = build_info_pack(today, cfg)
+            if info_pack:
+                prompt = f"{info_pack}\n\n{job.prompt}"
+                logger.info(
+                    "daily info pack injected into user prompt",
+                    job=job.name,
+                    date=today,
+                    info_pack_chars=len(info_pack),
+                )
+        except Exception as e:  # noqa: BLE001 — never let the pack break the job
+            logger.warning(
+                "daily info pack build failed; falling back to plain prompt",
+                job=job.name,
+                error_type=type(e).__name__,
+                stack_trace=str(e),
+            )
+    return prompt
+
+
 def run_job(
     job: Job,
     cfg: Config,
     graph_runner: Callable[[str, Config, int], str | None] | None = None,
+    for_day: str | None = None,
 ) -> ScheduleResult:
     """Execute one job: run the agent headless, capture reply, write output + daily note.
 
     graph_runner is the injection seam for tests: production passes None (uses the real
     build_graph + run_once), tests pass a fake that returns a canned reply without LLM.
+
+    for_day: ISO date — historical re-run: info pack + trajectory map are produced for
+    that day instead of today; email/note/output still land under today's timestamp but
+    carry the historical day's data. Defaults to None (today).
 
     The reply is extracted from the final state's last AIMessage content.
     """
@@ -266,28 +374,63 @@ def run_job(
     logger.info("Job started", job=name, schedule=job.schedule)
     error: str | None = None
     reply = ""
+    raw_reply = ""
     exit_reason: str | None = None
+    prompt = job.prompt
     try:
-        if graph_runner is None:
-            exit_reason, reply = _default_graph_runner(job.prompt, cfg, job.max_turns)
-        else:
-            exit_reason = graph_runner(job.prompt, cfg, job.max_turns)
-            reply = f"[test reply for {name}]"
+        prompt = _build_job_prompt(job, cfg, for_day)
+        # 失败自动重试一次：首次仅得残渣/空正文（INCOMPLETE/EMPTY）→ 换硬约束 prompt 重跑。
+        # 信息包在第一次 prompt 里已装配，重试只追加约束后缀，不重复组装信息包。
+        active_prompt = prompt
+        for attempt in range(_MAX_JOB_ATTEMPTS):
+            if graph_runner is None:
+                exit_reason, reply, raw_reply = _default_graph_runner(
+                    active_prompt, cfg, job.max_turns
+                )
+            else:
+                exit_reason = graph_runner(active_prompt, cfg, job.max_turns)
+                reply = f"[test reply for {name}]"
+                raw_reply = reply
+            if (
+                attempt == 0
+                and exit_reason in _RETRYABLE_REASONS
+                and _is_daily_job(job)
+            ):
+                logger.warning(
+                    "Job reply incomplete/empty; retrying once",
+                    job=name,
+                    exit_reason=exit_reason,
+                )
+                active_prompt = _make_retry_prompt(prompt)
+                continue
+            break
     except Exception as e:  # noqa: BLE001 — scheduler must not crash on one job failure
         error = f"{type(e).__name__}: {e}"
         logger.error("Job failed", job=name, error_type=type(e).__name__, stack_trace=str(e))
         exit_reason = "AGENT_ERROR"
 
+    # 完成性校验：模型末条消息仅为 summary/工具DSML 残渣（INCOMPLETE_REPLY）或为空
+    # （EMPTY_REPLY，如 09-04 00:21 重跑）时按失败处理——不投递"成功"邮件、不写 OK
+    # 附注、不触发跨日 onboard 导出，避免污染下游（09-03/09-04 事故修复点）。
+    if error is None and exit_reason == "INCOMPLETE_REPLY":
+        error = (
+            "INCOMPLETE_REPLY: 模型末条消息仅为 <summary>/工具调用DSML 残渣，"
+            "未产出可交付的日报正文"
+        )
+        logger.warning("Job reply incomplete; marked as failed", job=name, exit_reason=exit_reason)
+    elif error is None and exit_reason == "EMPTY_REPLY":
+        error = "EMPTY_REPLY: 模型未产出任何 AIMessage 正文（空回复）"
+        logger.warning("Job reply empty; marked as failed", job=name, exit_reason=exit_reason)
     duration = time.monotonic() - start
-    output_path = _write_output(cfg, job, reply, error)
+    output_path = _write_output(cfg, job, reply, error, prompt=prompt, raw_reply=raw_reply)
     _write_daily_note(cfg, job, reply, error)
-    _deliver(job, cfg, reply, error)
+    _deliver(job, cfg, reply, error, for_day=for_day)
 
     # Cross-day rollover: after a successful daily-report run, export an onboard
     # memory pack (recent daily summaries + long-term persona) for the QQ frontend
     # to consume on the first message of the new day. Best-effort only — a failure
     # here must never block the report itself.
-    if error is None and "daily" in job.name.lower():
+    if error is None and _is_daily_job(job):
         try:
             _export_onboard_pack(cfg)
         except Exception as e:  # noqa: BLE001 — pack export must never break the job
@@ -310,12 +453,13 @@ def run_job(
     )
 
 
-def _default_graph_runner(prompt: str, cfg: Config, max_turns: int) -> tuple[str | None, str]:
+def _default_graph_runner(prompt: str, cfg: Config, max_turns: int) -> tuple[str | None, str, str]:
     """Build a fresh graph and run the prompt as a single-turn headless agent run.
 
-    Returns (exit_reason, reply_text) — the reply is extracted from the last AIMessage
-    in the final state. Scheduled jobs are single-turn, so the last AI message is the
-    agent's final answer.
+    Returns (exit_reason, reply_text, raw_reply_text) — the reply is extracted from the
+    last AIMessage in the final state; raw_reply is the pre-sanitize original (for the
+    run archive). Scheduled jobs are single-turn, so the last AI message is the agent's
+    final answer.
     """
     from langchain_core.messages import AIMessage
 
@@ -331,31 +475,86 @@ def _default_graph_runner(prompt: str, cfg: Config, max_turns: int) -> tuple[str
         if isinstance(msg, AIMessage) and isinstance(msg.content, str) and msg.content:
             reply = msg.content
             break
-    return exit_reason, reply
+    raw_reply = reply
+    reply = _sanitize_reply(reply)
+    if _is_incomplete_reply(raw_reply, reply):
+        # 末条消息实际是 <summary>/工具DSML 残渣而非正文（如 09-03 事故）→ 标记未完成，
+        # 交由 run_job 视为失败处理，禁止把垃圾当成功交付。
+        return "INCOMPLETE_REPLY", reply, raw_reply
+    if not reply.strip():
+        # 末条消息为空（如 09-04 00:21 重跑的 empty reply）→ 同样按失败处理，
+        # 不投递"成功"邮件。
+        return "EMPTY_REPLY", reply, raw_reply
+    return exit_reason, reply, raw_reply
 
 
 _REPLY_CACHE: Final = "_last_scheduled_reply"  # legacy; kept for backward-compat of state files
 
 
-def _write_output(cfg: Config, job: Job, reply: str, error: str | None) -> str | None:
-    """Write the job's reply to logs/scheduled/{job}_{timestamp}.md; return the path string."""
+def _reconstruct_system_prompt(prompt: str, cfg: Config) -> str:
+    """Best-effort reproduce the system prompt the run actually used.
+
+    GA rebuilds the system prompt per model call (GAPromptMiddleware); for scheduled
+    runs the state is a fresh new_state(prompt) with no rollover/output_mode overrides,
+    so rebuilding here is faithful up to the second-level time anchor. Returns "" on
+    any failure — archiving must never break the job.
+    """
+    try:
+        from gacore.context import build_system_prompt
+        from gacore.state import new_state
+
+        return build_system_prompt(new_state(prompt, cfg), cfg)
+    except Exception as e:  # noqa: BLE001 — archive helper degrades to empty
+        logger.warning("system prompt reconstruction failed", error_type=type(e).__name__, stack_trace=str(e))
+        return ""
+
+
+def _write_output(
+    cfg: Config,
+    job: Job,
+    reply: str,
+    error: str | None,
+    *,
+    prompt: str | None = None,
+    raw_reply: str = "",
+) -> str | None:
+    """Write the run's full input/output archive to logs/scheduled/{job}_{timestamp}.md.
+
+    Sections: metadata → System Prompt (reconstructed) → User Prompt (assembled, i.e.
+    info pack + job prompt — NOT the bare job prompt) → Reply (sanitized, what got
+    delivered) → Reply (raw, pre-sanitize). This is the "到底用什么生成了日报"
+    troubleshooting artifact (2026-09-04); the per-model-call request log lives in
+    logs/llm_calls/<date>.jsonl (middleware).
+    """
     out_dir = cfg.logs_dir / _OUTPUT_SUBDIR
     out_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(UTC).astimezone().strftime("%Y%m%d_%H%M%S")
     path = out_dir / f"{job.name}_{ts}.md"
+    assembled_prompt = prompt if prompt is not None else job.prompt
+    system_prompt = _reconstruct_system_prompt(assembled_prompt, cfg) if _is_daily_job(job) else ""
+    today = datetime.now(UTC).astimezone().date().isoformat()
     lines = [
         f"# Scheduled Job: {job.name}",
         f"- time: {datetime.now(UTC).astimezone().isoformat(timespec='seconds')}",
         f"- schedule: {job.schedule}",
         f"- error: {error or 'none'}",
+        f"- llm_call_log: logs/llm_calls/{today}.jsonl",
         "",
-        "## Prompt",
+    ]
+    if system_prompt:
+        lines += ["## System Prompt (reconstructed)", "", system_prompt, ""]
+    lines += [
+        "## User Prompt (assembled, incl. info pack)",
         "",
-        job.prompt,
+        assembled_prompt,
         "",
         "## Reply",
         "",
         reply or "(empty reply)",
+        "",
+        "## Reply (raw model output, pre-sanitize)",
+        "",
+        raw_reply or "(empty)",
         "",
     ]
     path.write_text("\n".join(lines), encoding="utf-8", newline="")
@@ -369,7 +568,8 @@ def _write_daily_note(cfg: Config, job: Job, reply: str, error: str | None) -> N
 
     today = datetime.now(UTC).astimezone().date().isoformat()
     status = f"FAILED ({error})" if error else "OK"
-    snippet = (reply or "")[:200].replace("\n", " ")
+    # 写入前同样清洗，杜绝 <summary>/DSML 残渣进 daily note（与调度回复清洗同源）
+    snippet = _sanitize_reply(reply or "")[:200].replace("\n", " ")
     bullet = f"- [scheduled:{job.name}] {status} — {snippet}"
     # Try to append; if the note exists, append via last-line replacement.
     # If it doesn't exist, create it with the bullet.
@@ -495,24 +695,100 @@ def _resolve_email_recipient(job: Job, env: Mapping[str, str]) -> str:
     return ""
 
 
+# ---- 邮件正文 Markdown→HTML（2026-09-05，修复邮件显示裸 Markdown 源码）----
+# 日报 reply 是结构化 Markdown（# 标题 / - bullet / **加粗**，prompt 已禁表格图片引用块）。
+# 旧实现 html.escape 后塞 <pre> 等宽标签——手机邮箱里 #、**、- 全是裸字符，无任何排版。
+# 这里做确定性子集转换：h1-h6 / 无序列表 / **加粗** / `行内码` / 段落；先转义再变换（XSS
+# 安全），未识别行降级为段落，绝不抛异常。样式全部内联（邮箱客户端普遍剥离 <style> 块）。
+_MD_HEADER_RE: Final = re.compile(r"^(#{1,6})\s+(.+)$")
+_MD_BULLET_RE: Final = re.compile(r"^[-*+]\s+(.+)$")
+_MD_BOLD_RE: Final = re.compile(r"\*\*(.+?)\*\*")
+_MD_CODE_RE: Final = re.compile(r"`([^`\n]+?)`")
+
+_EMAIL_CONTAINER_STYLE: Final = (
+    "max-width:680px;margin:0 auto;padding:20px 16px;"
+    "font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Microsoft YaHei',sans-serif;"
+    "color:#1a1a1a;line-height:1.75;font-size:15px;"
+)
+_EMAIL_HEADER_STYLES: Final = {
+    1: "font-size:19px;margin:24px 0 10px;padding-bottom:6px;border-bottom:2px solid #0aa2c0;color:#111;",
+    2: "font-size:17px;margin:20px 0 8px;padding-bottom:5px;border-bottom:1px solid #0aa2c0;color:#222;",
+    3: "font-size:15.5px;margin:16px 0 6px;color:#333;",
+}
+_EMAIL_HEADER_FALLBACK_STYLE: Final = "font-size:15px;margin:14px 0 6px;color:#333;"
+_EMAIL_UL_STYLE: Final = "margin:6px 0 12px;padding-left:22px;"
+_EMAIL_LI_STYLE: Final = "margin:5px 0;"
+_EMAIL_P_STYLE: Final = "margin:8px 0;"
+_EMAIL_CODE_STYLE: Final = (
+    "background:#f2f3f5;padding:1px 5px;border-radius:4px;"
+    "font-family:ui-monospace,Consolas,monospace;font-size:13px;"
+)
+
+
+def _md_inline(text: str) -> str:
+    """行内变换：先 html.escape 再套 **加粗** / `行内码`——转义在前保证 XSS 安全。"""
+    t = html.escape(text)
+    t = _MD_BOLD_RE.sub(r"<b>\1</b>", t)
+    t = _MD_CODE_RE.sub(rf"<code style='{_EMAIL_CODE_STYLE}'>\1</code>", t)
+    return t
+
+
+def _md_to_email_html(md: str) -> str:
+    """把约束子集 Markdown（标题/bullet/加粗/行内码/段落）转成内联样式 HTML 块序列。"""
+    blocks: list[str] = []
+    bullets: list[str] = []
+
+    def flush_bullets() -> None:
+        if bullets:
+            items = "".join(f"<li style='{_EMAIL_LI_STYLE}'>{b}</li>" for b in bullets)
+            blocks.append(f"<ul style='{_EMAIL_UL_STYLE}'>{items}</ul>")
+            bullets.clear()
+
+    for raw_line in (md or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            flush_bullets()
+            continue
+        m = _MD_HEADER_RE.match(line)
+        if m:
+            flush_bullets()
+            level = len(m.group(1))
+            style = _EMAIL_HEADER_STYLES.get(level, _EMAIL_HEADER_FALLBACK_STYLE)
+            blocks.append(f"<h{level} style='{style}'>{_md_inline(m.group(2))}</h{level}>")
+            continue
+        m = _MD_BULLET_RE.match(line)
+        if m:
+            bullets.append(_md_inline(m.group(1)))
+            continue
+        flush_bullets()
+        blocks.append(f"<p style='{_EMAIL_P_STYLE}'>{_md_inline(line)}</p>")
+    flush_bullets()
+    return "".join(blocks)
+
+
 def _email_body_html(reply: str, error: str | None) -> str:
-    """Render the job reply as a minimal HTML email (escaped, pre-wrapped, error banner on top)."""
+    """渲染日报邮件正文：Markdown 子集 → 内联样式 HTML（旧版是转义后 <pre> 裸文本）。"""
     status = f"<p style='color:#b00'><b>FAILED:</b> {html.escape(error)}</p>" if error else ""
-    content = html.escape(reply or "(empty reply)")
+    content = _md_to_email_html(reply) if (reply or "").strip() else "<p>(empty reply)</p>"
     return (
         "<!DOCTYPE html><html><body>"
-        f"{status}<pre style='font-family:ui-monospace,Consolas,monospace;white-space:pre-wrap;'>{content}</pre>"
+        f"<div style='{_EMAIL_CONTAINER_STYLE}'>{status}{content}</div>"
         "</body></html>"
     )
 
 
-def _deliver_email(job: Job, cfg: Config, reply: str, error: str | None, env: Mapping[str, str] | None = None) -> None:
+def _deliver_email(job: Job, cfg: Config, reply: str, error: str | None, env: Mapping[str, str] | None = None, for_day: str | None = None) -> None:
     """Deliver the job's reply via send_email; never raises, logs the outcome.
 
     Recipient resolution and SMTP configuration follow send_email's rules (SMTP_* env
     vars); the only difference is the recipient defaults to SMTP_USER (send to self)
     when neither job.email_to nor SMTP_TO is set. A missing SMTP_USER / SMTP_PASSWORD
     is silently skipped with a warning — email is a best-effort channel, never fatal.
+
+    For daily jobs, a trip-trajectory map (高德静态图, GCJ02) is rendered and inlined
+    as an image (cid:photo0) when trips exist for the day; the reply body also gains a
+    one-line 行程文字摘要 via trip_summary_text. A missing trajectory never blocks the
+    email — it is an optional visual layer (C2).
     """
     from gacore.tools.email_tools import send_email
 
@@ -525,13 +801,42 @@ def _deliver_email(job: Job, cfg: Config, reply: str, error: str | None, env: Ma
         )
         return
 
+    # 轨迹图与行程文字：仅每日报告，数据天 = for_day or 今天
+    traj_png: Path | None = None
+    if _is_daily_job(job) and error is None:
+        from gacore.langTrack import trajectory_map
+
+        day = for_day or datetime.now(UTC).astimezone().date().isoformat()
+        db = cfg.root / "data" / "langTrack.db"
+        try:
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+            try:
+                traj_png = trajectory_map.render_day_trajectory(
+                    conn, day, cfg.logs_dir / "trajectory" / f"{day}.png"
+                )
+                trip_text = trajectory_map.trip_summary_text(conn, day)
+            finally:
+                conn.close()
+            if trip_text and reply:
+                reply = reply.rstrip() + "\n\n## 当日行程\n" + trip_text
+        except Exception as e:  # noqa: BLE001 — trajectory is optional, never break email
+            logger.warning(
+                "trajectory_map skipped in email deliver",
+                job=job.name,
+                error_type=type(e).__name__,
+                stack_trace=str(e),
+            )
+
     today = datetime.now(UTC).astimezone().date().isoformat()
     prefix = "[gacore][FAILED]" if error else "[gacore]"
     subject = f"{prefix} {job.name} · {today}"
+    body = _email_body_html(reply, error)
+    image_paths = [str(traj_png)] if traj_png is not None else None
     result = send_email.func(
         to=recipient,
         subject=subject,
-        body=_email_body_html(reply, error),
+        body=body,
+        image_paths=image_paths,
         _env=resolved_env,
     )
     if isinstance(result, dict) and result.get("status") == "sent":
@@ -540,10 +845,10 @@ def _deliver_email(job: Job, cfg: Config, reply: str, error: str | None, env: Ma
         logger.warning("deliver_email failed", job=job.name, to=recipient, result=result)
 
 
-def _deliver(job: Job, cfg: Config, reply: str, error: str | None) -> None:
+def _deliver(job: Job, cfg: Config, reply: str, error: str | None, for_day: str | None = None) -> None:
     """Route the finished job's reply to its configured channel (deliver_to)."""
     if job.deliver_to == "email":
-        _deliver_email(job, cfg, reply, error)
+        _deliver_email(job, cfg, reply, error, for_day=for_day)
     elif job.deliver_to != "file":
         logger.warning(
             "deliver_to unsupported, falling back to file",
