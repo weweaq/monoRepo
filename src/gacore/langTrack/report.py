@@ -776,13 +776,27 @@ def _rhythm_weather(conn: sqlite3.Connection, day: str, device_id: str | None = 
 
     return result
 
-def _listen_music(conn: sqlite3.Connection, day: str, device_id: str | None = None) -> list:
+# 音乐连播段判定：相邻 music_play 事件间隔超过该值判为断开（粗档近似）。
+_SESSION_GAP_MS: int = 15 * 60000
+
+
+def _listen_music(conn: sqlite3.Connection, day: str, device_id: str | None = None) -> dict:
     """今日听歌记录：聚合当日 music_play 事件（网易云等，客户端通知监听拆出），
-    输出按歌累计次数 Top + 歌手 Top，作 C1 人物画像的一环。
-    返回 [(title, singer, count, last_state), ...]（按次数倒序）。
+    作 C1 人物画像的一环。粗档：事件驱动的"听歌时长/时段"近终估算（非精确秒数）。
+
+    返回 dict：
+      ranking    按歌出现次数倒序，每条含 title/singer/count/window_min（在位近似分钟）
+      singer_top 常听歌手 Top（按歌出现次数累计）
+      sessions   连播段：相邻事件间隔 ≤ 15 分钟合并，含起止时刻与歌数
+      hour_hist  当日听歌时段分布（东八区按小时）
+    当日无 music_play 时各块为空数组。
+
+    在位时长口径（粗档）：一首歌从"首事件 ts"起，到"下一首不同歌首事件 ts"为止，
+    即这首歌占据播放窗口的近似时长；当天最后一首为开区间，用其末事件 ts 估算。
     """
     day_start_ms = int(datetime.datetime.fromisoformat(f"{day} 00:00").timestamp()) * 1000
     day_end_ms = day_start_ms + 86400000
+    empty = {"ranking": [], "singer_top": [], "sessions": [], "hour_hist": []}
     dev_frag, dev_args = _dev_bind(device_id)
     rows = conn.execute(
         f"SELECT ts, payload FROM events WHERE type='music_play' AND ts>=? AND ts<?"
@@ -790,14 +804,11 @@ def _listen_music(conn: sqlite3.Connection, day: str, device_id: str | None = No
         [day_start_ms, day_end_ms, *dev_args],
     ).fetchall()
     if not rows:
-        return []
-    song_seen: dict[str, int] = defaultdict(int)
-    singer_ms: dict[str, int] = defaultdict(int)
-    title_of: dict[str, str] = {}
-    singer_of: dict[str, str] = {}
-    last_state: dict[str, str] = {}
-    last_ts: dict[str, int] = {}
-    max_ts = 0
+        return empty
+
+    # 时间线：同一首歌的连续事件合并为一段 (title, singer, start_ms, end_ms)。
+    # 切歌（标题变）会触发通知更新，故不同歌必产生新 run。
+    runs: list[list] = []
     for r in rows:
         try:
             pl = json.loads(r["payload"])
@@ -807,32 +818,97 @@ def _listen_music(conn: sqlite3.Connection, day: str, device_id: str | None = No
         singer = (pl.get("singer") or "").strip()
         if not title:
             continue
-        song_seen[title] += 1
-        # payload 无 ts 字段；歌手按"该歌手名下每首歌出现的次数"累计（同一事件计数一次）
+        ts = r["ts"]
+        if runs and runs[-1][0] == title and runs[-1][1] == singer:
+            runs[-1][3] = ts  # 同一首歌的进度刷新事件，仅扩展 run 末端
+        else:
+            runs.append([title, singer, ts, ts])
+    if not runs:
+        return empty
+
+    # 每首歌在位窗口：到下一首首事件为止；末段开放（用其末事件 end）。
+    song_count: dict[str, int] = defaultdict(int)
+    song_window: dict[str, int] = defaultdict(int)  # ms
+    singer_of: dict[str, str] = {title: singer for title, singer, _, _ in runs}
+    for i, (title, _singer, start, end) in enumerate(runs):
+        song_count[title] += 1
+        nxt_start = runs[i + 1][2] if i + 1 < len(runs) else end
+        song_window[title] += max(0, nxt_start - start)
+
+    ranking = sorted(song_count, key=lambda t: -song_count[t])[:10]
+    ranking_out = [
+        {
+            "title": t,
+            "singer": singer_of.get(t, ""),
+            "count": song_count[t],
+            "window_min": round(song_window[t] / 60000, 1),
+        }
+        for t in ranking
+    ]
+
+    # 常听歌手：按该歌手名下歌出现次数累计（同一首歌多个进度事件仍计一次）。
+    singer_ms: dict[str, int] = defaultdict(int)
+    for title, singer, _, _ in runs:
         if singer:
-            singer_ms[singer] = singer_ms.get(singer, 0) + 1
-        title_of[title] = title
-        singer_of[title] = singer
-        last_state[title] = pl.get("state") or ""
-        if r["ts"] > max_ts:
-            max_ts = r["ts"]
-            last_ts[title] = r["ts"]
-    ranking = sorted(
-        ((title, singer_of[title], count) for title, count in song_seen.items()),
-        key=lambda x: -x[2],
-    )
-    print("\n■ 今日常听（音乐）")
-    if ranking:
-        for t, s, c in ranking[:10]:
-            disp = f"《{t}》" + (f" - {s}" if s else "")
-            print(f"  · {disp} × {c}")
+            singer_ms[singer] += 1
     singer_top = sorted(
         ((s, cnt) for s, cnt in singer_ms.items() if s),
         key=lambda x: -x[1],
     )[:5]
+
+    # 连播段：相邻 run 间距超过阈值判为断开。
+    sessions: list[list] = []
+    cur: list[list] = []
+    prev_end: int | None = None
+    for run in runs:
+        if prev_end is not None and cur and run[2] - prev_end > _SESSION_GAP_MS:
+            sessions.append(cur)
+            cur = []
+        cur.append(run)
+        prev_end = run[3]
+    if cur:
+        sessions.append(cur)
+
+    def _hhmm(ms: int) -> str:
+        return datetime.datetime.fromtimestamp(ms / 1000, _TZ_CST).strftime("%H:%M")
+
+    sessions_out = [
+        {
+            "start": _hhmm(seg[0][2]),
+            "end": _hhmm(seg[-1][3]),
+            "song_count": len(seg),
+            "duration_min": round((seg[-1][3] - seg[0][2]) / 60000, 1),
+        }
+        for seg in sessions
+    ]
+
+    # 时段分布（东八区按小时）。
+    hour_cnt: dict[str, int] = defaultdict(int)
+    for _title, _singer, start, _end in runs:
+        hour_cnt[datetime.datetime.fromtimestamp(start / 1000, _TZ_CST).strftime("%H:00")] += 1
+    hour_hist = sorted(((h, n) for h, n in hour_cnt.items()))
+
+    # 控制台输出：沿用既有块，追加时长/时段/连播。
+    print("\n■ 今日常听（音乐）")
+    for e in ranking_out:
+        disp = f"《{e['title']}》" + (f" - {e['singer']}" if e["singer"] else "")
+        print(f"  · {disp} × {e['count']}（约 {e['window_min']} 分钟）")
     if singer_top:
         print("  常听歌手: " + " / ".join(f"{s}({c})" for s, c in singer_top))
-    return ranking
+    if sessions_out:
+        seg_desc = "、".join(
+            f"{s['start']}-{s['end']}({s['song_count']}首)" for s in sessions_out
+        )
+        print("  连播段: " + seg_desc)
+    if hour_hist:
+        print("  时段: " + " / ".join(f"{h}({n})" for h, n in hour_hist))
+
+    return {
+        "ranking": ranking_out,
+        "singer_top": singer_top,
+        "sessions": sessions_out,
+        "hour_hist": hour_hist,
+    }
 
 
 def _write_snapshot(
@@ -1302,7 +1378,7 @@ def report(
 
         "outings": outings,
 
-        "music": [{"title": t, "singer": s, "count": c} for t, s, c in music_ranking],
+        "music": music_ranking.get("ranking", []),
 
         "anomalies": anomaly_list,
 

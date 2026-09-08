@@ -308,3 +308,97 @@ class TestMainCli:
         out = capsys.readouterr().out
         assert "设备 dev2" in out
         assert "2小时0分" in out
+
+
+# ---------------------------------------------------------------------------
+# _listen_music 粗档：每首在位时长 / 连播段 / 时段分布
+# ---------------------------------------------------------------------------
+
+def _ts_full(hh: int, mm: int, ss: int) -> int:
+    d = datetime.datetime(2026, 8, 17, hh, mm, ss, tzinfo=_TZ)
+    return int(d.timestamp() * 1000)
+
+
+class TestListenMusic:
+    """_listen_music 返回结构化 dict：次数 Top + 在位近似时长 + 连播段 + 时段分布。
+
+    口径：同一首歌连续进度事件并入一个 run；一首歌的在位窗口 = 该 run 首事件
+    到"下一首不同歌首事件"；当天末首为开区间（用末事件）。gap>15 分钟断连播段。
+    """
+
+    def _insert(self, path, events):
+        """events: [(ts, title, singer), ...] 写入 dev1 的 music_play 事件。"""
+        conn = sqlite3.connect(path)
+        conn.executescript(storage._SCHEMA)
+        for ts, title, singer in events:
+            conn.execute(
+                "INSERT INTO events(device_id, ts, type, payload, received_at) "
+                "VALUES (?,?,?,?,?)",
+                ("dev1", ts, "music_play",
+                 json.dumps({"title": title, "singer": singer, "state": "playing"}),
+                 ts),
+            )
+        conn.commit()
+        conn.close()
+
+    def test_timing_dict(self, isolated_db_path):
+        events = [
+            (_ts_full(12, 0, 0), "A", "X"),
+            (_ts_full(12, 3, 0), "A", "X"),   # 同曲进度刷新 → 并入同一 run
+            (_ts_full(12, 6, 0), "B", "Y"),   # 切歌
+            (_ts_full(12, 20, 0), "C", "X"),  # 距 B 末事件 14 分钟 → 同一连播段
+            (_ts_full(13, 0, 0), "D", "Y"),   # 距 C 40 分钟 → 新连播段
+        ]
+        self._insert(isolated_db_path, events)
+        conn = sqlite3.connect(isolated_db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            rep = rpt._listen_music(conn, DAY, device_id="dev1")
+        finally:
+            conn.close()
+
+        # ranking：次数均 1，稳定序 = 出现顺序；window_min 按"到下一首首事件"算
+        assert [e["title"] for e in rep["ranking"]] == ["A", "B", "C", "D"]
+        by = {e["title"]: e for e in rep["ranking"]}
+        assert by["A"]["count"] == 1
+        assert by["A"]["window_min"] == 6.0   # 12:00→12:06
+        assert by["B"]["window_min"] == 14.0  # 12:06→12:20
+        assert by["C"]["window_min"] == 40.0  # 12:20→13:00
+        assert by["D"]["window_min"] == 0.0   # 末首开区间
+
+        assert [s["song_count"] for s in rep["sessions"]] == [3, 1]
+        assert rep["sessions"][0]["start"] == "12:00"
+        assert rep["sessions"][0]["end"] == "12:20"
+        assert rep["sessions"][0]["duration_min"] == 20.0
+
+        assert rep["hour_hist"] == [("12:00", 3), ("13:00", 1)]
+        assert rep["singer_top"] == [("X", 2), ("Y", 2)]
+
+    def test_empty_day_returns_empty_blocks(self, isolated_db_path):
+        self._insert(isolated_db_path, [])
+        conn = sqlite3.connect(isolated_db_path)
+        try:
+            rep = rpt._listen_music(conn, DAY, device_id="dev1")
+        finally:
+            conn.close()
+        assert rep == {"ranking": [], "singer_top": [], "sessions": [], "hour_hist": []}
+
+    def test_same_song_progress_not_overcounted(self, isolated_db_path):
+        """同一首歌多个进度事件只计一次次数，但在位窗口并入末事件。"""
+        events = [
+            (_ts_full(21, 10, 0), "Loop", "S"),
+            (_ts_full(21, 12, 0), "Loop", "S"),
+            (_ts_full(21, 40, 0), "Next", "T"),
+        ]
+        self._insert(isolated_db_path, events)
+        conn = sqlite3.connect(isolated_db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            rep = rpt._listen_music(conn, DAY, device_id="dev1")
+        finally:
+            conn.close()
+        by = {e["title"]: e for e in rep["ranking"]}
+        assert by["Loop"]["count"] == 1
+        assert by["Loop"]["window_min"] == 30.0  # 21:10→21:40
+        # 21:12→21:40 间隔 28 分钟 > 15 → 断成两段连播
+        assert [s["song_count"] for s in rep["sessions"]] == [1, 1]

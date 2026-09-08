@@ -2774,4 +2774,58 @@ un_job(for_day=...)。
 - [x] **同曲去重（v1.0.11）**：媒体 progress/状态刷新导致 onNotificationPosted 对同一条通知重复回调 → 同秒重复计数（日报 `《丝路》×6`）；加 5s 同曲(pkg+title)去重，实机验证 23:46:41 三首歌各只记一次。
 - [x] 服务端清洗今日脏数据（v1.0.10 时代写入的同秒重复 music_play 22 条）+ 修 report.py 歌手计数 bug（误用不存在的 payload `ts` → 恒为 0，改为按歌出现次数累计）。
 - [ ] 待定：若要更准的播放时长（不只看出现次数），可加 duration 预估（基于通知状态切换间隔），列入 C1 增强。
+- [x] **听歌时长/时段粗档落地（2026-09-08）**：`_listen_music` 增加每首在位时长 + 连播段 + 时段分布，见下节。
 - [ ] 提交前 codegraph sync + 同步 langTrack-tech.md（听歌采集契约）。
+
+## 2026-09-08：听歌时长/时段粗档（服务端，纯读零客户端改动）
+
+### 背景
+用户连续性追问：能否拿到"什么时间听歌、听多久"。结论——事件驱动采集**不是每秒轮询**：网易云这类随播放更新媒体通知的 App，切歌/播放↔暂停都会触发一次 `onNotificationPosted`，一条 `music_play` 事件都不漏；真正的盲区只有"自然放完一首长歌无状态变化"的精确播放秒数，需客户端后续带 `durationMs`/`positionMs` 才到秒级。
+
+### 已完成（本仓库服务端）
+1. **`report._listen_music` 重写为结构化 dict**（`文件:report.py _listen_music`）：
+   - `ranking`：歌×次数 Top10，每条新增 `window_min` = 该曲"在位近似分钟"（从首事件到下一首不同歌首事件；当天末首为开区间用末事件）。
+   - `singer_top`：常听歌手 Top5（沿用按歌出现次数累计口径，并修掉此前误用 payload.ts 的计数 bug 后的正确逻辑）。
+   - `sessions`：连播段（相邻事件间隔 ≤ `_SESSION_GAP_MS=15min` 合并），含起止 `HH:MM`、歌数、段时长。
+   - `hour_hist`：当日听歌时段分布（东八区按小时）。
+2. 同一首歌连续进度事件**并入一个 run，不重复计数**（次数与在位窗口都不虚增）。
+3. L5 画像快照 `profile["music"]` 改读 `ranking`（每条带 title/singer/count/window_min，向后兼容只读 title/singer/count 的下游）。
+4. 测试：`tests/test_langTrack_report_device.py::TestListenMusic` 新增 3 例（时长计算/空天/同曲进度不虚增），report 文件 **19 passed**；全量 langTrack **442 passed**；ruff 新代码零告警。
+5. 真实库验证 2026-09-07：两段连播 23:23(2首)、23:39-23:57(12首)，《孔雀王》×2→18.6 分钟等符合预期。
+
+### 设计要点
+- 粗档口径明确为"在位窗口"而非精确播放秒数：事件是通知驱动的快照，暂停挂着不动也算满——满足画像的"何时在听/连播多久"，不冒充精确时长。
+- 时区用 `_TZ_CST`（东八区），与全库恶心用 naive local（机器即 +8）结果一致，避免新增 DTZ006 告警。
+- 细档只做一半：客户端 `music_play` 加 `durationMs`（媒体通知常量读法，免费），**`positionMs` 低频采样不做**（那才是唯一有"低频轮询"代价、且要精确完整度才值得的部分，留作后续 C1 增强）。
+
+### 待办更新
+- [x] 听歌时长/时段粗档（服务端 `_listen_music` 增列 + L5 快照 + 测试）落地并真实库验证。
+- [x] 客户端 `music_play` 带 `durationMs`（歌曲总时长，媒体通知常量读法，**不做 positionMs 低频采样**）。
+- [x] 构建打包 v1.0.12（build.ps1 自动递增 buildNumber，已同步 server config，下一版 1.0.13）并邮件发送。
+- [x] 修复邮件二进制附件编码 bug（见下）。
+- [ ] 安装 v1.0.12 重登后核对新 music_play 事件 `durationMs` 落库。
+- [ ] 提交前 codegraph sync + 同步 langTrack-tech.md（听歌时长/时段口径）。
+
+## 2026-09-08：邮件附件二进制编码修复（发 v1.0.12 时发现）
+
+`src/gacore/tools/email_tools.py`：`_build_message` 里附件 `MIMEApplication(..., _encoder=lambda x: x)` 用恒等"编码器"，把二进制附件（.apk）的原始字节什么都不改地平铺进邮件，导致 SMTP `as_string().encode('ascii')` 在二进制字节处抛 `UnicodeEncodeError`。修法：去掉恒等 `_encoder`，走默认 **base64** 编码（application 部件自带 `Content-Transfer-Encoding: base64`），ascii-safe。`test_tools_email.py` 18 passed 无回归；顺带把 v1.0.12 APK 以邮件附件发出（attachment_count=1）。
+
+## 2026-09-08：durationMs 恒 0 根因定位 + v1.0.13 修复
+
+**根因**：媒体通知（网易云等）extras 里的元数据（`MediaSessionLegacyHelper.getOldMetadata`）**只放 title/artist/album，刻意不含 DURATION 键**。v1.0.12 用 `extras.getLong(METADATA_KEY_DURATION)` 必然取默认 0——不是歌没有时长，是取错了地方（真实 9/7 截图 18 条全 0、title/singer 正常佐证）。
+
+**修复（weiCheckApp 客户端 v1.0.13，`WeiNotificationListener.mediaDurationMs`）**：fallback 链
+1. 先读 extras `METADATA_KEY_DURATION`；
+2. 为 0 → 从 `Notification.EXTRA_MEDIA_SESSION` 拿 `MediaSession.Token`，`MediaController(context, token).metadata.getLong(DURATION)`（无需 MEDIA_CONTENT_CONTROL 权限）；
+3. 仍 0 → `MediaSessionManager.getActiveSessions()` 按包名兜底；
+4. 全程 try-catch，session 异常安静返回 0 不崩采集线程。
+读常量、非采样，与"不做 positionMs 低频采样"决策一致。
+
+**踩坑（构建时）**：compileSdk 37 已移除 `Notification.getMediaSession()`（先是 `n.mediaSession` 属性、再显式 `getMediaSession()` 均 Unresolved）；改用 `extras.getParcelable(EXTRA_MEDIA_SESSION, MediaSession.Token::class)`（API≥33 走 typed，旧版 `as? MediaSession.Token`）。`MediaSessionManager` 用 `getActiveSessions(null)` 方法而非 `activeSessions` 属性。
+
+**验证**：build.ps1 出 v1.0.13（已同步 server config `/api/client/version`=1.0.13，下一版 1.0.14），邮件附件发出。待用户装 1.0.13 重登后核对新 music_play 事件 `durationMs` 非 0。
+
+### 待办更新
+- [x] 定位 durationMs 恒 0 根因（通知 extras 无 DURATION 键）+ v1.0.13 用 MediaSession 兜底读真实时长。
+- [ ] 安装 v1.0.13 重登后核对新 music_play 事件 `durationMs` 非 0。
+- [ ] 提交前 codegraph sync + 两个仓库 commit（WithLangGraph：_listen_music 粗档/email_tools base64；weiCheckApp：durationMs 1.0.12+1.0.13）。

@@ -203,7 +203,9 @@ def _build_message(
         main, sub = _attachment_maintype_subtype(path)
         try:
             with open(path, "rb") as fh:
-                part = MIMEApplication(fh.read(), _subtype=sub, _encoder=lambda x: x)
+                # 默认 base64 编码：filename 外的任意二进制附件（含 .apk）才可安全进入
+                # 仅 ascii 的 SMTP 信封；用恒等 _encoder 会把原始字节平铺导致 ascii 崩溃。
+                part = MIMEApplication(fh.read(), _subtype=sub)
             part.set_type(f"{main}/{sub}")
             part.add_header(
                 "Content-Disposition", "attachment", filename=os.path.basename(path)
