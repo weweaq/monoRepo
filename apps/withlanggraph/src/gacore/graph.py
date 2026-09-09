@@ -15,8 +15,11 @@ text are routed to the core agent (process node) for VLM analysis.
 from __future__ import annotations
 
 import re
+import time
 import uuid
-from typing import Final
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Final, Iterator
 
 from langchain.agents import create_agent
 from langchain.agents.middleware import ModelRetryMiddleware
@@ -29,7 +32,10 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import interrupt
 
 from gacore.config import Config
+from gacore.jsonl_logger import get_logger
 from gacore.llm import get_llm
+from gacore.memory_audit import record_audit
+from gacore.memory_maintenance import CombinedTrigger, KeywordTrigger, VectorTrigger, build_llm_judge, maintain_once
 from gacore.middleware import GAPromptMiddleware, GATurnLogicMiddleware, format_agent_error
 from gacore.state import GAState, new_state
 from gacore.tools import build_tool_list
@@ -37,6 +43,11 @@ from gacore.tools import build_tool_list
 DEFAULT_RECURSION_LIMIT: Final = 200
 
 _IMAGE_MARKER_RE: Final = re.compile(r"\[IMAGE:(.+?)\]")
+_node_logger = get_logger("memory_maintain")
+# Per-invocation injection seam for the memory-maintenance node's Config: null uses
+# Config.default(), tests (and the checkpoint recovery path) set a tmp_path cfg so the
+# node never touches real memory without an explicit caller.
+_memory_cfg: ContextVar[Config | None] = ContextVar("gacore_memory_cfg", default=None)
 
 
 def suggested_recursion_limit(max_turns: int | None) -> int:
@@ -165,6 +176,81 @@ def cleanup_images(state: GAState) -> dict:
     return {"messages": cleaned, "pending_images": [], "rollover_context": None, "output_mode": None}
 
 
+def _last_user_text(messages) -> str:
+    """Return the text of the most recent HumanMessage, or '' if none/empty."""
+    if not messages:
+        return ""
+    for raw in reversed(messages):
+        if isinstance(raw, HumanMessage) and isinstance(raw.content, str):
+            text = raw.content.strip()
+            if text:
+                return _text_without_markers(text)
+    return ""
+
+
+def memory_maintain(state: GAState) -> dict:
+    """Event-driven long-term memory maintenance (阶段二): trigger → judge → apply → sync.
+
+    Runs after the core agent answers a turn. The combined trigger (keyword gate OR
+    semantic recall) decides whether the latest user text warrants a long-term-memory
+    judgment; the LLM judge classes it MERGE / NEW / NOOP; a write is persisted and —
+    when the portrait actually changed — resynced into the pgvector store so later
+    messages can recall it semantically.
+
+    Best-effort by design — a maintenance failure (including a missing/offline vector
+    backend) must never fail or delay the user's turn: the whole node degrades to a
+    no-op and the daily-sediment path remains the source of truth.
+    """
+    last = _last_user_text(state.get("messages") or [])
+    cfg = _memory_cfg.get() or Config.default()
+    _start = time.monotonic()
+    try:
+        trigger = CombinedTrigger(
+            keyword=KeywordTrigger.from_config(cfg),
+            vector=VectorTrigger(),
+        )
+        if not trigger.probe(last).triggered:
+            return {}
+        try:
+            judge = build_llm_judge(cfg)
+            res = maintain_once(cfg, last, judge, trigger=trigger)
+        except Exception as exc:  # noqa: BLE001 — never let maintenance break a turn
+            _node_logger.error("memory_maintain failed", error_type=type(exc).__name__, error=str(exc))
+            res = {"action": "ERROR", "triggered": True, "updated": False, "error": str(exc)}
+        if res.get("updated"):
+            _sync_portrait_best_effort(cfg, res)
+        record_audit(cfg, res, trigger=trigger, ms=int((time.monotonic() - _start) * 1000))
+    except Exception as exc:  # noqa: BLE001 — trigger/audit must never break a turn either
+        _node_logger.error("memory_maintain gate failed", error_type=type(exc).__name__, error=str(exc))
+    return {}
+
+
+def _sync_portrait_best_effort(cfg: Config, res: dict) -> None:
+    """Push the (changed) portrait into pgvector; any failure is swallowed, never raised."""
+    try:
+        from gacore import vector_store
+        vector_store.ensure_schema()
+        vector_store.sync_portrait(cfg)
+        _node_logger.info("portrait synced to vector store", action=res.get("action"))
+    except Exception as exc:  # noqa: BLE001 — vector sync must never break the turn
+        _node_logger.warning("portrait vector sync failed (skipping)",
+                             error_type=type(exc).__name__, error=str(exc))
+
+
+@contextmanager
+def memory_cfg_context(cfg: Config) -> Iterator[None]:
+    """Scope the memory-maintenance node's Config to ``cfg`` (injection seam).
+
+    Tests use this with ``Config.for_tests(tmp_path)`` so the node writes to tmp state
+    instead of real memory; production callers may set it to pin a non-default root.
+    """
+    token = _memory_cfg.set(cfg)
+    try:
+        yield
+    finally:
+        _memory_cfg.reset(token)
+
+
 # --------------------------------------------------------------------------- graph assembly
 
 
@@ -208,7 +294,7 @@ def build_graph(
                                   └─ (images, no text →) ─→ wait_for_text
                                                                │
                                           Command(update) ────┘  (more images)
-                                          Command(resume) ─────→ process → cleanup_images → END
+                                          Command(resume) ─────→ process → memory_maintain → cleanup_images → END
 
     The ``process`` node wraps the core create_agent subgraph with the same middleware
     chain (GAPromptMiddleware → GATurnLogicMiddleware → ModelRetryMiddleware).
@@ -229,6 +315,7 @@ def build_graph(
     workflow.add_node("classify_message", classify_message)
     workflow.add_node("wait_for_text", wait_for_text)
     workflow.add_node("process", core_agent)
+    workflow.add_node("memory_maintain", memory_maintain)
     workflow.add_node("cleanup_images", cleanup_images)
 
     workflow.add_edge(START, "classify_message")
@@ -242,7 +329,8 @@ def build_graph(
         route_after_wait,
         {"process": "process"},
     )
-    workflow.add_edge("process", "cleanup_images")
+    workflow.add_edge("process", "memory_maintain")
+    workflow.add_edge("memory_maintain", "cleanup_images")
     workflow.add_edge("cleanup_images", END)
 
     return workflow.compile(checkpointer=resolved_checkpointer)

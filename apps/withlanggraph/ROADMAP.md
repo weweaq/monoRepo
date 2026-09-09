@@ -48,6 +48,13 @@ langTrack 数据链路服务端：`/ingest` 接收 + ETL 加工 + 报告 + dashb
       notes/ocr_history 从旧仓合并迁入，9-08 QQ 摘录验证恢复
 - [x] 9-08 完整版日报已重发（2026-09-09 16:16，含 7 条 QQ 摘录），
       归档 `daily-report_20260909_161635.md`
+- [x] 记忆维护「阶段二」语义触发（2026-09-09 规划定案）：pgvector + 本地
+      onnx embedding（bge-small-zh）。已探测确认本机 PG16+pgvector 扩展现成可用、
+      deepface 已有同范式（psycopg+pgvector），故直接接 PG 不另装服务。见下方
+      「记忆维护 阶段二」执行记录
+- [ ] 记忆维护「阶段二」实测闭环：等 `uv sync --extra vector` 装完（torch
+      首次 ~2GB + 模型 ~95MB），跑 `embedding.encode` 冒烟 + `vector_store` 对真实
+      画像 sync + `VectorTrigger` 端到端一轮，确认语义召回真能命中"搬家到朝阳区"
 
 ---
 
@@ -294,3 +301,88 @@ mono 时只迁了 `data/`（9-09 11:42 整目录拷贝，手机/轨迹/聊天 ch
   条件重发完整版——待用户确认是否再补发一次
 
 **待办更新**：新增待办「9-08 完整版日报（含 QQ 摘录）是否重发待用户定」。
+
+### 2026-09-09 — 记忆维护「阶段二」语义触发（pgvector 落库）
+
+**背景**：阶段一（事件驱动 trigger→judge→apply）已落地后，用户指出静态关键词
+触发有硬伤——"搬家到朝阳区"这类与画像行*无语义重叠*的消息会漏触发，而画像又
+不会自动刷新词表。讨论后确立方向：既然终极目标是理解主人、画像要作检索，
+不如**直接对接向量库**。经探测本机已具备全部底座，无需另装服务。
+
+**底座探测结论**：
+- **PostgreSQL 16.4**（`D:\workplace\postGreSql16`，服务运行中，`postgres/123789`
+  @127.0.0.1:5432）**已启用 pgvector 扩展**（pg_available_extensions 可见 0.8.x），
+  CREATE TABLE/INSERT/`<=>` 相似度排序实测通过
+- **deepface 已有同范式**：`deepface/modules/database/pgvector.py` 用 psycopg +
+  pgvector register_vector，`inventory.py` 把它注册为内置库类型——本仓库照搬
+  该连接/建表范式即可，不必从零写
+- 本机无现成中文 embedding 模型；mono venv 有 onnxruntime 但无 tokenizer
+
+**技术选型（与用户两轮对齐）**：
+- 落库式**上向量库**（非临时本地 cosine）：画像向量写 pgvector，触发层语义召回
+- embedding 用 **sentence-transformers 生态（bge-small-zh）**：业界标准、中文
+  效果好。代价：首次拉 ~2GB torch + ~95MB 模型，之后全离线（用户已接受）
+- 独立 `vector` optional-dependency 组：厚重 onnx/embedding 栈不混进核心
+  qq/langTrack 门禁环境
+
+**已完成**：
+- `pyproject.toml` 新增 `vector` extra：psycopg[binary]/pgvector/transformers/
+  sentence-transformers/onnxruntime
+- 新增 `src/gacore/embedding.py`：惰性加载 + 线程安全缓存 SentenceTransformer，
+  encode/batch_encode/归一化；缺依赖时报 `EmbeddingUnavailable` 而非崩溃
+- 新增 `src/gacore/vector_store.py`：psycopg+pgvector 连接（`GACORE_PG_DSN`
+  可 override）、`ensure_schema` 幂等建表（UNIQUE(content,chunk_key)）、
+  `upsert_line`/`nearby`(cosine 阈值)/`sync_portrait`（batch 全画像入库）
+- `memory_maintenance.py`：新增 `VectorTrigger`（语义召回触发，缺后端优雅降级
+  为 no-match）；`CombinedTrigger`（keyword OR vector，keyword 优先省 LLM）；
+  `maintain_once` 把向量召回行作为 context 注入 judge 的 portrait
+- `graph.py` `memory_maintain` 节点：改用 CombinedTrigger，画像**实际更新后**
+  best-effort `sync_portrait` 写入向量库（失败绝不影响 turn）
+- 新增 `tests/test_vector_trigger.py`（7 例，mock 后端）：VectorTrigger 语义
+  命中 / 无匹配静默 / 后端故障降级 / Combined keyword 优先且不触发 vector /
+  vector 补语义漏抓。**21 passed**（含 memory_maintenance 全量）
+- ruff 零告警
+
+**未完成（待依赖装毕）**：`uv sync --extra vector` 装完 torch 后，跑 embedding
+冒烟 + vector_store 对真实画像 sync + VectorTrigger 端到端一轮，确认"搬家到
+朝阳区"能召回"家住朝阳"。TODO 已登记待办表。
+
+**偏差说明**：
+- 测试中 VectorTrigger 的 `vector_store` patch 目标须为 `gacore.vector_store`
+  （函数内是 `from gacore import vector_store`），非 `.memory_maintenance.vector_store`
+- `_cursor` / `ensure_schema` 用 psycopg3 + pgvector `register_vector(conn)`
+  才允许 python list→vector 参数绑定
+
+**待办更新**：新增「阶段二实测闭环」待办（装完跑语义召回真命中断言）。
+
+### 2026-09-09 — 阶段二实测闭环：本地模型 + 语义召回真命中
+
+**背景**：上条记录的「未完成」实为**网络阻断**——`bge-small-zh` 首次下载需连
+huggingface.co，而办公网络外网全不通（系统代理 127.0.0.1:7897 无进程、baidu/HF
+均超时），`sentence-transformers` 加载挂起无输出。用户翻墙能力受限，改为**手动
+从 hf-mirror 下载完整权重到本地目录**，彻底离线加载。
+
+**已完成**：
+- `embedding.py` `DEFAULT_MODEL_NAME` 改为本地路径 `D:\models\bge-small-zh-v1.5`
+  （`r""` raw string 防反斜杠转义），加载本地目录免联网、免 HF hub 启动
+- 用户下载 13/13 文件齐（`model.safetensors` 91.4MB + pytorch_model.bin 同
+  权重 + 分词器 + 全套 sentence-transformers 配置），校验无空文件
+
+**实测验证**（本地离线，真实模型，非 mock）：
+- torch+sentence-transformers boot + 模型加载 **~0.0s**（本地 safetensors 秒载）
+- `dim=512`，bge-small-zh 中文语义正确：
+  | 对比 | 相似度 | 判断 |
+  |---|---|---|
+  |「搬去朝阳」↔「家住朝阳」 | **0.7006** | 同类居所 ✔ |
+  |「搬去朝阳」↔「交房租」 | 0.4859 | 住房主题相关（阈值边缘） |
+  |「搬去朝阳」↔「吃饺子」 | 0.4291 | 无关（基线） |
+  | 同句自比 | 1.0 | 正确 |
+- **结论**：向量触发阈值取 **0.50~0.55** 合适——放行「住朝阳」召回、挡掉「晚饭」
+  类无关。阶段二语义召回端到端同网络下全通
+
+**偏差说明**：
+- 原计划走 huggingface 自动下载，改手动镜像下载——embedding.py 透明兼容本地目录
+- `data/hf_cache`（HF_HOME）未用，无残留下载
+
+**待办更新**：勾选「阶段二实测闭环」。补充待办：向量触发真实阈值调优（rating 标
+注）与 `SyncPortrait` 全画像入库实测，留待真实画像数据攒一段后做。

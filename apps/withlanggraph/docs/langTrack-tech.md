@@ -1176,3 +1176,54 @@ python -m gacore.rerun --day 2026-09-08 --job weekly-summary
 - CLI 冒烟：非法日期 / 不存在 job 名 → exit 2。
 - 真实补跑 9-07 `--no-email`：`delivery skipped (deliver=False)`、归档落盘、CURRENT_TASK_DONE（162s）。
 - 单测：`TestDeliverEmail` +2（补跑主题带 for_day+`（补跑）` / 同日无标记）、`TestDeliverRouting` +1（deliver=False 跳过一切投递但 output 落盘）；`test_scheduler.py` 全量 70 passed，ruff 零告警。
+
+## 9.25 记忆向量检索（阶段二：pgvector 语义触发，2026-09-09）
+
+### 背景与定位
+阶段一（`memory_maintenance.py`：事件驱动 trigger→judge→apply）解决"何时主动沉淀"。但其**静态关键词触发**有硬伤：`搬家到朝阳区`这类与画像行**无语义重叠**的消息会漏触发，且画像更新不会自动刷新词表。阶段二把触发层从"字面关键词"升级为**语义向量召回**——终极目标是让助手真正理解主人，画像要作检索而非仅存文本。
+
+### 存储底座（探测结论，本机现成）
+- **PostgreSQL 16.4** + `pgvector` 扩展（`postgres/123789 @127.0.0.1:5432`），`<=>` 余弦距离排序实测可用。
+- 可复用范式：`deepface/modules/database/pgvector.py`（psycopg + pgvector `register_vector`），本仓库 `vector_store.py` 照搬该连接/建表思路。
+- embedding 用 **sentence-transformers 生态（bge-small-zh）**：本地离线，首次联网拉 ~2GB torch + ~95MB 模型，之后全离线。
+
+### 代码结构（`src/gacore/`，均在 `vector` extra 下可选安装）
+- `embedding.py`（新）：
+  - 惰性 + 线程安全缓存 `SentenceTransformer`；`encode(text)` / `batch_encode(texts)` 均 L2 归一化。
+  - 缺依赖（sentence-transformers 未装）→ 抛 `EmbeddingUnavailable`，调用方降级而非崩溃。
+  - `dimension()` 兜底返回 bge-small 维度 512。
+- `vector_store.py`（新）：
+  - 连接：psycopg3 + `register_vector(conn)`（启用 python list↔vector 绑定）；DSN 默认本地，`GACORE_PG_DSN` env 可覆盖。
+  - `ensure_schema()`：幂等建表 `gacore_memory_vectors(id, content, chunk_key, embedding vector(512), updated_at, UNIQUE(content, chunk_key))` + `CREATE EXTENSION IF NOT EXISTS vector`。
+  - `upsert_line(content, chunk_key, embedding)`：`ON CONFLICT DO NOTHING`（去重，不覆盖历史）。
+  - `nearby(query, k=3, threshold=0.45)`：`embedding <=> %s` cosine 距离升序，返回 `< threshold` 的 `{content, chunk_key, dist}`。
+  - `sync_portrait(cfg)`：batch embed 全画像行，逐条 upsert（MERGE/NEW 后调用，近实时同步画像）。
+- `memory_maintenance.py`（改）：
+  - `VectorTrigger`（新）：向量召回触发。`probe(text)` → `nearby` 命中即 `vector_hit`，`context` 携带召回画像行。后端异常优雅降级为 `vector_unavailable`（triggered=False，绝不抛）。
+  - `CombinedTrigger`（新）：`keyword OR vector`，**keyword 优先**（命中即省掉 vector、省 LLM）。
+  - `maintain_once`：trigger 的 `context`（召回行）注入 judge 的 portrait 前，让 MERGE 判定对着最相关事实做。
+- `graph.py` `memory_maintain` 节点（改）：改用 `CombinedTrigger`；画像**实际 updated 后** best-effort `_sync_portrait_best_effort`（任何失败吞掉，绝不影响 turn）。
+
+### 数据流（修复当日触发 + 沉淀后写库）
+```mermaid
+flowchart LR
+    U[用户消息] --> P0{CombinedTrigger}
+    P0 -->|keyword 命中| J[LLM judge: MERGE/NEW/NOOP]
+    P0 -->|keyword 未中, vector 召回命中| J
+    P0 -->|两者皆未中| SKIP[return {} 零开销]
+    J -->|MERGE/NEW| WR[写 global_mem*.txt]
+    WR --> SYNC[best-effort sync_portrait → pgvector]
+```
+- **触发时**：向量召回行（语义相近的画像事实）作为 context 喂给 LLM judge，不写库。
+- **落库**：画像更新（MERGE/NEW 落盘）后，batch 把全画像重新嵌入入库，供后续消息语义召回。
+
+### 单测（`tests/test_vector_trigger.py`，不依赖真实模型/PG，mock 后端）
+- VectorTrigger：空文本不触发；语义命中带 context；无匹配静默；后端故障降级 `vector_unavailable`。
+- CombinedTrigger：keyword 优先且不触发 vector（省 LLM）；vector 补语义漏抓。
+- patch 目标注意：函数内 `from gacore import vector_store`，须 patch `gacore.vector_store`（非 `.memory_maintenance.vector_store`）。21 passed（含 memory_maintenance 全量），ruff 零告警。
+
+### 依赖声明
+`pyproject.toml` 新增 `vector` extra：`psycopg[binary]>=3.1` / `pgvector>=0.3` / `transformers>=4.42` / `sentence-transformers>=2.7` / `onnxruntime>=1.18`。独立组，避免厚重 onnx/embedding 栈混进核心 qq/langTrack 门禁环境。
+
+### 待实测（依赖装毕后）
+`uv sync --extra vector` 装完 torch 后：embedding 冒烟 + `sync_portrait` 对真实画像入库 + `VectorTrigger` 端到端一轮，断言"搬家到朝阳区"能召回"家住朝阳"。状态见 ROADMAP 待办。

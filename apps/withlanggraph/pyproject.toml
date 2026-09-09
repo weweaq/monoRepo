@@ -33,6 +33,16 @@ dev = [
 qq = [
     "qq-botpy",
 ]
+# 记忆向量检索（阶段二：pgvector 语义触发）。独立 optional 组，避免厚重的
+# onnx/embedding 栈混进核心 qq/langTrack 门禁环境；需要向量触发时才显式
+# `uv sync --extra vector` 安装。
+vector = [
+    "psycopg[binary]>=3.1",
+    "pgvector>=0.3",
+    "transformers>=4.42",
+    "sentence-transformers>=2.7",
+    "onnxruntime>=1.18",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
