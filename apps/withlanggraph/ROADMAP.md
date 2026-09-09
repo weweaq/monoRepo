@@ -35,7 +35,9 @@ langTrack 数据链路服务端：`/ingest` 接收 + ETL 加工 + 报告 + dashb
 - [x] qq-botpy extra 未装入门禁环境（已修，2026-09-09）：`tools/scripts/check.ps1`
       的 `uv sync` 已补 `--extra qq`。否则门禁 sync 会卸载 qq-botpy 并损坏
       aiohttp（dist-info 缺 RECORD），导致 gacore QQ 前端启动失败
-- [ ] 带 `--extra qq` 后 test_qq 全量回归：既知 skip 之外是否有新增暴露，装后验证
+- [x] 带 `--extra qq` 后 test_qq 全量回归（2026-09-09）：**21 passed, 1 skipped**，
+      skip 为既知上游失败（qq 角色卡切换 checkpointer adelete_thread），无新增暴露
+      （见下方执行记录「门禁 --extra qq 生效验证 + 服务重启」）
 
 ---
 
@@ -138,3 +140,36 @@ gacore 启动失败。
 - dev-console 启动器 start.bat/start-console.vbs 原本指向旧目录，已同步更新到 mono
 
 **待办更新**：qq-botpy extra 待办标记已修；新增「带 --extra qq 后 test_qq 全量回归」待办。
+
+### 2026-09-09 — 门禁 --extra qq 生效验证 + 服务重启
+
+**背景**：上条记录新增的「带 --extra qq 后 test_qq 全量回归」待办，需确认
+qq-botpy 入环境后是否引入新测试失败，并让 langTrack/gacore 以干净单实例运行。
+
+**已完成**：
+- test_qq 全量回归通过：**21 passed, 1 skipped**（skip 为既知上游失败——
+  qq 角色卡切换 checkpointer MagicMock 无法 await adelete_thread，根 conftest
+  登记），无新增暴露
+- 确认 qq-botpy 已入环境且 import 名是 `botpy`（非 `qqbot`），aiohttp 3.14.3
+  完整可用（含 `_cookie_helpers`）
+- 清理三组重复服务进程（dev-console/langtrack/gacore 各双实例，双启动残留），
+  并 `uv sync --all-packages --extra qq --reinstall-package aiohttp` 修复
+  误卸载的 dev 组 22 包 + aiohttp RECORD 缺失
+- 从 mono/apps/dev-console 干净重启 dev-console，经 API start 拉起
+  langtrack(0.0.0.0:8000) + gacore，均为单实例
+
+**实测验证**：
+- `uv run --all-packages pytest apps/withlanggraph/tests/test_qq.py -q`
+  → 21 passed, 1 skipped in ~5s
+- `/api/status`：langtrack running pid=22544 ports_open=8000、
+  gacore running pid=25576；gacore 日志显示 QQ bot「韩立」登录成功 + scheduler 启动
+
+**偏差说明**：
+- 排查时曾误 `import qqbot`（正确为 `botpy`）致短暂误判依赖缺失
+- 曾误用 `uv sync --package gacore --extra qq`（--package 会排除其它成员与 dev 组），
+  卸载 22 包并再次损坏 aiohttp；正确姿势始终是
+  `uv sync --all-packages --extra qq [--reinstall-package aiohttp]`
+- 重复进程根因是 dev-console 双启动（server.py 已设 allow_reuse_address=False
+  做单实例互斥，修复后第二次启动会静默退出）
+
+**待办更新**：「带 --extra qq 后 test_qq 全量回归」勾选完成。
