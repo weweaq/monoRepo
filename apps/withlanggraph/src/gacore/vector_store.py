@@ -42,6 +42,11 @@ _DEFAULT_DSN: Final = "postgresql://postgres:123789@127.0.0.1:5432/postgres"
 _ENV_DSN: Final = "GACORE_PG_DSN"
 
 _TABLE = "gacore_memory_vectors"
+# Episodic table: daily notes / report highlights, one row per retrieval-friendly
+# statement, tagged with the ISO date so queries can restrict to a time window (阶段三:
+# "那天发生了什么"). Kept separate from the semantic table on purpose — stable identity
+# facts and day-tagged event flow answer different questions and must not cross-pollinate.
+_EPISODIC_TABLE: Final = "gacore_episodic_vectors"
 _DIM = 512
 # Curated "fact portrait": short, retrieval-friendly statements (one fact per line) kept
 # separately from the verbose, timestamped event log in global_mem*.txt. Feeding the
@@ -150,6 +155,153 @@ def sync_portrait(cfg: Config) -> dict:
     return {"lines": len(lines), "stored": stored}
 
 
+def ensure_episodic_schema() -> None:
+    """Create the episodic (day-tagged) vector table if absent (idempotent)."""
+    with _cursor(commit=True) as cur:
+        cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+        cur.execute(
+            f"CREATE TABLE IF NOT EXISTS {_EPISODIC_TABLE} ("
+            "id bigserial PRIMARY KEY,"
+            "content text NOT NULL,"
+            "day text NOT NULL,"
+            "embedding vector(512),"
+            "updated_at timestamptz DEFAULT now(),"
+            "UNIQUE (content, day)"
+            ");"
+        )
+        _logger.info("episodic schema ensured", table=_EPISODIC_TABLE)
+
+
+def upsert_episodic(content: str, day: str, embedding: list[float] | None = None) -> None:
+    """Store one day-tagged episodic line (dedup by content+day)."""
+    if embedding is None:
+        embedding = encode(content)
+    if not embedding:
+        return
+    with _cursor(commit=True) as cur:
+        cur.execute(
+            f"INSERT INTO {_EPISODIC_TABLE} (content, day, embedding, updated_at) "
+            "VALUES (%s, %s, %s, now()) "
+            "ON CONFLICT DO NOTHING;",
+            (content, day, embedding),
+        )
+
+
+def nearby_episodic(
+    query: str,
+    k: int = 3,
+    threshold: float = 0.5,
+    day_from: str | None = None,
+    day_to: str | None = None,
+) -> list[dict]:
+    """Return episodic lines nearest ``query``, optionally restricted to a date window.
+
+    Rows expose ``content``, ``day``, ``dist``. ``day_from``/``day_to`` are ISO date
+    strings (inclusive, lexicographic filter on the ``day`` column) — a caller that only
+    cares about "last week" can bound recall to that window while still ranking by cosine
+    distance, i.e. the time-aware hybrid pattern (metadata filter + vector search).
+    """
+    qvec = encode(query)
+    if not qvec:
+        return []
+    clauses = ["embedding <=> %s::vector < %s"]
+    params: list = [qvec, threshold]
+    if day_from:
+        clauses.append("day >= %s")
+        params.append(day_from)
+    if day_to:
+        clauses.append("day <= %s")
+        params.append(day_to)
+    params.append(k)
+    sql = (
+        f"SELECT content, day, embedding <=> %s::vector AS dist FROM {_EPISODIC_TABLE} "
+        f"WHERE {' AND '.join(clauses)} ORDER BY dist LIMIT %s;"
+    )
+    with _cursor() as cur:
+        cur.execute(sql, (qvec, *params))
+        rows = cur.fetchall()
+    return [{"content": r[0], "day": r[1], "dist": float(r[2])} for r in rows]
+
+
+def sync_episodic_daily(cfg: Config, day: str, lines: list[str] | None = None) -> dict:
+    """Embed + store one day's episodic lines (the daily notes highlights) under ``day``.
+
+    ``lines`` defaults to reading the daily note for ``day`` (see ``daily_notes_for``);
+    pass an explicit list to seed a day without a note file yet. Cheap, idempotent, meant
+    to run after the daily-report job finishes so the report of each day becomes
+    vector-recallable as episodic memory ("那天发生了什么").
+    """
+    ensure_episodic_schema()
+    if lines is None:
+        lines = daily_notes_for(cfg, day)
+    vectors = batch_encode(lines) if lines else []
+    stored = 0
+    for content, vec in zip(lines, vectors, strict=False):
+        if not vec:
+            continue
+        upsert_episodic(content, day, embedding=vec)
+        stored += 1
+    _logger.info("episodic synced", day=day, lines=len(lines), stored=stored)
+    return {"day": day, "lines": len(lines), "stored": stored}
+
+
+def daily_notes_for(cfg: Config, day: str) -> list[str]:
+    """Extract retrieval-friendly statements from the daily note for ``day``.
+
+    Splits the note into lines, strips markdown/preamble noise, and keeps only
+    substantive bullet-ish lines — the structured "picture of the day" rather than the
+    full templated report (whole-report chunking yields diluted recall). No suggestion
+    when the file is absent.
+    """
+    path = cfg.memory_dir / "daily" / f"{day}.md"
+    if not path.is_file():
+        return []
+    out: list[str] = []
+    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = raw.strip()
+        # drop markdown headings/tables/code fences and scheduler-appended audit noise
+        if not line or line.startswith(("#", "|", "<!--", "```")):
+            continue
+        if line.startswith("- [scheduled:") or "[scheduled:" in line:
+            continue
+        if len(line) < 8 or any(tag in line for tag in ("http://", "https://", "img", "```")):
+            continue
+        out.append(line)
+    return out
+
+
+def recall_context(
+    query: str,
+    k: int = 3,
+    threshold: float = 0.5,
+    day_from: str | None = None,
+    day_to: str | None = None,
+) -> str:
+    """Best-effort RAG context by recalling BOTH memory tables in parallel.
+
+    Queries the stable semantic table (facts portrait) and the day-tagged episodic table
+    (daily-note highlights), merges their nearest hits into one digest for the judge /
+    context injection. ``day_from``/``day_to`` bound the episodic side to a time window.
+    Returns "" on any backend trouble so callers inject no context rather than crash.
+    """
+    try:
+        sem = nearby(query, k=k, threshold=threshold)
+        epi = nearby_episodic(query, k=k, threshold=threshold, day_from=day_from, day_to=day_to)
+    except Exception as exc:  # noqa: BLE001 — RAG recall must never break the turn
+        _logger.warning("recall_context unavailable", error_type=type(exc).__name__, error=str(exc))
+        return ""
+    parts: list[str] = []
+    if sem:
+        parts.append("[长期画像·语义]")
+        parts.extend(f"- {h['content']} (sim {1 - h['dist']:.3f})" for h in sem)
+    if epi:
+        parts.append("[某天发生·情景]")
+        parts.extend(f"- {h['day']} · {h['content']} (sim {1 - h['dist']:.3f})" for h in epi)
+    if not parts:
+        return ""
+    return "\n".join(parts)
+
+
 def _portrait_lines(cfg: Config, limit: int = 2000) -> list[str]:
     """Flatten the portrait into a deduped list of non-empty lines.
 
@@ -182,4 +334,16 @@ def _source_of(line: str) -> str:
     return "fact"
 
 
-__all__ = ("ensure_schema", "nearby", "sync_portrait", "upsert_line", "_cursor")
+__all__ = (
+    "ensure_schema",
+    "ensure_episodic_schema",
+    "nearby",
+    "nearby_episodic",
+    "sync_portrait",
+    "sync_episodic_daily",
+    "recall_context",
+    "upsert_line",
+    "upsert_episodic",
+    "daily_notes_for",
+    "_cursor",
+)

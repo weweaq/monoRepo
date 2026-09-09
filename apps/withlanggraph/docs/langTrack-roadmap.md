@@ -2922,3 +2922,46 @@ nodes_tools）；真实 e2e 调 `start_long_term_update` 写「八段锦」→ �
 **待办更新**
 - [x] 统一记忆写入口（向量同步收口 persist_entry）。
 - [ ] scheduler 日报沉淀路径（批量 batch 写）确认是否也应经 `persist_entry` 收口，避免第三条写路径再漏。
+
+## 2026-09-09：分层记忆 Semantic + Episodic 双表并行召回（日报要点入向量库）
+
+**背景**：用户提出——"日报也算是当天人物画像的一个集合，应存到向量中，但**不能和长长期记忆混一张表**；
+每天的记忆可作为 **RAG 材料**，聊天时通过向量匹配召回"。即把记忆从"单表单用途（触发判定）"升级为
+**两层：长期稳定事实（semantic）+ 每日情景事件（episodic）**，并行召回合并进对话 RAG 背景。
+
+**改动（mono `apps/withlanggraph/`）**
+1. `vector_store.py`（改）：
+   - 新增 `_EPISODIC_TABLE = "gacore_episodic_vectors"`（`UNIQUE(content, day)`），`ensure_episodic_schema` /
+     `upsert_episodic` / `nearby_episodic(query, k, threshold, day_from, day_to)` / `sync_episodic_daily(cfg, day)`。
+   - `nearby_episodic` 用 **day 列窗口过滤（元数据过滤 + 向量检索）**实现时间感知召回。
+   - 新增 `daily_notes_for(cfg, day)` 从日报 daily note 抽检索友好语句，**剔除调度审计噪声**
+     （`[scheduled:...]` 行）/Markdown 标题/表格/URL。
+   - 新增 `recall_context(query, k, threshold, day_from, day_to)`：**并行召回 semantic + episodic** 合并为
+     分块 digest（`[长期画像·语义]` + `[某天发生·情景]`），异常吞掉返空（best-effort）。
+2. `scheduler.py`（改）：`run_job` 日报生成**成功后**追加 `_sync_episodic(cfg, for_day)` → 日报要点自动
+   向量化入库，失败仅记日志不阻塞投递。
+3. `context.py`（改）：`_rag_recall_block(state)` 以最近用户文本召 semantic + episodic（近 90 天窗），
+   注入 `build_system_prompt`（daily notes 之后、rollover 之前），增广 RAG 背景，异常/无命中不注入。
+
+**修复的两个坑**
+- `nearby_episodic` **SQL 参数顺序错**：`SELECT embedding <=> %s::vector ... WHERE embedding <=> %s::vector < %s`
+  参数顺序不匹配会让 `threshold` 被误转 vector 报类型错。改为 SELECT 与 WHERE 内 `%s::vector` 同为 `qvec`，
+  执行传 `(qvec, *params)`。
+- `daily_notes_for` **过滤不彻底**：调度追加的 `- [scheduled:daily-report] OK — ...` 噪声行 + Markdown 标题
+  未被剔除，会污染 episodic。补 `line.startswith(("- [scheduled:", ...)) or "[scheduled:" in line` 与
+  `# / | / <!-- / ``` `` 开头的剔除规则。
+
+**实测验证（真实 pgvector + bge-small-zh-v1.5，mono env）**
+- 测试：ruff 三文件零告警；pytest 57 passed（vector_trigger + report_device + daily_info_pack 全量回归）。
+- e2e：episodic 表真实建表，9-08 日报 18 条要点全入库（`stored: 18`）。
+- 并行召回：查「我和尚婧大概什么时候去领证」→ 同时命中 semantic（婚期定档 fact）+ episodic
+  （9-08 补证/寻证/遗失事件），来源与相似度标注清晰。
+- 时间窗过滤：2099 空窗召回同查询 → episodic 零命中、semantic 不受影响，证明两表隔离 + day 过滤正确。
+
+**待办更新**
+- [x] 日报生成后自动同步每日要点入 episodic 向量表。
+- [x] 对话时并行召回 semantic + episodic 合并为 RAG 背景。
+- [ ] scheduler 日报写路径是否也收口 `persist_entry`（现为独立 `_sync_episodic` 汇流点，待与 persist_entry
+      评估是否统一）。
+- [ ] episodic 近 90 天窗口 / 阈值 0.50 长期观测调优（真实对话数据攒一段后复核）。
+- [ ] 待 scheduler 重启后用真实日报 job 触发一次，确认 `_sync_episodic` 日志 `episodic synced` 落盘。

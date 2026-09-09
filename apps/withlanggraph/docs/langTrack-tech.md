@@ -1227,6 +1227,94 @@ flowchart LR
 - CombinedTrigger：keyword 优先且不触发 vector（省 LLM）；vector 补语义漏抓。
 - patch 目标注意：函数内 `from gacore import vector_store`，须 patch `gacore.vector_store`（非 `.memory_maintenance.vector_store`）。21 passed（含 memory_maintenance 全量），ruff 零告警。
 
+## 9.26 分层记忆：Semantic + Episodic 双表并行召回（RAG 背景，2026-09-09）
+
+阶段二把**长期稳定画像**（semantic）向量化用于触发判定，但记忆仍是"单一表 + 单一用途"。本节把
+记忆模型拆成两个既有别又互补的载体，并把召回从"触发层"上提到**每一轮对话的 RAG 背景注入**——直接
+服务北极星"理解主人"：对话时不仅能回忆稳定的长期事实，还能想起"某天发生了什么"。
+
+### 分层记忆模型
+
+| 维度 | semantic（长期画像） | episodic（每日情景） |
+|---|---|---|
+| 内容 | 稳定身份/偏好/里程碑事实 | 日报要点、当日事件流 |
+| 来源 | `memory/global_mem_facts.txt`（`_portrait_lines`） | 日报 daily note（`memory/daily/<day>.md`） |
+| 表 | `gacore_memory_vectors` | `gacore_episodic_vectors`（新） |
+| 键 | `UNIQUE(content, chunk_key)` | `UNIQUE(content, day)` |
+| 时间维度 | 无（近实时跟随画像） | `day` 列，支持日期窗口过滤 |
+| 回答的问题 | "我是什么样的人 / 住在哪 / 婚期 / 偏好" | "那天发生了什么 / 上周六我在干嘛" |
+| 写时机 | MERGE/NEW 记忆更新（`persist_entry`） | 日报生成后自动同步（`scheduler._sync_episodic`） |
+
+两表刻意分离（`_EPISODIC_TABLE` / `_TABLE` 独立常量）：稳定事实与日标注事件流回答不同问题，
+**必须不互相污染**。semantic 保持阶段二/方案2 的"只喂事实画像"策略；episodic 喂日报要点（经
+`daily_notes_for` 去噪）。
+
+### `vector_store.py` 新增（episodic 读写 + 并行召回）
+
+- `ensure_episodic_schema()` / `upsert_episodic(content, day, embedding=None)`：建表 + 写入
+  （dedup by `content+day`，幂等 ON CONFLICT DO NOTHING）。
+- `nearby_episodic(query, k, threshold, day_from=None, day_to=None)`：情景侧语义召回，`day_from`/`day_to`
+  为 ISO 日期（含端点，`day >= %s AND day <= %s` 词法过滤）——**元数据过滤 + 向量检索**的时间感知混合模式。
+  **SQL 参数顺序坑**：`SELECT ... embedding <=> %s::vector AS dist ... WHERE embedding <=> %s::vector < %s`
+  中首个 `%s::vector` 占位符在 SELECT 前、与 WHERE 内参数必须同为 `qvec`，执行时传 `(qvec, *params)`，
+  否则 `threshold` 会被误转成 vector 类型报参数类型错。
+- `sync_episodic_daily(cfg, day, lines=None)`：读当日 daily note → batch 嵌入 → 逐条 upsert，
+  返回 `{"day", "lines", "stored"}`。供日报 job 收尾调用。
+- `daily_notes_for(cfg, day)`：从 `memory/daily/<day>.md` 抽取检索友好语句。**去噪规则**：跳过空行/
+  `#` 标题/`|` 表格/`<!--` 注释/```` ``` ````代码块；剔除含 `[scheduled:` 的调度审计噪声行（如
+  `- [scheduled:daily-report] OK — ...`）；长度 < 8 或含 `http/img` 的行也丢弃。
+- `recall_context(query, k=3, threshold=0.5, day_from=None, day_to=None) -> str`：
+  **best-effort 并行召回两表**——`nearby`（semantic）+ `nearby_episodic`（episodic，带窗），合并为
+  分块 digest（`[长期画像·语义]` + `[某天发生·情景]`，各带 `(sim ...)`）。任何后端异常吞掉记 warning
+  返空串，**绝不打断对话**（RAG 召回必须两级降级：异常→空、无命中→空）。
+
+### `scheduler.py`：日报生成后自动同步 episodic
+
+`run_job` 在 `_write_daily_note` **成功且为 daily job** 时追加 `_sync_episodic(cfg, for_day)`：
+
+```python
+# scheduler.py 收尾
+_write_daily_note(cfg, job, reply, error)
+if error is None and _is_daily_job(job):
+    try:
+        _sync_episodic(cfg, for_day)   # 日报要点向量化入 episodic 表
+    except Exception as e:
+        logger.error("episodic sync failed", job=name, error_type=type(e).__name__, stack_trace=str(e))
+```
+
+`_sync_episodic` 内部调 `vector_store.sync_episodic_daily`，默认取 `for_day` 或当天日期。**同步失败仅记日志，
+不阻塞日报投递**——txt 日报仍是真相源，episodic 是增强索引。仍未纳入 `persist_entry` 收口（日报是批量
+batch 写 + 高·冗余，与单条 MERGE/NEW 不同，见 roadmap 待办），是一条第**独立**汇流点。
+
+### `context.py`：RAG 背景注入
+
+`build_system_prompt` 在 daily notes 注入（`DAILY_HEADER`）之后、rollover 之前追加 RAG 块：
+- `_rag_recall_block(state)`：取最近一条用户文本（`_last_user_text`，>200 字放弃），以**当天为准**回溯
+  `_RAG_EPISODIC_WINDOW_DAYS=90` 天，调 `recall_context(query, k=3, threshold=0.5, day_from, day_to=today)`。
+- 命中则注入 `_RAG_HEADER`（`=== 向量召回记忆（语义画像 + 某天事件，仅供了解过往，绝不代表当前） ===`）分块。
+- 异常/未命中返空串，不注入——**RAG 是增强、不是依赖**，绝不破坏 prompt 组装或拖慢会话。
+
+### 数据流
+```mermaid
+flowchart LR
+    DL[日报 daily report 落盘] --> SN[_write_daily_note]
+    SN --> SYE[scheduler._sync_episodic 收尾<br/>sync_episodic_daily → episodic 表]
+    MSG[每轮用户消息] --> RB[_rag_recall_block 取最近用户文本]
+    RB --> RC[recall_context 并行召回]
+    RC -->|semantic 命中| S[长期画像·语义块]
+    RC -->|episodic 命中<br/>day_from..day_to=近90天| E[某天发生·情景块]
+    S & E --> BG[注入 system prompt RAG 背景<br/>build_system_prompt]
+```
+
+### 端到端实测（真实 pgvector + bge-small-zh-v1.5，mono env）
+- ruff：`vector_store/scheduler/context` 零告警；pytest 57 passed（含 vector_trigger +
+  report_device + daily_info_pack 全量回归）。
+- episodic 表真实建表 + 9-08 日报 18 条要点全部入库（`stored: 18`）。
+- 并行召回：查「我和尚婧大概什么时候去领证」→ 同时命中 semantic（婚期定档 fact）+ episodic
+  （9-08 `补办身份证/提前下班寻证/身份证遗失`），标注来源与相似度。
+- 时间窗过滤验证：以 2099 空窗召回同查询 → episodic 零命中、semantic 不受影响，证明两表隔离与
+  day 过滤都正确。
+
 ### 依赖声明
 `pyproject.toml` 新增 `vector` extra：`psycopg[binary]>=3.1` / `pgvector>=0.3` / `transformers>=4.42` / `sentence-transformers>=2.7` / `onnxruntime>=1.18`。独立组，避免厚重 onnx/embedding 栈混进核心 qq/langTrack 门禁环境。
 

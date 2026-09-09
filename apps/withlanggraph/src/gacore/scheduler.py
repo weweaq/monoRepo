@@ -428,6 +428,15 @@ def run_job(
     duration = time.monotonic() - start
     output_path = _write_output(cfg, job, reply, error, prompt=prompt, raw_reply=raw_reply)
     _write_daily_note(cfg, job, reply, error)
+    # Episodic memory: after a successful daily-report run, embed the day's daily
+    # note into the separate day-tagged vector table so future conversation can recall
+    # "那天发生了什么" via vector search (阶段三). Best-effort only — a vector failure
+    # must never fail the report delivery.
+    if error is None and _is_daily_job(job):
+        try:
+            _sync_episodic(cfg, for_day)
+        except Exception as e:  # noqa: BLE001 — vector sync must never break the report
+            logger.error("episodic sync failed", job=name, error_type=type(e).__name__, stack_trace=str(e))
     if deliver:
         _deliver(job, cfg, reply, error, for_day=for_day)
     else:
@@ -594,6 +603,20 @@ def _write_daily_note(cfg: Config, job: Job, reply: str, error: str | None) -> N
             if lines:
                 anchor = lines[-1]
                 edit_daily.func(date=today, old_str=anchor, new_str=anchor + "\n" + bullet, _cfg=cfg)
+
+
+def _sync_episodic(cfg: Config, for_day: str | None) -> None:
+    """Embed the day's daily note into the episodic vector table (best-effort).
+
+    ``for_day`` may be None for one-off runs; such runs naturally target today. The
+    daily note md stored under ``memory/daily/`` is the source of truth; this only adds
+    vector rows in the separate episodic table — memory text is never mutated.
+    """
+    from gacore import vector_store
+
+    day = (for_day or datetime.now(UTC).astimezone().date().isoformat())
+    result = vector_store.sync_episodic_daily(cfg, day)
+    logger.info("episodic embedded for day", day=day, lines=result.get("lines"), stored=result.get("stored"))
 
 
 def _onboard_pack_path(cfg: Config) -> Path:

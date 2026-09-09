@@ -462,3 +462,33 @@ huggingface.co，而办公网络外网全不通（系统代理 127.0.0.1:7897 �
 
 **待办更新**：勾选「统一记忆写入口」为已完成。新增待办：确认 scheduler 日报沉淀路径
 （批量 batch 写）是否也应经 `persist_entry` 收口，避免第三条写路径再漏同步。
+
+### 2026-09-09 — 分层记忆：Semantic + Episodic 双表并行召回（日报要点入向量库）
+
+**背景**：用户确认两级需求——①日报生成后，把 daily note 要点向量化存入**独立的 episodic 表**；
+②对话时**并行召回**长期画像（semantic）+每日情景（episodic）两表，合并为 RAG 上下文注入。目标：
+把日报沉淀为"当日人物画像集合"并作 RAG 材料，聊天时通过向量匹配召回"那天发生了什么"。
+
+**已完成**：
+- `vector_store.py`：
+  - 新增 `gacore_episodic_vectors` 表（`UNIQUE(content, day)`）+ `ensure_episodic_schema` /
+    `upsert_episodic` / `nearby_episodic` / `sync_episodic_daily`。
+  - `nearby_episodic` 支持 `day_from/day_to` 日期窗口过滤（元数据过滤+向量检索的时间感知召回）。
+  - `daily_notes_for(cfg, day)` 抽日报要点并**剔除调度审计噪声**（`[scheduled:...]` 行）与 Markdown 标题。
+  - `recall_context()` 并行召回两表，合并为 `[长期画像·语义]` + `[某天发生·情景]` digest，异常吞空。
+- `scheduler.py`：`run_job` 日报生成**成功**后调 `_sync_episodic(cfg, for_day)` 自动向量化日报要点，
+  失败仅记日志不阻塞投递。
+- `context.py`：`_rag_recall_block` 按最近用户文本以近 90 天窗召回，注入 `build_system_prompt` 增广 RAG 背景。
+
+**修复**：`nearby_episodic` SQL 参数顺序错（threshold 被误转 vector）；`daily_notes_for` 噪声过滤不彻底。
+
+**实测验证**：ruff 零告警；pytest 57 passed；真实 pgvector——episodic 建表 + 9-08 日报 18 条入库
+（stored:18）；查「领证」并行命中 semantic（婚期定档）+ episodic（9-08 补证/寻证）；2099 空窗
+episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）。
+
+**偏差说明**：日报写路径仍走**独立** `_sync_episodic` 汇流点、未并入 `persist_entry`（批量 batch 写 +
+日报更新频格，与单条 MERGE/NEW 不同），是否统一留待评估。scheduler 重启前未用真实日报 job 触发，仅直连
+调用验证，真实调度触发日志待补。
+
+**待办更新**：新增待办——日报路径是否收口 persist_entry；episodic 90 天窗/阈值长期观测调优；scheduler
+重启后真实日报 job 验证 `_sync_episodic` 日志落盘。

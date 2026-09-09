@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Final
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
@@ -116,6 +116,38 @@ _PROPOSAL_RULE: Final = (
     "最后另起一行用一句“我建议选…”给出收尾建议。各方案与收尾之间空行分隔，不要列计划前缀。"
 )
 
+# 向量召回背景（阶段三）：开启按最近一条用户消息并行召回 semantic + episodic 两表，
+# 注入为 RAG 背景。recall_context 自身 best-effort——向量库/模型不可用返回空，不注入。
+_RAG_HEADER: Final = "=== 向量召回记忆（语义画像 + 某天事件，仅供了解过往，绝不代表当前） ==="
+# 情景侧默认回溯近 90 天；不改可分档细查。
+_RAG_EPISODIC_WINDOW_DAYS: Final = 90
+
+
+def _last_user_text(state: GAState) -> str:
+    """Return the most recent user message's plain text (images stripped), or ''."""
+    for msg in reversed(state.get("messages") or []):
+        if isinstance(msg, HumanMessage) and isinstance(msg.content, str):
+            return msg.content.strip()
+    return ""
+
+def _rag_recall_block(state: GAState) -> str:
+    """Best-effort parallel recall of long-term + day-tagged memory for the current turn."""
+    query = _last_user_text(state)
+    if not query or len(query) > 200:
+        return ""
+    try:
+        from gacore import vector_store
+        today = date.today()
+        day_from = (today - timedelta(days=_RAG_EPISODIC_WINDOW_DAYS)).isoformat()
+        body = vector_store.recall_context(
+            query, k=3, threshold=0.5, day_from=day_from, day_to=today.isoformat()
+        )
+    except Exception:  # noqa: BLE001 — RAG recall must never break prompt assembly
+        return ""
+    if not body:
+        return ""
+    return f"\n{_RAG_HEADER}\n{body}"
+
 _SUMMARY_RE: Final = re.compile(r"<summary>(.*?)</summary>", re.DOTALL)
 
 # Sliding-window: how many recent user turns (HumanMessage-delimited rounds) are kept in full
@@ -194,6 +226,11 @@ def build_system_prompt(state: GAState, cfg: Config) -> str:
     injected_bg = False
     if daily:
         prompt += f"\n{DAILY_HEADER}\n{stamp_daily_history(daily)}"
+        injected_bg = True
+    # 向量召回背景：并行召语义画像 + 某天事件，作为 RAG 背景注入（best-effort）。
+    rag = _rag_recall_block(state)
+    if rag:
+        prompt += rag
         injected_bg = True
     # One-shot cross-day memory injection: set by qq.py::_maybe_rollover on the first
     # message of a new day and cleared by graph.py::cleanup_images after that turn.
