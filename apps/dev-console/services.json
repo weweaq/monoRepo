@@ -6,24 +6,24 @@
   "services": [
     {
       "id": "langtrack",
-      "name": "langTrack (WithLangGraph)",
+      "name": "langTrack (mono/apps/withlanggraph)",
       "ports": [8000],
-      "cwd": "D:\\AAAmyPrj\\github\\myrepos\\WithLangGraph",
-      "env": { "PYTHONPATH": "D:\\AAAmyPrj\\github\\myrepos\\WithLangGraph\\src" },
-      "interpreter": "D:\\AAAmyPrj\\github\\myrepos\\WithLangGraph\\.venv\\Scripts\\python.exe",
+      "cwd": "D:\\AAAmyPrj\\github\\myrepos\\mono\\apps\\withlanggraph",
+      "env": { "PYTHONPATH": "D:\\AAAmyPrj\\github\\myrepos\\mono\\apps\\withlanggraph\\src" },
+      "interpreter": "D:\\AAAmyPrj\\github\\myrepos\\mono\\.venv\\Scripts\\python.exe",
       "args": ["-m", "gacore.langTrack", "--host", "127.0.0.1", "--port", "8000"],
       "match": ["gacore.langTrack"],
-      "notes": "接收手机上报事件的 HTTP 服务；需要 .venv 已建好且配置 .env"
+      "notes": "接收手机上报事件的 HTTP 服务；mono uv workspace 环境 + 配置 .env"
     },
     {
       "id": "gacore",
       "name": "gacore (QQ Bot + Scheduler)",
       "ports": [],
-      "cwd": "D:\\AAAmyPrj\\github\\myrepos\\WithLangGraph",
-      "env": { "PYTHONPATH": "D:\\AAAmyPrj\\github\\myrepos\\WithLangGraph\\src" },
-      "interpreter": "D:\\softwares\\miniconda\\envs\\py12\\python.exe",
-      "args": ["D:\\AAAmyPrj\\github\\myrepos\\WithLangGraph\\start.py"],
-      "match": ["WithLangGraph\\start.py"],
+      "cwd": "D:\\AAAmyPrj\\github\\myrepos\\mono\\apps\\withlanggraph",
+      "env": { "PYTHONPATH": "D:\\AAAmyPrj\\github\\myrepos\\mono\\apps\\withlanggraph\\src" },
+      "interpreter": "D:\\AAAmyPrj\\github\\myrepos\\mono\\.venv\\Scripts\\python.exe",
+      "args": ["D:\\AAAmyPrj\\github\\myrepos\\mono\\apps\\withlanggraph\\start.py"],
+      "match": ["mono\\apps\\withlanggraph\\start.py"],
       "notes": "QQ 机器人 + 定时调度；无 HTTP 端口，仅靠命令行特征判定存活；需要 .env 配置 LLM Key"
     },
     {
