@@ -1315,6 +1315,20 @@ flowchart LR
 - 时间窗过滤验证：以 2099 空窗召回同查询 → episodic 零命中、semantic 不受影响，证明两表隔离与
   day 过滤都正确。
 
+### 调优参数一览（episodic 召回）
+
+| 参数 | 含义 | 当前值 | 位置 |
+|---|---|---|---|
+| `threshold` | 召回相似度下限（dist，越小越严） | `0.5` | `vector_store.recall_context` 默认值 |
+| `k` | 每表最多召回条数 | `3` | `context._rag_recall_block` 调用 `recall_context(k=3)` |
+| `_RAG_EPISODIC_WINDOW_DAYS` | episodic 时间窗口（回溯天数） | `90` | `context.py` 顶部常量 |
+| `daily_notes_for` 去噪规则 | 哪些日报行不喂向量库 | 固定代码 | `vector_store.daily_notes_for` |
+
+**调法**：只调阈值 / 窗口（不动逻辑）。精准→调小 `threshold`（0.5→0.45）或收窄窗口；更全→调大 `threshold`
+（0.5→0.55）/ `k` 或放宽窗口。参考锚点：阶段二方案2 实测 `0.50~0.55` 是"放行『住朝阳』/挡掉『晚饭』"
+的合适区间。噪声行反复进来则改 `daily_notes_for` 去噪黑名单（属代码改，须走军规）。架构决策见
+roadmap「episodic 日报路径不并入 `persist_entry`」。
+
 ### 依赖声明
 `pyproject.toml` 新增 `vector` extra：`psycopg[binary]>=3.1` / `pgvector>=0.3` / `transformers>=4.42` / `sentence-transformers>=2.7` / `onnxruntime>=1.18`。独立组，避免厚重 onnx/embedding 栈混进核心 qq/langTrack 门禁环境。
 

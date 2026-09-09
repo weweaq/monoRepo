@@ -490,5 +490,6 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 日报更新频格，与单条 MERGE/NEW 不同），是否统一留待评估。scheduler 重启前未用真实日报 job 触发，仅直连
 调用验证，真实调度触发日志待补。
 
-**待办更新**：新增待办——日报路径是否收口 persist_entry；episodic 90 天窗/阈值长期观测调优；scheduler
-重启后真实日报 job 验证 `_sync_episodic` 日志落盘。
+**待办更新**：新增待办——日报路径是否收口 persist_entry（**决策：不并入**，各管各表、共享 vector_store
+工具，见 docs/langTrack-roadmap.md「架构决策」）；episodic 90 天窗/阈值长期观测调优（调法见 tech.md
+「调优参数一览」）；scheduler 重启后真实日报 job 验证 `_sync_episodic` 日志落盘。

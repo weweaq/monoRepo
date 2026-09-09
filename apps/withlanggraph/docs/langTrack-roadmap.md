@@ -2961,7 +2961,39 @@ nodes_tools）；真实 e2e 调 `start_long_term_update` 写「八段锦」→ �
 **待办更新**
 - [x] 日报生成后自动同步每日要点入 episodic 向量表。
 - [x] 对话时并行召回 semantic + episodic 合并为 RAG 背景。
-- [ ] scheduler 日报写路径是否也收口 `persist_entry`（现为独立 `_sync_episodic` 汇流点，待与 persist_entry
-      评估是否统一）。
-- [ ] episodic 近 90 天窗口 / 阈值 0.50 长期观测调优（真实对话数据攒一段后复核）。
+- [ ] **待决：日报写路径是否收口 `persist_entry`**（现为独立 `_sync_episodic` 汇流点）——倾向不改，见下「架构决策」。
+- [ ] episodic 近 90 天窗口 / 阈值 0.50 长期观测调优（真实对话数据攒一段后复核，见「调优手册」）。
 - [ ] 待 scheduler 重启后用真实日报 job 触发一次，确认 `_sync_episodic` 日志 `episodic synced` 落盘。
+
+### 架构决策：episodic 日报路径不并入 `persist_entry`（2026-09-09 确认）
+
+`persist_entry` 收口针对的是"写**同一张**长期画像，却漏向量同步"的 bug——被动画像 MERGE/NEW 与主动
+工具 `start_long_term_update` 两条路径写同一张 semantic 表，合并到一个函数能保证同步不遗漏。
+
+日报路径**不是同类问题**：它写的是**另一张表**（episodic），内容是"当天批量事件流"而非"单条稳定事实"，
+语义与粒度都不同。强行并入需要给 `persist_entry` 增加"目标表 + 日期"参数并把 batch 语义塞进单条函数，
+得不偿失。且两条 sync（`sync_portrait` / `sync_episodic_daily`）都共享 `vector_store` 工具、均为
+best-effort + 幂等 + 失败吞掉，天然可维护。
+
+**结论**：各管各表、共享 vector_store 工具——**不强行统一**。此结论替换原"待评估是否统一"待办，不再悬置。
+
+### 调优手册：episodic 召回参数（观测 + 调整方法）
+
+目前 4 个可调参数及其文件位置：
+
+| 参数 | 含义 | 当前值 | 位置 |
+|---|---|---|---|
+| `threshold` | 召回相似度下限（dist，越小越严） | `0.5` | `vector_store.recall_context` 默认值 |
+| `k` | 每表最多召回条数 | `3` | `context._rag_recall_block` 调用 `recall_context(k=3)` |
+| `_RAG_EPISODIC_WINDOW_DAYS` | episodic 时间窗口（回溯天数） | `90` | `context.py` 顶部常量 |
+| `daily_notes_for` 去噪规则 | 哪些日报行不喂向量库 | 固定代码 | `vector_store.daily_notes_for` |
+
+**调法：只调阈值 / 窗口，不动代码逻辑。** 判据 = 真实对话里 RAG 背景是否引入相关记忆、又是否误引入无关内容：
+
+- 想让召回**更精准**（少噪声，但可能漏）：调小 `threshold`（如 0.5→0.45），或收窄窗口 `90`→`30`。
+- 想让召回**更全**（多背景，但可能脏）：调大 `threshold`（如 0.5→0.55）/ `k`，或放宽窗口。
+- 某类噪声行反复进来（如 URL、模板句）→ 改 `daily_notes_for` 的去噪黑名单（属代码改动，改后须走军规）。
+
+参考锚点：阶段二方案2 实测中 `0.50~0.55` 是"放行『住朝阳』/挡掉『晚饭』"的合适区间——episodic 阈值
+建议从同一经验值起手，等真实对话攒一段再做数据驱动微调。改参数属行为变更，改完须同步本路书 + tech 的
+实测段。
