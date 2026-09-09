@@ -2,6 +2,9 @@
 # Usage: powershell -File tools/scripts/check.ps1 [-Fix]
 # --all-packages installs every workspace member so member tests can import
 # their own package (uv's default sync only installs the root project).
+# --extra qq keeps gacore's run-time dep qq-botpy installed. Without it, sync
+# drops the extra from the env and gacore's QQ bot fails to start at next run
+# (see apps/withlanggraph/ROADMAP.md "qq-botpy extra not installed in gate env").
 
 param(
     [switch]$Fix
@@ -10,7 +13,7 @@ param(
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 Set-Location $repoRoot
 
-uv sync --all-packages
+uv sync --all-packages --extra qq
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[check] uv sync failed" -ForegroundColor Red
     exit $LASTEXITCODE

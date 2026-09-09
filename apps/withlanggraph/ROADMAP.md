@@ -32,8 +32,10 @@ langTrack 数据链路服务端：`/ingest` 接收 + ETL 加工 + 报告 + dashb
       __main__ 及 3 个 test_langTrack_*）上游提交时即为混合 EOL（CRLF/CR/LF 混杂），
       mono 侧不单独修（会产生与上游的全文件 diff）；如上游规范化后再同步
 - [ ] 提炼 `amap-sdk` 共享包（geocode/routes/坐标转换），全量回归必须保持绿
-- [ ] qq-botpy extra 未装入门禁环境：`uv sync --all-packages --extra qq` 后
-      test_qq 的既知失败用例之外是否有新增暴露，装后验证
+- [x] qq-botpy extra 未装入门禁环境（已修，2026-09-09）：`tools/scripts/check.ps1`
+      的 `uv sync` 已补 `--extra qq`。否则门禁 sync 会卸载 qq-botpy 并损坏
+      aiohttp（dist-info 缺 RECORD），导致 gacore QQ 前端启动失败
+- [ ] 带 `--extra qq` 后 test_qq 全量回归：既知 skip 之外是否有新增暴露，装后验证
 
 ---
 
@@ -108,3 +110,31 @@ langTrack 数据链路服务端：`/ingest` 接收 + ETL 加工 + 报告 + dashb
 - 服务切换（原仓库 → mono）见 dev-console services.json 变更记录
 
 **待办更新**：amap-sdk 提炼的上游 geocode.py WIP 已合入，可重启评估。
+
+### 2026-09-09 — 服务切到 mono 运行 + 门禁 sync 修复
+
+**背景**：决定正式切到 mono 运行。启动 langTrack/gacore 时两次踩坑——旧管理台
+缓存旧配置导致服务跑回原仓库代码；门禁 sync 卸载 qq-botpy 并损坏 aiohttp 导致
+gacore 启动失败。
+
+**已完成**：
+- 确认两边仓库同步：6 个「听歌/视频伴音分流」文件在 git blob 层一致（原仓库
+  HEAD `7341dc5`、mono merge `61c3f10`），mono main 已 push 至远程
+- 停旧管理台（旧独立目录 `D:\...\dev-console`，内存缓存旧 services.json），
+  从 mono/apps/dev-console 重启，mono 配置生效
+- 修 `tools/scripts/check.ps1`：`uv sync` 补 `--extra qq`
+- 修 aiohttp 损坏：`uv sync --all-packages --extra qq --reinstall-package aiohttp`
+- 启动 langTrack(0.0.0.0:8000) + gacore(QQ 机器人「韩立」+ 调度)
+
+**实测验证**：
+- 服务进程 cmdline 均指向 `mono\.venv\Scripts\python.exe` + mono 代码
+- gacore checkpointer 路径 = `mono\apps\withlanggraph\data\gacore_chat.db`
+- QQ bot ready: 韩立；langTrack uvicorn 0.0.0.0:8000 正常
+
+**偏差说明**：
+- dev-console 内存缓存 services.json，改配置后必须重启管理台才生效
+- 门禁 `uv sync` 无 `--extra qq` 时卸载 qq-botpy；aiohttp dist-info 缺 RECORD
+  致卸载不干净（`No module named 'aiohttp._cookie_helpers'`），需 --reinstall-package
+- dev-console 启动器 start.bat/start-console.vbs 原本指向旧目录，已同步更新到 mono
+
+**待办更新**：qq-botpy extra 待办标记已修；新增「带 --extra qq 后 test_qq 全量回归」待办。
