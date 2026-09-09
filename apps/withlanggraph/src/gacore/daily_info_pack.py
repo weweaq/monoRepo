@@ -46,6 +46,7 @@ _EDGE_CAP: int = 900       # Edge 域名归并 top10
 _GIT_CAP: int = 700        # git 当日提交
 _FILES_CAP: int = 1000     # 当日文件活动 top15
 _NCM_CAP: int = 700        # ncm 歌单/收藏静态基线
+_MEDIA_CAP: int = 900      # 当日听歌与视频伴音（music_play 分两类）
 _MEMORY_CAP: int = 900     # 前日日报摘要（可选）
 
 _LONG_TERM_LINES: int = 40  # 画像 compact 行数上限（对齐 _summarize_long_term 默认）
@@ -239,6 +240,57 @@ def _time_seg_label(item: Any) -> str:
         if seg:
             return f"{seg}:{_app_label(item)}"
     return _app_label(item)
+
+
+def _build_media(date: str, cfg: Config) -> tuple[str, str]:
+    """当日听歌与视频伴音：music_play 按 pkg 分流（音乐类=听歌，B站/短视频=视频伴音），
+    供日报正文分开展示。复用 report._listen_music 的粗档口径，读 langTrack.db。"""
+    try:
+        import sqlite3
+
+        from gacore.langTrack.report import _listen_music
+
+        db = cfg.root / "data" / "langTrack.db"
+        if not db.exists():
+            return "〔今日·听歌与视频伴音〕", "- 无 langTrack 音乐数据"
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row  # _listen_music 按列名读 r["payload"]
+        try:
+            data = _listen_music(conn, date)
+        finally:
+            conn.close()
+        lines: list[str] = []
+
+        def _fmt(e: dict) -> str:
+            s = f"《{e['title']}》"
+            if e.get("singer"):
+                s += f"-{e['singer']}"
+            if (e.get("count") or 0) > 1:
+                s += f"×{e['count']}"
+            return s
+
+        music = data.get("ranking") or []
+        if music:
+            lines.append("- 听歌 Top：" + "、".join(_fmt(e) for e in music[:5]))
+            if data.get("singer_top"):
+                lines.append("  常听歌手：" + "、".join(f"{s}×{c}" for s, c in data["singer_top"]))
+            if data.get("sessions"):
+                lines.append("  连播段：" + "；".join(
+                    f"{s['start']}-{s['end']}({s['song_count']}首)" for s in data["sessions"]))
+            if data.get("hour_hist"):
+                lines.append("  听歌时段：" + "、".join(f"{h}({n})" for h, n in data["hour_hist"]))
+        else:
+            lines.append("- 今日无听歌记录（music_play 无音乐类事件）")
+        video = data.get("video_ranking") or []
+        if video:
+            lines.append("- 视频伴音（B站/短视频）Top：" + "、".join(_fmt(e) for e in video[:5])
+                         + f"（共 {data.get('video_count', 0)} 个）")
+        else:
+            lines.append("- 今日无视频伴音记录")
+        return "〔今日·听歌与视频伴音〕", "\n".join(lines)
+    except Exception as exc:  # noqa: BLE001 - 最后防线：源失败不中断整包
+        logger.warning("daily_info_pack: media failed", error_type=type(exc).__name__, error=str(exc))
+        return "〔今日·听歌与视频伴音〕", f"- 该源失败：{exc}"
 
 
 def _build_bili(date: str, cfg: Config) -> tuple[str, str]:
@@ -504,6 +556,7 @@ def build_info_pack(date: str, cfg: Config | None = None) -> str:
         ("_LANGTRACK", _build_langtrack),
         ("_BILI", _build_bili),
         ("_EDGE", _build_edge),
+        ("_MEDIA", _build_media),
         ("_GIT", _build_git),
         ("_FILES", _build_files),
         ("_NCM", _build_ncm),
@@ -515,6 +568,7 @@ def build_info_pack(date: str, cfg: Config | None = None) -> str:
         "_LANGTRACK": _LANGTRACK_CAP,
         "_BILI": _BILI_CAP,
         "_EDGE": _EDGE_CAP,
+        "_MEDIA": _MEDIA_CAP,
         "_GIT": _GIT_CAP,
         "_FILES": _FILES_CAP,
         "_NCM": _NCM_CAP,
