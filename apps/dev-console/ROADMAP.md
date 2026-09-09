@@ -44,3 +44,26 @@
 - [ ] services.json 模板化（去本机绝对路径）
 - [ ] 补基础测试（进程探测纯函数部分）
 - [ ] Windows 服务化（nssm 或 Task Scheduler 常驻）
+
+### 2026-09-09 — 启动器路径切到 mono + 管理台切换
+
+**背景**：dev-console 迁入 mono 后，start.bat/start-console.vbs 仍指向旧独立目录
+`D:\AAAmyPrj\github\myrepos\dev-console`；且实际运行中的管理台也是从旧目录启动、
+内存缓存旧 services.json，导致通过它启动的 langTrack/gacore 跑回原仓库代码。
+
+**已完成**：
+- start.bat / start-console.vbs 的 cwd 与 pythonw 解释器路径改为
+  `mono\apps\dev-console` + `mono\.venv\Scripts\pythonw.exe`
+- 停旧管理台（旧目录），从 mono/apps/dev-console 重启，mono 的 services.json 生效
+- langTrack/gacore 已通过 mono 管理台正常启动
+
+**实测验证**：新管理台 `/api/config` 返回 langtrack/gacore 的 interpreter/cwd
+均指向 mono；两个服务进程 cmdline 确认用 mono 解释器与代码。
+
+**偏差说明**：
+- 管理台的 CONFIG 在进程启动时加载一次，改 services.json 后必须重启管理台才生效
+- 旧独立目录 `D:\AAAmyPrj\github\myrepos\dev-console` 仍在（独立 git 仓库），
+  是否废弃待定；其启动器已不推荐使用
+
+**待办更新**：上文「services.json 模板化」应一并覆盖 start.bat/start-console.vbs
+的硬编码路径，或改用环境变量注入。

@@ -1,5 +1,5 @@
 @echo off
 setlocal
-cd /d D:\AAAmyPrj\github\myrepos\dev-console
-start "" "D:\softwares\miniconda\envs\py12\pythonw.exe" server.py
+cd /d D:\AAAmyPrj\github\myrepos\mono\apps\dev-console
+start "" "D:\AAAmyPrj\github\myrepos\mono\.venv\Scripts\pythonw.exe" server.py
 exit /b
