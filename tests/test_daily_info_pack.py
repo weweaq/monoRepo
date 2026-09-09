@@ -403,3 +403,49 @@ def test_build_info_pack_never_raises(tmp_path, monkeypatch):
     assert isinstance(pack, str)
     assert "该源失败" in pack or "〔当日信息包" in pack
     assert len(pack) <= dip.PACK_BUDGET
+
+
+# --------------------------------------------------------------------------- #
+# 听歌与视频伴音：空库 / 网易云与 B站 分流                                     #
+# --------------------------------------------------------------------------- #
+def _media_ts(dstr: str, hh: int, mm: int) -> int:
+    import datetime as _dt
+    d = _dt.datetime.fromisoformat(dstr)
+    return int(_dt.datetime(d.year, d.month, d.day, hh, mm, tzinfo=_dt.timezone(_dt.timedelta(hours=8))).timestamp() * 1000)
+
+
+def test_media_empty_db(tmp_path):
+    _header, body = dip._build_media("2026-09-02", _cfg(tmp_path))
+    assert "无 langTrack 音乐数据" in body
+
+
+def test_media_split_music_vs_video(tmp_path):
+    import json
+    import sqlite3
+
+    from gacore.langTrack import storage
+
+    cfg = _cfg(tmp_path)
+    db = cfg.root / "data" / "langTrack.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db)
+    conn.executescript(storage._SCHEMA)
+    events = [
+        (_media_ts("2026-09-02", 9, 0), "真歌A", "歌手A", "com.netease.cloudmusic"),
+        (_media_ts("2026-09-02", 9, 3), "B站解说标题", "某UP", "tv.danmaku.bili"),
+        (_media_ts("2026-09-02", 9, 6), "真歌B", "歌手B", "com.netease.cloudmusic"),
+    ]
+    for ts, title, singer, pkg in events:
+        conn.execute(
+            "INSERT INTO events(device_id, ts, type, payload, received_at) VALUES (?,?,?,?,?)",
+            ("dev1", ts, "music_play",
+             json.dumps({"title": title, "singer": singer, "pkg": pkg, "state": "playing"}), ts),
+        )
+    conn.commit()
+    conn.close()
+
+    _header, body = dip._build_media("2026-09-02", cfg)
+    assert "听歌 Top" in body and "真歌A" in body and "真歌B" in body
+    assert "视频伴音" in body and "B站解说标题" in body
+    # 真实值核对：row_factory=Row 未设会导致 _listen_music 静默返回空 → 断言能兜住
+    assert "今日无听歌记录" not in body

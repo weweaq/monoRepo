@@ -203,13 +203,15 @@ SQLite 单库 `data/langTrack.db`（gitignore）。分两层：**原始层**只�
 `music_play` 事件（客户端 `WeiNotificationListener` 从媒体通知拆出，日报「今日常听」消费）payload 字段：
 `pkg/app`（包名/显示名）、`title`=歌名、`singer`/`album`（由 `"歌手 - 专辑"` 拆分）、`state`=`playing|paused`、`durationMs`=歌曲总时长（ms，源自媒体通知 `MediaMetadata.METADATA_KEY_DURATION`，读常量非采样；部分播放器不带则 =0 表示未知）；`ts`=客户端 `System.currentTimeMillis`（postTime 切歌不变）。**注意：payload 内无 `ts` 字段**，report 聚合用事件行 `ts`，勿读 payload.ts。
 
-report 侧聚合（`report._listen_music`，返回结构化 dict）——**粗档"听歌时长/时段"口径**：代码把这些事件按歌合并成 run（同一首歌连续进度事件并入一段，不重复计数），然后：
-- `ranking[]`：歌×次数 Top10，每条含 `window_min` = 该曲"在位近似分钟"（首事件 → 下一首不同歌首事件；当天末首为开区间，用其末事件估算）。
+report 侧聚合（`report._listen_music`，返回结构化 dict）——**粗档"听歌时长/时段"口径**：代码先按 `pkg` 分流（`_media_kind`：音乐类 netease/cloudmusic/qqmusic/kugou/kuwo+默认 =**听歌**；视频类 bilibili/douyin/kuaishou/douyutv/huya/youtube =**视频伴音**），再把这些事件按歌合并成 run（同一首歌连续进度事件并入一段，不重复计数），然后：
+- `ranking[]`：听歌曲目×次数 Top10，每条含 `window_min` = 该曲"在位近似分钟"（首事件 → 下一首不同歌首事件；当天末首为开区间，用其末事件估算）。
 - `singer_top`：常听歌手 Top5（按该歌手名下歌出现次数累计）。
 - `sessions[]`：连播段，相邻事件间隔 ≤ `_SESSION_GAP_MS=15min` 判为同一段，含起止 `HH:MM`/歌数/段时长。
 - `hour_hist`：当日听歌时段分布（东八区按小时）。
+- `video_ranking[]` / `video_count`：**视频伴音**（B站/短视频，单列计数，不进音乐画像）。
 口径强调：这是"在位窗口"的非精确估算（暂停挂着不动也算满），供画像看"何时在听/连播多久"；要精确秒数/完整度需客户端后续带 `durationMs`+`positionMs`（细档，未做）。
-结果进 L5 画像快照 `profile["music"]`（即 `ranking` 列表，带 window_min）。
+结果进 L5 画像快照 `profile["music"]`（即 `ranking` 列表，带 window_min；因分流，仅含真正听歌）。
+`durationMs`（v1.0.13 起，读媒体会话真实总长；`_listen_music` 目前不消费，保留作后续完整度启发）。日报正文经信息包 `〔今日·听歌与视频伴音〕` 块（`daily_info_pack._build_media`，cap 900）把网易云听歌与 B站视频伴音分开呈现给 LLM。
 
 旧库迁移：`_add_timestamp_columns`（storage.py:37-59）对三张表补 `created_at/updated_at` 并用各自业务时间列回填东八区可读时间。
 

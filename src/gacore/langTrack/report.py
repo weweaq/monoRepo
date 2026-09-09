@@ -780,6 +780,52 @@ def _rhythm_weather(conn: sqlite3.Connection, day: str, device_id: str | None = 
 _SESSION_GAP_MS: int = 15 * 60000
 
 
+def _media_kind(pkg: str) -> str:
+    """music_play 事件分流：音乐类 App=听歌，视频/直播类 App=视频伴音（不污染音乐画像）。"""
+    p = (pkg or "").lower()
+    if any(k in p for k in ("netease", "cloudmusic", "qqmusic", "kugou", "kuwo")):
+        return "music"
+    if any(k in p for k in ("bilibili", "bili", "douyin", "kuaishou", "douyutv", "huya", "youtube")):
+        return "video"
+    return "music"
+
+
+def _hhmm(ms: int) -> str:
+    return datetime.datetime.fromtimestamp(ms / 1000, _TZ_CST).strftime("%H:%M")
+
+
+def _split_sessions(runs: list[list], gap_ms: int = _SESSION_GAP_MS) -> list[dict]:
+    """连播段：相邻 run 间距超过阈值判为断开，返回带起止时刻/歌数的段列表。"""
+    sessions: list[list] = []
+    cur: list[list] = []
+    prev_end: int | None = None
+    for run in runs:
+        if prev_end is not None and cur and run[2] - prev_end > gap_ms:
+            sessions.append(cur)
+            cur = []
+        cur.append(run)
+        prev_end = run[3]
+    if cur:
+        sessions.append(cur)
+    return [
+        {
+            "start": _hhmm(seg[0][2]),
+            "end": _hhmm(seg[-1][3]),
+            "song_count": len(seg),
+            "duration_min": round((seg[-1][3] - seg[0][2]) / 60000, 1),
+        }
+        for seg in sessions
+    ]
+
+
+def _hour_hist(runs: list[list]) -> list[tuple[str, int]]:
+    """时段分布（东八区按小时）。"""
+    hour_cnt: dict[str, int] = defaultdict(int)
+    for _t, _s, start, _e in runs:
+        hour_cnt[datetime.datetime.fromtimestamp(start / 1000, _TZ_CST).strftime("%H:00")] += 1
+    return sorted(((h, n) for h, n in hour_cnt.items()))
+
+
 def _listen_music(conn: sqlite3.Connection, day: str, device_id: str | None = None) -> dict:
     """今日听歌记录：聚合当日 music_play 事件（网易云等，客户端通知监听拆出），
     作 C1 人物画像的一环。粗档：事件驱动的"听歌时长/时段"近终估算（非精确秒数）。
@@ -796,7 +842,10 @@ def _listen_music(conn: sqlite3.Connection, day: str, device_id: str | None = No
     """
     day_start_ms = int(datetime.datetime.fromisoformat(f"{day} 00:00").timestamp()) * 1000
     day_end_ms = day_start_ms + 86400000
-    empty = {"ranking": [], "singer_top": [], "sessions": [], "hour_hist": []}
+    empty = {
+        "ranking": [], "singer_top": [], "sessions": [], "hour_hist": [],
+        "video_ranking": [], "video_count": 0,
+    }
     dev_frag, dev_args = _dev_bind(device_id)
     rows = conn.execute(
         f"SELECT ts, payload FROM events WHERE type='music_play' AND ts>=? AND ts<?"
@@ -806,9 +855,8 @@ def _listen_music(conn: sqlite3.Connection, day: str, device_id: str | None = No
     if not rows:
         return empty
 
-    # 时间线：同一首歌的连续事件合并为一段 (title, singer, start_ms, end_ms)。
-    # 切歌（标题变）会触发通知更新，故不同歌必产生新 run。
-    runs: list[list] = []
+    # 时间线：同一首歌连续事件合并为一段 (title, singer, start_ms, end_ms)；按 pkg 分流听歌/伴音。
+    runs: dict[str, list[list]] = {"music": [], "video": []}
     for r in rows:
         try:
             pl = json.loads(r["payload"])
@@ -818,97 +866,72 @@ def _listen_music(conn: sqlite3.Connection, day: str, device_id: str | None = No
         singer = (pl.get("singer") or "").strip()
         if not title:
             continue
+        bucket = runs[_media_kind(pl.get("pkg") or "")]
         ts = r["ts"]
-        if runs and runs[-1][0] == title and runs[-1][1] == singer:
-            runs[-1][3] = ts  # 同一首歌的进度刷新事件，仅扩展 run 末端
+        if bucket and bucket[-1][0] == title and bucket[-1][1] == singer:
+            bucket[-1][3] = ts  # 同一首歌的进度刷新事件，仅扩展 run 末端
         else:
-            runs.append([title, singer, ts, ts])
-    if not runs:
-        return empty
+            bucket.append([title, singer, ts, ts])
+    music_runs = runs["music"]
+    video_runs = runs["video"]
+    empty_music = {"ranking": [], "singer_top": [], "sessions": [], "hour_hist": []}
 
-    # 每首歌在位窗口：到下一首首事件为止；末段开放（用其末事件 end）。
-    song_count: dict[str, int] = defaultdict(int)
-    song_window: dict[str, int] = defaultdict(int)  # ms
-    singer_of: dict[str, str] = {title: singer for title, singer, _, _ in runs}
-    for i, (title, _singer, start, end) in enumerate(runs):
-        song_count[title] += 1
-        nxt_start = runs[i + 1][2] if i + 1 < len(runs) else end
-        song_window[title] += max(0, nxt_start - start)
-
-    ranking = sorted(song_count, key=lambda t: -song_count[t])[:10]
-    ranking_out = [
-        {
-            "title": t,
-            "singer": singer_of.get(t, ""),
-            "count": song_count[t],
-            "window_min": round(song_window[t] / 60000, 1),
+    # 听歌（音乐类 App）：在位窗口/常听歌手/连播/时段。
+    if not music_runs:
+        music_view = dict(empty_music)
+    else:
+        song_count: dict[str, int] = defaultdict(int)
+        song_window: dict[str, int] = defaultdict(int)  # ms
+        singer_of: dict[str, str] = {t: s for t, s, _, _ in music_runs}
+        for i, (title, _s, start, end) in enumerate(music_runs):
+            song_count[title] += 1
+            nxt_start = music_runs[i + 1][2] if i + 1 < len(music_runs) else end
+            song_window[title] += max(0, nxt_start - start)
+        ranking = sorted(song_count, key=lambda t: -song_count[t])[:10]
+        ranking_out = [
+            {"title": t, "singer": singer_of.get(t, ""), "count": song_count[t],
+             "window_min": round(song_window[t] / 60000, 1)}
+            for t in ranking
+        ]
+        singer_ms: dict[str, int] = defaultdict(int)
+        for title, singer, _, _ in music_runs:
+            if singer:
+                singer_ms[singer] += 1
+        singer_top = sorted(((s, c) for s, c in singer_ms.items() if s), key=lambda x: -x[1])[:5]
+        music_view = {
+            "ranking": ranking_out,
+            "singer_top": singer_top,
+            "sessions": _split_sessions(music_runs),
+            "hour_hist": _hour_hist(music_runs),
         }
-        for t in ranking
+
+    # 视频伴音（B站/短视频等）：仅计数，控制台单独列，不进音乐画像。
+    video_count: dict[tuple[str, str], int] = defaultdict(int)
+    for title, singer, _, _ in video_runs:
+        video_count[(title, singer)] += 1
+    video_ranking = [
+        {"title": t, "singer": s, "count": c}
+        for (t, s), c in sorted(video_count.items(), key=lambda x: -x[1])[:10]
     ]
 
-    # 常听歌手：按该歌手名下歌出现次数累计（同一首歌多个进度事件仍计一次）。
-    singer_ms: dict[str, int] = defaultdict(int)
-    for title, singer, _, _ in runs:
-        if singer:
-            singer_ms[singer] += 1
-    singer_top = sorted(
-        ((s, cnt) for s, cnt in singer_ms.items() if s),
-        key=lambda x: -x[1],
-    )[:5]
-
-    # 连播段：相邻 run 间距超过阈值判为断开。
-    sessions: list[list] = []
-    cur: list[list] = []
-    prev_end: int | None = None
-    for run in runs:
-        if prev_end is not None and cur and run[2] - prev_end > _SESSION_GAP_MS:
-            sessions.append(cur)
-            cur = []
-        cur.append(run)
-        prev_end = run[3]
-    if cur:
-        sessions.append(cur)
-
-    def _hhmm(ms: int) -> str:
-        return datetime.datetime.fromtimestamp(ms / 1000, _TZ_CST).strftime("%H:%M")
-
-    sessions_out = [
-        {
-            "start": _hhmm(seg[0][2]),
-            "end": _hhmm(seg[-1][3]),
-            "song_count": len(seg),
-            "duration_min": round((seg[-1][3] - seg[0][2]) / 60000, 1),
-        }
-        for seg in sessions
-    ]
-
-    # 时段分布（东八区按小时）。
-    hour_cnt: dict[str, int] = defaultdict(int)
-    for _title, _singer, start, _end in runs:
-        hour_cnt[datetime.datetime.fromtimestamp(start / 1000, _TZ_CST).strftime("%H:00")] += 1
-    hour_hist = sorted(((h, n) for h, n in hour_cnt.items()))
-
-    # 控制台输出：沿用既有块，追加时长/时段/连播。
+    # 控制台输出：听歌 + 视频伴音 两块分开。
     print("\n■ 今日常听（音乐）")
-    for e in ranking_out:
+    for e in music_view["ranking"]:
         disp = f"《{e['title']}》" + (f" - {e['singer']}" if e["singer"] else "")
         print(f"  · {disp} × {e['count']}（约 {e['window_min']} 分钟）")
-    if singer_top:
-        print("  常听歌手: " + " / ".join(f"{s}({c})" for s, c in singer_top))
-    if sessions_out:
-        seg_desc = "、".join(
-            f"{s['start']}-{s['end']}({s['song_count']}首)" for s in sessions_out
-        )
-        print("  连播段: " + seg_desc)
-    if hour_hist:
-        print("  时段: " + " / ".join(f"{h}({n})" for h, n in hour_hist))
+    if music_view["singer_top"]:
+        print("  常听歌手: " + " / ".join(f"{s}({c})" for s, c in music_view["singer_top"]))
+    if music_view["sessions"]:
+        print("  连播段: " + "、".join(f"{s['start']}-{s['end']}({s['song_count']}首)" for s in music_view["sessions"]))
+    if music_view["hour_hist"]:
+        print("  时段: " + " / ".join(f"{h}({n})" for h, n in music_view["hour_hist"]))
+    if video_ranking:
+        print("\n■ 视频伴音（B站等）")
+        for e in video_ranking:
+            print(f"  · 《{e['title']}》× {e['count']}")
+        print(f"  计 {len(video_runs)} 条事件、{len(video_count)} 个不同视频")
 
-    return {
-        "ranking": ranking_out,
-        "singer_top": singer_top,
-        "sessions": sessions_out,
-        "hour_hist": hour_hist,
-    }
+    return {**music_view, "video_ranking": video_ranking, "video_count": len(video_count)}
 
 
 def _write_snapshot(

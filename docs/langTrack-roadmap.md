@@ -2810,6 +2810,22 @@ un_job(for_day=...)。
 
 `src/gacore/tools/email_tools.py`：`_build_message` 里附件 `MIMEApplication(..., _encoder=lambda x: x)` 用恒等"编码器"，把二进制附件（.apk）的原始字节什么都不改地平铺进邮件，导致 SMTP `as_string().encode('ascii')` 在二进制字节处抛 `UnicodeEncodeError`。修法：去掉恒等 `_encoder`，走默认 **base64** 编码（application 部件自带 `Content-Transfer-Encoding: base64`），ascii-safe。`test_tools_email.py` 18 passed 无回归；顺带把 v1.0.12 APK 以邮件附件发出（attachment_count=1）。
 
+## 2026-09-08：听歌/视频伴音分离 + 日报分开展示
+
+**背景**：music_play 按 `CATEGORY_TRANSPORT` 识别媒体通知后，B站播放等视频/短视频 App 也混进"今日常听"，污染音乐画像（真实 9/8 里 00:02 一组全是 B 站解说视频标题）。
+
+**改动（服务端，无需动客户端）**
+1. `report._listen_music` 按 `pkg` 分流：音乐类（netease/cloudmusic/qqmusic/kugou/kuwo + 默认）=**听歌**，视频类（bilibili/douyin/kuaishou/douyutv/huya/youtube）=**视频伴音**。听歌 ranking/singer_top/sessions/hour_hist 不变；新增 `video_ranking`/`video_count` 只装视频伴音。`profile["music"]` 因此更纯净。
+2. 抽 `_media_kind`/`_split_sessions`/`_hour_hist`/`_hhmm` 公共函数，主体逻辑复用。
+3. `daily_info_pack` 新增 `〔今日·听歌与视频伴音〕` 源块（`_build_media`，调 `_listen_music` 读 langTrack.db，分两节文本），注册进 builders 与 caps（`_MEDIA_CAP=900`），让日报正文能把"网易云听歌"与"B站视频伴音"分开展示。
+
+**验证**：真实 9/8 分离正确——听歌全是网易云歌（MC HotDog/陶喆/RADWIMPS 等），视频伴音全是 B 站标题；`test_langTrack_report_device.py` 20 passed（新增 B站进视频不进听歌用例 + 空天断言补键），全量 langTrack 测试 exit 0；ruff 新增行零告警（report.py 既有 12 条 DTZ006/BLE001 未动）。
+
+**待办更新**
+- [x] 日报"今日常听"按 pkg 分离（网易云听歌 / B站伴音）。
+- [ ] 重启 gacore 加载新代码后，23:50 定时日报正文分开展示（含 `〔今日·听歌与视频伴音〕`）。
+- [ ] 提交前 codegraph sync + 两个仓库 commit。
+
 ## 2026-09-08：durationMs 恒 0 根因定位 + v1.0.13 修复
 
 **根因**：媒体通知（网易云等）extras 里的元数据（`MediaSessionLegacyHelper.getOldMetadata`）**只放 title/artist/album，刻意不含 DURATION 键**。v1.0.12 用 `extras.getLong(METADATA_KEY_DURATION)` 必然取默认 0——不是歌没有时长，是取错了地方（真实 9/7 截图 18 条全 0、title/singer 正常佐证）。

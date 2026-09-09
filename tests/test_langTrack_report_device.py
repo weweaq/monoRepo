@@ -327,16 +327,19 @@ class TestListenMusic:
     """
 
     def _insert(self, path, events):
-        """events: [(ts, title, singer), ...] 写入 dev1 的 music_play 事件。"""
+        """events: [(ts, title, singer[, pkg]), ...] 写入 dev1 的 music_play 事件。"""
         conn = sqlite3.connect(path)
         conn.executescript(storage._SCHEMA)
-        for ts, title, singer in events:
+        for evt in events:
+            ts, title, singer, *rest = evt
+            pkg = rest[0] if rest else None
+            payload = {"title": title, "singer": singer, "state": "playing"}
+            if pkg:
+                payload["pkg"] = pkg
             conn.execute(
                 "INSERT INTO events(device_id, ts, type, payload, received_at) "
                 "VALUES (?,?,?,?,?)",
-                ("dev1", ts, "music_play",
-                 json.dumps({"title": title, "singer": singer, "state": "playing"}),
-                 ts),
+                ("dev1", ts, "music_play", json.dumps(payload), ts),
             )
         conn.commit()
         conn.close()
@@ -381,7 +384,28 @@ class TestListenMusic:
             rep = rpt._listen_music(conn, DAY, device_id="dev1")
         finally:
             conn.close()
-        assert rep == {"ranking": [], "singer_top": [], "sessions": [], "hour_hist": []}
+        assert rep == {"ranking": [], "singer_top": [], "sessions": [], "hour_hist": [],
+                       "video_ranking": [], "video_count": 0}
+
+    def test_bilibili_split_to_video_ranking(self, isolated_db_path):
+        """B站/视频类 App 的 music_play 进 video_ranking，不进听歌 ranking。"""
+        events = [
+            (_ts_full(9, 0, 0), "真歌A", "歌手A", "com.netease.cloudmusic"),
+            (_ts_full(9, 3, 0), "B站解说标题", "某UP", "tv.danmaku.bili"),
+            (_ts_full(9, 3, 1), "B站解说标题", "某UP", "tv.danmaku.bili"),  # 同视频进度刷新
+            (_ts_full(9, 6, 0), "真歌B", "歌手B", "com.netease.cloudmusic"),
+        ]
+        self._insert(isolated_db_path, events)
+        conn = sqlite3.connect(isolated_db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            rep = rpt._listen_music(conn, DAY, device_id="dev1")
+        finally:
+            conn.close()
+        assert [e["title"] for e in rep["ranking"]] == ["真歌A", "真歌B"]
+        assert [e["title"] for e in rep["video_ranking"]] == ["B站解说标题"]
+        assert rep["video_count"] == 1
+        assert rep["video_ranking"][0]["count"] == 1
 
     def test_same_song_progress_not_overcounted(self, isolated_db_path):
         """同一首歌多个进度事件只计一次次数，但在位窗口并入末事件。"""
