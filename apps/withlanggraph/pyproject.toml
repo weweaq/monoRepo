@@ -54,6 +54,9 @@ select = ["E4", "E7", "E9", "F"]
 [tool.ruff.lint.per-file-ignores]
 # langTrack 测试惯例：文件头先做路径准备再 import；clock 用 lambda 简写
 "tests/*" = ["E402", "E731"]
+# daily_info_pack：tools .func import 刻意置中（懒加载避免循环依赖 +
+# 模块级名字供测试 monkeypatch，见文件 docstring）；不属误报，保留豁免。
+"src/gacore/daily_info_pack.py" = ["E402"]
 # 存量告警豁免：这些文件在原仓库有未提交 WIP，mono 侧不改动以免分叉；
 # 待 subtree 同步上游修复后专项清理（见 ROADMAP「lint 债务」）。
 "src/gacore/langTrack/geocode.py" = ["F841"]

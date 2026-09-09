@@ -11,12 +11,13 @@ langTrack 数据链路服务端：`/ingest` 接收 + ETL 加工 + 报告 + dashb
 
 ## 与上游的同步约定
 
-- 上游 HEAD `b127a2e`（2026-09-04 迁入），此后用 `git subtree pull` 同步
-- 上游有未提交 WIP（qq.py / dashboard.py / geocode.py / spatial_profile.py /
-  scheduler.py / middleware.py 等及其测试）——**这些文件 mono 侧不改**，
-  避免同步冲突；mono 侧问题一律走配置豁免 + 待办登记
+- 上游 HEAD `b127a2e`（2026-09-04 迁入），2026-09-09 已 `subtree pull` 同步至
+  `834f8bb`（日报v2 全量合入，见下方执行记录）
+- 上游的未提交 WIP（qq.py / dashboard.py / geocode.py / spatial_profile.py /
+  scheduler.py / middleware.py / report.py / email_tools.py）已随日报v2 全部合入
+  并同步到 mono——**这批文件 mono 侧零改动**，问题一律走配置豁免 + 待办登记
 - 下次同步后需要复查：根 `conftest.py` 的 `_KNOWN_UPSTREAM_FAILURES`（qq 角色卡
-  切换用例，上游修复合入后移除）与 lint 债务清单
+  切换 + checkSelf 4 个 schema 漂移用例，上游修复合入后移除）与 lint 债务清单
 
 ## 待办
 
@@ -79,3 +80,31 @@ langTrack 数据链路服务端：`/ingest` 接收 + ETL 加工 + 报告 + dashb
   字节才看清真相
 
 **待办更新**：见上表（lint 债务、ruff 升级评估、混合换行、amap-sdk、qq extra）。
+
+### 2026-09-09 — 同步上游日报v2（subtree pull 至 834f8bb）
+
+**背景**：原仓库在迁入后又有 3 个提交 + 一批未提交 WIP（日报v2：每日信息包、
+轨迹静态图、QQ/邮件/调度升级、报告事件流增强、email 附件 base64 修复）。
+用户决定切到 mono 使用，需先把这些新改动同步进来。
+
+**已完成**：
+- 原仓库把 5 处 WIP 提交为 `834f8bb`（report.py 事件流 + email_tools 默认 base64
+  修复 + test_langTrack_report_device + 路书/tech 同步）
+- mono `git subtree pull --prefix=apps/withlanggraph` 干净合并（ort 策略，无冲突，
+  merge commit `088a827`），27 文件 +4216/-111：daily_info_pack / trajectory_map /
+  dashboard / scheduler / middleware / qq / geocode / report 等全部同步
+- 新增 lint 豁免：上游日报v2 核心模块 `src/gacore/daily_info_pack.py` 的 5 处
+  E402——tools `.func` import 刻意置中（懒加载避免循环依赖 + 模块级名字供测试
+  monkeypatch），docstring 有明确说明，非误报，per-file-ignores 保留豁免
+
+**实测验证**：
+- `tools/scripts/check.ps1` 全绿：ruff 0 错误；pytest **1067 passed, 5 skipped**
+  （5 个 skip 仍为根 conftest 既有登记；withlanggraph 侧新增日报v2 用例后
+  约 1015+ 用例，全部通过，无新增失败）
+
+**偏差说明**：
+- 上游 `daily_info_pack.py` 等新文件的 import 风格与流程 lint 基线（E4/E7/E9/F）
+  冲突仅 E402 一处，属刻意设计，豁免而非改上游
+- 服务切换（原仓库 → mono）见 dev-console services.json 变更记录
+
+**待办更新**：amap-sdk 提炼的上游 geocode.py WIP 已合入，可重启评估。
