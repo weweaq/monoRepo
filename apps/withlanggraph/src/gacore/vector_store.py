@@ -43,6 +43,12 @@ _ENV_DSN: Final = "GACORE_PG_DSN"
 
 _TABLE = "gacore_memory_vectors"
 _DIM = 512
+# Curated "fact portrait": short, retrieval-friendly statements (one fact per line) kept
+# separately from the verbose, timestamped event log in global_mem*.txt. Feeding the
+# vector store ONLY this file yields high-precision semantic recall — a log line like
+# "[2026-09-08T23:53:15+08:00] 生活大事：婚期提前定档..." is noisy for embedding, while
+# "婚期：2026-09-12 领证" matches queries like "搬家/婚期/住哪" far better (阶段二 方案2).
+_FACTS_FILE: Final = "global_mem_facts.txt"
 
 
 def _dsn() -> str:
@@ -116,8 +122,8 @@ def nearby(query: str, k: int = 3, threshold: float = 0.5) -> list[dict]:
         return []
     with _cursor() as cur:
         cur.execute(
-            f"SELECT content, chunk_key, embedding <=> %s AS dist "
-            f"FROM {_TABLE} WHERE embedding <=> %s < %s ORDER BY dist LIMIT %s;",
+            f"SELECT content, chunk_key, embedding <=> %s::vector AS dist "
+            f"FROM {_TABLE} WHERE embedding <=> %s::vector < %s ORDER BY dist LIMIT %s;",
             (qvec, qvec, threshold, k),
         )
         rows = cur.fetchall()
@@ -145,10 +151,18 @@ def sync_portrait(cfg: Config) -> dict:
 
 
 def _portrait_lines(cfg: Config, limit: int = 2000) -> list[str]:
-    """Flatten the portrait files into a deduped list of non-empty lines."""
+    """Flatten the portrait into a deduped list of non-empty lines.
+
+    Prefers the curated facts file (``global_mem_facts.txt``) when it exists — short,
+    retrieval-friendly statements give the vector store clean semantic recall. Falls back
+    to the verbose timestamped event log (``global_mem*.txt``) when no facts file exists
+    yet, so the pipeline degrades gracefully before the facts portrait is seeded.
+    """
     seen: set[str] = set()
     out: list[str] = []
-    for path in sorted(cfg.memory_dir.glob("global_mem*.txt")):
+    facts = cfg.memory_dir / _FACTS_FILE
+    sources = [facts] if facts.is_file() else sorted(cfg.memory_dir.glob("global_mem*.txt"))
+    for path in sources:
         if not path.is_file():
             continue
         for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():

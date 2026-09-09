@@ -2863,3 +2863,38 @@ un_job(for_day=...)。
 **待办更新**
 - [x] 日报补跑 CLI + 邮件主题补跑标记（mono 单写后首个功能）。
 - [ ] 真实补跑发邮件路径的主题（`（补跑）`标记）尚待下一次实际补发时人工确认（单测已覆盖逻辑）。
+
+## 2026-09-09：记忆向量检索「方案2」——为召回单独维护事实画像
+
+**背景**：阶段二语义触发（pgvector）端到端初测，暴露 `sync_portrait` 喂**事件日志**
+时的召回质量问题。用户要求「改完必更路书」，故本条把阶段二从"代码就绪"推进到
+"召回可用"的完整方案落实。
+
+**根因（诊断）**：画像主文件 `global_mem*.txt` 是**事件日志式**——每行带
+`[2026-09-08T23:53:15+08:00]` 时间戳前缀 + 长描述，embedding 噪声大。实测：
+- 「搬到朝阳区」误召回「婚期提前定档」(dist 0.478)——不是阈值问题，是画像行形态不适合语义检索
+- 「下周去体检」等查询因画像里根本没有对应"事实句"被阈值挡空
+
+**用户决策**：方案2——**为向量召回单独维护一份简短"事实画像"**，而非重写画像生成。
+
+**改动（mono `apps/withlanggraph/`）**
+1. 新增 `memory/global_mem_facts.txt`：从真实画像提炼 13 行可检索事实（婚姻/居住/
+   作息/生日/工作/环境/兴趣/音乐/消费），每行 `[类别] 事实`。
+2. `vector_store._portrait_lines`：**优先喂 `global_mem_facts.txt`**；不存在则回退
+   `global_mem*.txt`（新旧兼容，未 seed 前优雅降级）。
+3. `memory_maintenance.apply`：MERGE/NEW 写盘后 best-effort 镜像简短事实到 facts
+   文件（`_as_fact_statement`，无时间戳），向量库近实时跟随画像；失败仅告警。
+4. `nearby` 修 SQL：`embedding <=> %s` → `<=> %s::vector`（psycopg 把 python list
+   误绑成 `double precision[]`，报 `operator does not exist: vector <=>`）。
+
+**实测验证（真实 pgvector，非 mock）**
+- `sync_portrait` 只喂 13 行 facts（非 106 行日志）。
+- 召回质量大幅提升：`婚期是什么`→`[婚姻] 婚期 2026-09-12 领证`(0.344)、
+  `今晚又熬夜`→`[作息] 深夜工作`(0.320)、`搬到朝阳`→`[居住] 南京观云润府`(0.544)、
+  `我老婆叫什么`→`[婚姻] 配偶：尚婧`(0.547)。初版日志误召回噪声被根除。
+- 单测 21 passed（memory_maintenance + vector_trigger），ruff 零告警。
+
+**待办更新**
+- [x] 阶段二语义触发：本地 embedding 模型 + pgvector 召回跑通（方案2 事实画像）。
+- [ ] `global_mem_facts.txt` 随画像持续充实（当前 13 条核心事实锚点 vs 事件日志全量），阈值 0.50-0.55 需真实数据再调。
+- [ ] 真实对话若干轮后复核 CombinedTrigger 的 keyword/vector 命中比例与误触发。

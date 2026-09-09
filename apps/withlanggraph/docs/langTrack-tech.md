@@ -1196,12 +1196,14 @@ python -m gacore.rerun --day 2026-09-08 --job weekly-summary
   - 连接：psycopg3 + `register_vector(conn)`（启用 python list↔vector 绑定）；DSN 默认本地，`GACORE_PG_DSN` env 可覆盖。
   - `ensure_schema()`：幂等建表 `gacore_memory_vectors(id, content, chunk_key, embedding vector(512), updated_at, UNIQUE(content, chunk_key))` + `CREATE EXTENSION IF NOT EXISTS vector`。
   - `upsert_line(content, chunk_key, embedding)`：`ON CONFLICT DO NOTHING`（去重，不覆盖历史）。
-  - `nearby(query, k=3, threshold=0.45)`：`embedding <=> %s` cosine 距离升序，返回 `< threshold` 的 `{content, chunk_key, dist}`。
-  - `sync_portrait(cfg)`：batch embed 全画像行，逐条 upsert（MERGE/NEW 后调用，近实时同步画像）。
+  - `nearby(query, k=3, threshold=0.45)`：`embedding <=> %s` cosine 距离升序，返回 `< threshold` 的 `{content, chunk_key, dist}`。**须 `%s::vector` 显式类型转换**（否则 psycopg 把 list 绑成 `double precision[]` 报 `operator does not exist: vector <=>`）。
+  - `sync_portrait(cfg)`：batch embed 画像行，逐条 upsert（MERGE/NEW 后调用，近实时同步画像）。
+  - **`_portrait_lines(cfg)`（方案2 画像源策略）**：**优先喂 `memory/global_mem_facts.txt`**（简短可检索事实句，每行一条，如 `[婚姻] 婚期（最新修订）：2026-09-12（周六）领证`）；该文件不存在时回退到 `global_mem*.txt` 事件日志。原因：日志行带 `[2026-09-08T...]` 时间戳前缀 + 长描述，embedding 噪声大，导致"搬家到朝阳"回忆到不相关的"婚期定档"。事实画像让召回精准（实测：`婚期是什么`→`婚期 2026-09-12` dist 0.344）。
 - `memory_maintenance.py`（改）：
   - `VectorTrigger`（新）：向量召回触发。`probe(text)` → `nearby` 命中即 `vector_hit`，`context` 携带召回画像行。后端异常优雅降级为 `vector_unavailable`（triggered=False，绝不抛）。
   - `CombinedTrigger`（新）：`keyword OR vector`，**keyword 优先**（命中即省掉 vector、省 LLM）。
   - `maintain_once`：trigger 的 `context`（召回行）注入 judge 的 portrait 前，让 MERGE 判定对着最相关事实做。
+  - `apply()`：MERGE/NEW 写 `global_mem.txt`/`global_mem_insight.txt` 外，**best-effort 镜像一条简短事实到 `global_mem_facts.txt`**（`_as_fact_statement`：`[struct·field] + fact`，不带时间戳），使向量库近实时跟随画像演进;写失败仅告警不影响主 turn。
 - `graph.py` `memory_maintain` 节点（改）：改用 `CombinedTrigger`；画像**实际 updated 后** best-effort `_sync_portrait_best_effort`（任何失败吞掉，绝不影响 turn）。
 
 ### 数据流（修复当日触发 + 沉淀后写库）
@@ -1211,11 +1213,13 @@ flowchart LR
     P0 -->|keyword 命中| J[LLM judge: MERGE/NEW/NOOP]
     P0 -->|keyword 未中, vector 召回命中| J
     P0 -->|两者皆未中| SKIP[return {} 零开销]
-    J -->|MERGE/NEW| WR[写 global_mem*.txt]
-    WR --> SYNC[best-effort sync_portrait → pgvector]
+    J -->|MERGE/NEW| WR[写 global_mem.txt + insight]
+    WR --> MF[gacore.apply 镜像简短事实 → global_mem_facts.txt]
+    J -->|MERGE/NEW| MF
+    MF --> SYNC[best-effort sync_portrait 优先喂 facts → pgvector]
 ```
 - **触发时**：向量召回行（语义相近的画像事实）作为 context 喂给 LLM judge，不写库。
-- **落库**：画像更新（MERGE/NEW 落盘）后，batch 把全画像重新嵌入入库，供后续消息语义召回。
+- **落库**：画像更新（MERGE/NEW 落盘）后，先镜像简短事实到 `global_mem_facts.txt`，再 best-effort batch 嵌入入库，供后续消息语义召回。**向量库只喂事实画像**，事件日志不直接进库（避免时间戳噪声）。
 
 ### 单测（`tests/test_vector_trigger.py`，不依赖真实模型/PG，mock 后端）
 - VectorTrigger：空文本不触发；语义命中带 context；无匹配静默；后端故障降级 `vector_unavailable`。
@@ -1227,3 +1231,8 @@ flowchart LR
 
 ### 待实测（依赖装毕后）
 `uv sync --extra vector` 装完 torch 后：embedding 冒烟 + `sync_portrait` 对真实画像入库 + `VectorTrigger` 端到端一轮，断言"搬家到朝阳区"能召回"家住朝阳"。状态见 ROADMAP 待办。
+
+**_已实测（2026-09-09）**：
+- embedding 冒烟：本地 `D:\models\bge-small-zh-v1.5` 秒载（safetensors），`dim=512`；「搬去朝阳」↔「家住朝阳」cos 0.70、「↔吃饺子」0.43——阈值 0.50–0.55 合适。
+- `nearby` 修 `%s::vector` 后对真实 pgvector 查询正常。
+- **方案2 事实画像**：`sync_portrait` 喂 13 行 facts（非 106 行日志），召回质量大幅提升：`婚期是什么`→`[婚姻] 婚期 2026-09-12 领证` (0.344)、`今晚又熬夜`→`[作息] 深夜工作` (0.320)、`搬到朝阳`→`[居住] 现居南京观云润府` (0.544)。初版喂事件日志时，`搬朝阳`误召回`婚期定档`(0.478)——事实画像根除该噪声。

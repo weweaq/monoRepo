@@ -43,6 +43,10 @@ from gacore.jsonl_logger import get_logger
 
 _FACTS_FILE: Final = "global_mem.txt"
 _INSIGHTS_FILE: Final = "global_mem_insight.txt"
+# Retrieval-ready fact portrait (see vector_store._portrait_lines): short statements the
+# vector store feeds on. MERGE/NEW keep a compact mirror here so semantic recall stays
+# fresh without depending on the verbose timestamped event log.
+_RETRIEVAL_FACTS: Final = "global_mem_facts.txt"
 
 _logger = get_logger("memory_maintenance")
 
@@ -371,6 +375,13 @@ def apply(verdict: Verdict, cfg: Config) -> dict:
             insight_line = f"[{day}] insight: {cleaned_fact}"
         _append(cfg.memory_dir / _FACTS_FILE, fact_line)
         _append(cfg.memory_dir / _INSIGHTS_FILE, insight_line)
+        # Mirror a compact, retrieval-friendly statement into the facts portrait so the
+        # vector store (which feeds on global_mem_facts.txt) tracks this update in
+        # near-real-time. Best-effort: a write failure must not fail the main turn.
+        try:
+            _append(cfg.memory_dir / _RETRIEVAL_FACTS, _as_fact_statement(verdict))
+        except OSError as exc:
+            _logger.warning("facts portrait mirror failed", action=verdict.action, error=str(exc))
         return {
             "action": verdict.action,
             "updated": True,
@@ -380,6 +391,17 @@ def apply(verdict: Verdict, cfg: Config) -> dict:
     except OSError as exc:
         _logger.warning("memory_maintenance apply failed", action=verdict.action, error=str(exc))
         return {"action": "ERROR", "updated": False, "paths": [], "error": str(exc)}
+
+
+def _as_fact_statement(verdict: Verdict) -> str:
+    """Turn a verdict into one compact, retrieval-friendly statement for the facts portrait.
+
+    Uses the [struct·field] hint as a category tag when present (e.g. ``[婚姻]``), else a
+    bare revised fact. Kept short so the embedding model sees a clean semantic unit, not a
+    long event-log line.
+    """
+    category = f"[{verdict.field_hint}]" if verdict.field_hint else ""
+    return f"{category} {verdict.fact}".strip()
 
 
 def _strip_std_prefix(fact: str) -> str:
