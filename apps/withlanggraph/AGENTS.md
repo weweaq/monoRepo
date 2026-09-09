@@ -20,6 +20,15 @@
   
   
 
+## 唯一开发源头（2026-09-09 起）
+
+- **原仓库（独立 WithLangGraph git 仓库）已停止更新**，所有改动一律在本仓库
+  （mono 的 `apps/withlanggraph/`）进行，不再回写原仓库。
+- 因此下面所有文档路径（`docs/langTrack-roadmap.md`、`docs/langTrack-tech.md`）
+  均指**本仓库 `apps/withlanggraph/docs/`** 下的文件，以 mono 侧为唯一事实来源。
+- 原仓库仅作为历史参考保留；如后续执行 `git subtree pull` 同步原仓库 HEAD，
+  原仓库已无新改动，不会与本仓库文档冲突。
+
 ## 终极目标（北极星）
 
 本项目的终极目标**不是"存数据"**，而是 **刻画人物画像、打造一个完全懂主人的助手**。
@@ -33,6 +42,7 @@
 ### 改完必更路书
 
 **`docs/langTrack-roadmap.md` 是本项目的数据链路路书（指南 + 工作日志）。**
+**（mono 侧完整路径：`apps/withlanggraph/docs/langTrack-roadmap.md`）**
 
 **每次改动代码（客户端或服务端，哪怕一行）后，必须：**
 

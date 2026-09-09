@@ -2,22 +2,21 @@
 
 > 本文件记录 withlanggraph（gacore / langTrack）在 mono 仓库侧的迁移与集成进度。
 > 格式约定（根规则 R5）：每次改动后追加一条记录，含「背景 / 已完成 / 实测验证 / 偏差说明 / 待办更新」。
-> 上游（原仓库）的日常开发与业务路线图见其自带 `docs/langTrack-roadmap.md`，此处只记 mono 侧事项。
+> 数据链路路书与技术文档统一用 `apps/withlanggraph/docs/`（原仓库已停更，见 AGENTS.md「唯一开发源头」）。
 
 ## 项目背景
 
 langTrack 数据链路服务端：`/ingest` 接收 + ETL 加工 + 报告 + dashboard 展示，
-含 QQ 机器人前端（gacore 包）。上游为独立 git 仓库，通过 `git subtree` 周期性同步。
+含 QQ 机器人前端（gacore 包）。曾为独立 git 仓库，经 `git subtree` 迁入 mono。
 
-## 与上游的同步约定
+## 与上游的同步约定（原仓库已冻结）
 
-- 上游 HEAD `b127a2e`（2026-09-04 迁入），2026-09-09 已 `subtree pull` 同步至
+- 上游 HEAD `b127a2e`（2026-09-04 迁入），2026-09-09 `subtree pull` 同步至
   `834f8bb`（日报v2 全量合入，见下方执行记录）
-- 上游的未提交 WIP（qq.py / dashboard.py / geocode.py / spatial_profile.py /
-  scheduler.py / middleware.py / report.py / email_tools.py）已随日报v2 全部合入
-  并同步到 mono——**这批文件 mono 侧零改动**，问题一律走配置豁免 + 待办登记
-- 下次同步后需要复查：根 `conftest.py` 的 `_KNOWN_UPSTREAM_FAILURES`（qq 角色卡
-  切换 + checkSelf 4 个 schema 漂移用例，上游修复合入后移除）与 lint 债务清单
+- **2026-09-09 起原仓库停止更新**，后续开发一律在 mono 的 `apps/withlanggraph/`
+  直接进行，不再等待/回写上游（决策见执行记录「上游冻结 + mono 单写决策」）
+- 既知遗留（原路书登记的 root conftest `_KNOWN_UPSTREAM_FAILURES`：qq 角色卡
+  切换 + checkSelf 4 个 schema 漂移用例）改为在 mono 侧直接修复后移除。
 
 ## 待办
 
@@ -38,6 +37,9 @@ langTrack 数据链路服务端：`/ingest` 接收 + ETL 加工 + 报告 + dashb
 - [x] 带 `--extra qq` 后 test_qq 全量回归（2026-09-09）：**21 passed, 1 skipped**，
       skip 为既知上游失败（qq 角色卡切换 checkpointer adelete_thread），无新增暴露
       （见下方执行记录「门禁 --extra qq 生效验证 + 服务重启」）
+- [x] 原仓库停止更新、mono 单写（决策定案，2026-09-09）：原仓库不再回写，
+      路书/tech（`apps/withlanggraph/docs/`）与 ROADMAP/AGENTS.md 均以 mono 为准。
+      见下方执行记录「上游冻结 + mono 单写决策」
 
 ---
 
@@ -173,3 +175,26 @@ qq-botpy 入环境后是否引入新测试失败，并让 langTrack/gacore 以�
   做单实例互斥，修复后第二次启动会静默退出）
 
 **待办更新**：「带 --extra qq 后 test_qq 全量回归」勾选完成。
+
+### 2026-09-09 — 上游冻结 + mono 单写决策
+
+**背景**：前一条待办「同步约定」仍假设原仓库继续演进（含「上游 WIP 合入后
+subtree 同步再整改」等口吻）。用户拍板：**原仓库停止更新，所有改动都在
+monorepo 里**。需把这一决策写进 AGENTS.md，让文档与代码落地唯一朝代。
+
+**已完成**：
+- `AGENTS.md` 新增「唯一开发源头（2026-09-09 起）」节：原仓库停更，
+  所有改动在 `apps/withlanggraph/`，不再回写原仓库；路书/tech 路径明确指向
+  mono 侧 `apps/withlanggraph/docs/`
+- 路书「改完必更」补全 mono 侧完整路径，消除与旧版相对路径的歧义
+
+**实测验证**：
+- AGENTS.md / ROADMAP.md 均以 mono 为唯一事实来源；原仓库无新改动，
+  后续 `git subtree pull` 不会产生文档冲突
+
+**偏差说明**：
+- 之前多处待办文案带「先在上游做 / 待上游修复后同步」口吻，现决策下这些
+  都改为在 mono 直接做；后续专项整改都基于 mono，不再等上游
+
+**待办更新**：勾选「原仓库停止更新、mono 单写」；lint 债务 / 混合换行 / ruff 评估
+等专项，执行位改为当前 mono 仓库。
