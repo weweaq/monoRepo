@@ -772,6 +772,33 @@ class TestDeliverEmail:
 
         _deliver_email(job, cfg, "reply", None, env=env)  # must not raise
 
+    def test_rerun_subject_carries_for_day(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """历史补跑时主题挂数据日 + 补跑标记，而非发送时刻的 today。"""
+        captured: dict[str, str] = {}
+        monkeypatch.setattr("gacore.tools.email_tools._send_sync", _fake_send_sync(captured))
+        cfg = Config.for_tests(tmp_path)
+        job = Job(name="daily-report", schedule="09:00", prompt="hi", deliver_to="email")
+        env = {"SMTP_USER": "me@qq.com", "SMTP_PASSWORD": "pw"}
+
+        _deliver_email(job, cfg, "reply", None, env=env, for_day="2026-09-08")
+
+        assert "2026-09-08" in captured["subject"]
+        assert "补跑" in captured["subject"]
+
+    def test_same_day_rerun_subject_has_no_marker(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """for_day == today（正常调度路径）时主题保持原样，无补跑标记。"""
+        captured: dict[str, str] = {}
+        monkeypatch.setattr("gacore.tools.email_tools._send_sync", _fake_send_sync(captured))
+        cfg = Config.for_tests(tmp_path)
+        job = Job(name="daily-report", schedule="09:00", prompt="hi", deliver_to="email")
+        env = {"SMTP_USER": "me@qq.com", "SMTP_PASSWORD": "pw"}
+
+        today = datetime.now(UTC).astimezone().date().isoformat()
+        _deliver_email(job, cfg, "reply", None, env=env, for_day=today)
+
+        assert "补跑" not in captured["subject"]
+        assert today in captured["subject"]
+
 
 class TestDeliverRouting:
     """run_job wires deliver_to through _deliver to the right channel."""
@@ -824,6 +851,20 @@ class TestDeliverRouting:
         run_job(job, cfg, graph_runner=lambda p, c, m: "CURRENT_TASK_DONE", for_day="2026-09-05")
 
         assert seen[0]["for_day"] == "2026-09-05"
+
+    def test_run_job_deliver_false_skips_delivery_entirely(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """--no-email 路径：deliver=False 时不走任何投递渠道，但 output 归档仍落盘。"""
+        calls: list[object] = []
+        monkeypatch.setattr("gacore.scheduler._deliver", lambda *a, **k: calls.append(a))
+        monkeypatch.setattr("gacore.scheduler._deliver_email", lambda *a, **k: calls.append(a))
+        cfg = Config.for_tests(tmp_path)
+        job = Job(name="daily-report", schedule="09:00", prompt="hi", deliver_to="email")
+
+        result = run_job(job, cfg, graph_runner=lambda p, c, m: "CURRENT_TASK_DONE", for_day="2026-09-05", deliver=False)
+
+        assert calls == []
+        assert result.error is None
+        assert result.output_path and Path(result.output_path).is_file()
 
 
 class TestLoadJobsEmail:

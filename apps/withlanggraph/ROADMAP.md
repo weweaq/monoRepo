@@ -40,6 +40,9 @@ langTrack 数据链路服务端：`/ingest` 接收 + ETL 加工 + 报告 + dashb
 - [x] 原仓库停止更新、mono 单写（决策定案，2026-09-09）：原仓库不再回写，
       路书/tech（`apps/withlanggraph/docs/`）与 ROADMAP/AGENTS.md 均以 mono 为准。
       见下方执行记录「上游冻结 + mono 单写决策」
+- [x] 日报补跑 CLI：`python -m gacore.rerun --day <YYYY-MM-DD> [--no-email]`
+      （2026-09-09，mono 单写首个功能，见下方执行记录）
+- [ ] 真实补发邮件的 `（补跑）`主题标记人工核看（单测已覆盖，下次补发时确认）
 
 ---
 
@@ -198,3 +201,34 @@ monorepo 里**。需把这一决策写进 AGENTS.md，让文档与代码落地�
 
 **待办更新**：勾选「原仓库停止更新、mono 单写」；lint 债务 / 混合换行 / ruff 评估
 等专项，执行位改为当前 mono 仓库。
+
+### 2026-09-09 — 日报补跑 CLI（mono 单写首个功能）
+
+**背景**：用户反馈 9-08 早间收到的 9-07 日报内容有问题需重发。手工内联复跑
+`run_job(for_day=...)` 验证数据无误后（9-08/9-07 两期均真实跑通），把"补跑某天
+日报"固化为正式 CLI——这是上游冻结、mono 单写后的第一个功能提交。
+
+**已完成**：
+- 新增 `src/gacore/rerun.py`：`python -m gacore.rerun --day 2026-09-08
+  [--job daily-report] [--no-email]`，日期/job 校验，`--no-email` 只归档不投递
+- `scheduler.run_job` 加 `deliver: bool = True`：False 跳过 `_deliver`，
+  output 归档 + daily note 照写
+- `_deliver_email` 主题修正：历史补跑时挂数据日 + `（补跑）`标记，
+  不再挂发送时刻的 today（9-08 重发时主题误标 09-09 的问题一并修掉）
+- 测试 +3：补跑主题 2 例（for_day 标记 / 同日无标记）+ deliver=False
+  路由 1 例；路书与 tech（§9.24）同步
+
+**实测验证**：
+- CLI 冒烟：非法日期 / 不存在 job → exit 2（附可用 job 列表）
+- 真实补跑 9-07 `--no-email`：`delivery skipped (deliver=False)`、
+  归档 `daily-report_20260909_135819.md` 落盘、CURRENT_TASK_DONE 162s
+- `test_scheduler.py` 全量 **70 passed**；ruff 零告警
+- 早前真实补跑 9-08（含邮件重发）已成功，正文数据与截图日报吻合
+  （167 次解锁/3.3h 屏幕/5 段轨迹）
+
+**偏差说明**：
+- tech 文档记载的旧补跑入口 `rerun_daily.py` 从未入库（当时是临时脚本），
+  本次是首个正式入口，tech §9.23 描述已修正
+- 补跑发邮件路径的 `（补跑）`主题标记，单测已覆盖，真实邮件待下次补发人工核看
+
+**待办更新**：新增待办「真实补发邮件的主题标记人工核看」。

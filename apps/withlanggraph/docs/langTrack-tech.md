@@ -1142,7 +1142,7 @@ flowchart TD
 - `run_job` / `_build_job_prompt` / `_deliver` / `_deliver_email` 新增 `for_day: str|None`（补跑历史天，默认 None=今天，向后兼容）：
   - `_build_job_prompt(for_day)`：信息包按历史天组装。
   - `_deliver_email`：daily job 且无错误时，`trajectory_map.render_day_trajectory(conn, day, logs/trajectory/{day}.png)` + `trip_summary_text`，正文追加 `## 当日行程`，轨迹图经 send_email `image_paths=[png]` 内嵌为 `cid:photo0`（出现在邮件末尾）。
-- 补跑入口：根目录 `rerun_daily.py <YYYY-MM-DD> [<YYYY-MM-DD> ...]` → `run_job(job, cfg, for_day=day)`。
+- 补跑入口：**`python -m gacore.rerun --day <YYYY-MM-DD>`**（`src/gacore/rerun.py`，2026-09-09 固化为正式 CLI，见 §9.24；早期临时脚本 `rerun_daily.py` 未入库，已废弃）。
 
 ### 验证
 - 9/5、9/6 轨迹图渲染成功并内嵌两封补跑邮件（`image_count:1`）；9/5 南京→马鞍山跨市 48.1km/164min，9/6 本地三段 7.8km/39min。
@@ -1151,3 +1151,28 @@ flowchart TD
 ### 已知边界
 - 运行中的 gacore 进程为旧代码，重启后才正式生效；补跑用独立新进程。
 - 补跑时 `context.sysprompt` 仍注入"今天"的 fact card（补跑制单天系统提示未切换）；信息包/轨迹本身按对应天，可用于人工回看。
+
+## 9.24 日报补跑 CLI（2026-09-09，mono 单写）
+
+### 命令
+```
+python -m gacore.rerun --day 2026-09-08                  # 补跑并发邮件
+python -m gacore.rerun --day 2026-09-08 --no-email       # 只归档（logs/scheduled + daily note），不投递
+python -m gacore.rerun --day 2026-09-08 --job weekly-summary
+```
+（cwd = `apps/withlanggraph`，用 mono `.venv`；日期非法 / job 名不存在 → exit 2，后者附可用 job 列表）
+
+### 代码路径（`src/gacore/`）
+- `rerun.py`（新）：参数校验 → `load_dotenv` → `load_jobs` → `run_job(job, cfg, for_day=day, deliver=not args.no_email)`。不做任何状态写入（不碰 schedule_state.json，与调度循环互不干扰；避开 23:50 同 job 触发时刻跑即可）。
+- `scheduler.run_job` 加 `deliver: bool = True`：False 时跳过 `_deliver`，output 归档（`logs/scheduled/{job}_{ts}.md`）与 daily note 状态行照写。
+- `scheduler._deliver_email` 主题修正：`for_day` 非空且 ≠ today → 主题 `{prefix} {job.name} · {for_day}（补跑）`；同日/未传 → 维持 today（正常调度路径零变化）。
+
+### 补跑的落点语义（容易混淆，实跑验证过）
+- **按历史天**：信息包全部数据源、轨迹图、行程摘要、邮件主题的数据日。
+- **按发送时刻（today）**：output 归档文件名/时间戳、daily note 的 `[scheduled:...]` 状态行、onboard pack 再导出（最近 3 天 daily notes，无害）。
+- **LLM 写 note 的日期**：由模型按 prompt 里的信息包日期自行决定（一般会归到 for_day 当天，如 9-08 日报的条目写进 2026-09-08.md）。
+
+### 验证（2026-09-09 实测）
+- CLI 冒烟：非法日期 / 不存在 job 名 → exit 2。
+- 真实补跑 9-07 `--no-email`：`delivery skipped (deliver=False)`、归档落盘、CURRENT_TASK_DONE（162s）。
+- 单测：`TestDeliverEmail` +2（补跑主题带 for_day+`（补跑）` / 同日无标记）、`TestDeliverRouting` +1（deliver=False 跳过一切投递但 output 落盘）；`test_scheduler.py` 全量 70 passed，ruff 零告警。

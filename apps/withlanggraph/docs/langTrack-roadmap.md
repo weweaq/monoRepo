@@ -2845,3 +2845,21 @@ un_job(for_day=...)。
 - [x] 定位 durationMs 恒 0 根因（通知 extras 无 DURATION 键）+ v1.0.13 用 MediaSession 兜底读真实时长。
 - [ ] 安装 v1.0.13 重登后核对新 music_play 事件 `durationMs` 非 0。
 - [ ] 提交前 codegraph sync + 两个仓库 commit（WithLangGraph：_listen_music 粗档/email_tools base64；weiCheckApp：durationMs 1.0.12+1.0.13）。
+
+## 2026-09-09：日报补跑 CLI（`python -m gacore.rerun`）+ 邮件主题补跑标记
+
+**背景**：用户反馈 9-08 早间收到的 9-07 日报内容有问题需重发，当时只能手工内联拼 `run_job(for_day=...)` 复跑（已在 mono 侧真实跑通 9-08/9-07 两期）。日报失败/漏发后的"补跑某天"是刚需，固化为 CLI。**本条起全部在 mono 仓库开发（原仓库已冻结）。**
+
+**改动（mono `apps/withlanggraph/`）**
+1. 新增 `src/gacore/rerun.py`：`python -m gacore.rerun --day 2026-09-08 [--job daily-report] [--no-email]`。日期格式校验（非法 exit 2）、job 名不存在时列出可用名（exit 2）、`--no-email` 只归档不投递。
+2. `scheduler.run_job` 加 `deliver: bool = True` 参数：False 时跳过 `_deliver`（邮件不发），output 归档 + daily note 状态行照写。
+3. `_deliver_email` 主题修正：历史补跑（`for_day != today`）时主题挂数据日 + `（补跑）`标记（如 `[gacore] daily-report · 2026-09-08（补跑）`），不再挂发送时刻的 today——收件人一眼可辨是哪天的日报。
+
+**验证**
+- CLI 冒烟：`--day 2026-13-99` 与 `--job no-such-job` 均正确拒绝 exit 2 并给出可用 job 列表。
+- 真实补跑 9-07 `--no-email`：`delivery skipped (deliver=False)` 日志出现、未发邮件、output 归档落盘（`daily-report_20260909_135819.md`）、exit CURRENT_TASK_DONE。
+- 单测：`TestDeliverEmail` 新增 2 例（补跑主题带 for_day+标记 / 同日无标记）+ `TestDeliverRouting` 新增 1 例（deliver=False 完全跳过投递但归档落盘），合计 13 passed；`test_scheduler.py` 全量 70 passed；ruff 零告警。
+
+**待办更新**
+- [x] 日报补跑 CLI + 邮件主题补跑标记（mono 单写后首个功能）。
+- [ ] 真实补跑发邮件路径的主题（`（补跑）`标记）尚待下一次实际补发时人工确认（单测已覆盖逻辑）。

@@ -357,6 +357,7 @@ def run_job(
     cfg: Config,
     graph_runner: Callable[[str, Config, int], str | None] | None = None,
     for_day: str | None = None,
+    deliver: bool = True,
 ) -> ScheduleResult:
     """Execute one job: run the agent headless, capture reply, write output + daily note.
 
@@ -366,6 +367,9 @@ def run_job(
     for_day: ISO date — historical re-run: info pack + trajectory map are produced for
     that day instead of today; email/note/output still land under today's timestamp but
     carry the historical day's data. Defaults to None (today).
+
+    deliver: when False, skip channel delivery (email etc.) — output archive and daily
+    note are still written. Used by `python -m gacore.rerun --no-email`.
 
     The reply is extracted from the final state's last AIMessage content.
     """
@@ -424,7 +428,10 @@ def run_job(
     duration = time.monotonic() - start
     output_path = _write_output(cfg, job, reply, error, prompt=prompt, raw_reply=raw_reply)
     _write_daily_note(cfg, job, reply, error)
-    _deliver(job, cfg, reply, error, for_day=for_day)
+    if deliver:
+        _deliver(job, cfg, reply, error, for_day=for_day)
+    else:
+        logger.info("delivery skipped (deliver=False)", job=name)
 
     # Cross-day rollover: after a successful daily-report run, export an onboard
     # memory pack (recent daily summaries + long-term persona) for the QQ frontend
@@ -829,7 +836,9 @@ def _deliver_email(job: Job, cfg: Config, reply: str, error: str | None, env: Ma
 
     today = datetime.now(UTC).astimezone().date().isoformat()
     prefix = "[gacore][FAILED]" if error else "[gacore]"
-    subject = f"{prefix} {job.name} · {today}"
+    # 历史补跑时主题挂数据日（for_day）而非发送时刻，收件人才能一眼看出这是哪天的日报
+    day_label = f"{for_day}（补跑）" if for_day and for_day != today else today
+    subject = f"{prefix} {job.name} · {day_label}"
     body = _email_body_html(reply, error)
     image_paths = [str(traj_png)] if traj_png is not None else None
     result = send_email.func(
