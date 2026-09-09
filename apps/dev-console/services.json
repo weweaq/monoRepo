@@ -11,7 +11,7 @@
       "cwd": "D:\\AAAmyPrj\\github\\myrepos\\mono\\apps\\withlanggraph",
       "env": { "PYTHONPATH": "D:\\AAAmyPrj\\github\\myrepos\\mono\\apps\\withlanggraph\\src" },
       "interpreter": "D:\\AAAmyPrj\\github\\myrepos\\mono\\.venv\\Scripts\\python.exe",
-      "args": ["-m", "gacore.langTrack", "--host", "127.0.0.1", "--port", "8000"],
+      "args": ["-m", "gacore.langTrack", "--host", "0.0.0.0", "--port", "8000"],
       "match": ["gacore.langTrack"],
       "notes": "接收手机上报事件的 HTTP 服务；mono uv workspace 环境 + 配置 .env"
     },

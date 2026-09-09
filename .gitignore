@@ -25,6 +25,10 @@ agent_graph.png
 h.txt
 notes.txt
 
+# withlanggraph 服务启动日志（mono 切换后 Start-Process 重定向落盘于应用根）
+apps/withlanggraph/gacore.log
+apps/withlanggraph/gacore.log.err
+
 # Secrets
 .env
 .env.*
