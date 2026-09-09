@@ -10,16 +10,13 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from typing import Annotated, Final
+from typing import Annotated
 
 from langchain_core.messages import ToolMessage
 from langchain_core.tools import InjectedToolCallId, tool
 from langgraph.types import Command
 
 from gacore.config import Config
-
-_FACTS_FILE: Final = "global_mem.txt"
-_INSIGHTS_FILE: Final = "global_mem_insight.txt"
 
 
 @tool
@@ -61,17 +58,20 @@ def start_long_term_update(topic: str, _cfg: Config | None = None) -> dict:
     back to Config.default() and tests inject Config.for_tests(tmp_path).
     """
     cfg = _cfg or Config.default()
-    facts_path = cfg.memory_dir / _FACTS_FILE
-    insights_path = cfg.memory_dir / _INSIGHTS_FILE
     now = datetime.now(UTC).astimezone()
     timestamp = now.isoformat(timespec="seconds")
     day = now.date().isoformat()
-    try:
-        cfg.memory_dir.mkdir(parents=True, exist_ok=True)
-        with facts_path.open("a", encoding="utf-8") as fh:
-            fh.write(f"[{timestamp}] {topic}\n")
-        with insights_path.open("a", encoding="utf-8") as fh:
-            fh.write(f"[{day}] insight: {topic}\n")
-    except OSError as e:
-        return {"error": str(e)}
-    return {"updated": "global_mem+insight", "topic": topic, "paths": [str(facts_path), str(insights_path)]}
+    # Delegate to the single persist helper so the active write path fan-outs to the facts
+    # portrait + pgvector exactly like the passive memory_maintain node (阶段二 方案2:
+    # 写记忆的同步必须收口到写函数, 任何写入口都不会漏同步向量库).
+    from gacore.memory_maintenance import persist_entry
+
+    written = persist_entry(
+        cfg,
+        fact_line=f"[{timestamp}] {topic}",
+        insight_line=f"[{day}] insight: {topic}",
+        facts_statement=topic,
+    )
+    if not written.get("updated"):
+        return {"error": written.get("error") or "persist failed"}
+    return {"updated": "global_mem+insight+facts", "topic": topic, "paths": written["paths"]}

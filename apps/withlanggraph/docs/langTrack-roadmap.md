@@ -2898,3 +2898,27 @@ un_job(for_day=...)。
 - [x] 阶段二语义触发：本地 embedding 模型 + pgvector 召回跑通（方案2 事实画像）。
 - [ ] `global_mem_facts.txt` 随画像持续充实（当前 13 条核心事实锚点 vs 事件日志全量），阈值 0.50-0.55 需真实数据再调。
 - [ ] 真实对话若干轮后复核 CombinedTrigger 的 keyword/vector 命中比例与误触发。
+
+## 2026-09-09：记忆写路径统一收口 persist_entry（主动写不再漏向量同步）
+
+**背景**：方案2 落地后发现，记忆有两条写路径（被动节点 `memory_maintain` + 主动工具
+`start_long_term_update`），而向量同步只挂在被动节点，**主动工具写记忆时向量库不更新**。
+要求「任何写入口都同步」即根治。
+
+**改动（mono `apps/withlanggraph/`）**
+1. `memory_maintenance.persist_entry(cfg, *, fact_line, insight_line, facts_statement, sync=True)`：
+   统一写 `global_mem.txt`+`insight`+`facts` 镜像，并 best-effort `_sync_vector_store`
+   （`ensure_schema`+`sync_portrait` 幂等全量重嵌）。写失败/同步失败皆吞掉，txt 仍为真相源，
+   下次 sync 自愈。
+2. `apply()`（MERGE/NEW）与 `start_long_term_update` 均改为委托 `persist_entry`。
+   - `apply` 返回结构不变；`start_long_term_update` 返回值由 `global_mem+insight` → `global_mem+insight+facts`。
+3. 删除 graph 节点层的 `_sync_portrait_best_effort`（收口到 persist_entry，避免重复全量重嵌）。
+4. memory_tools 清理不再使用的 `_FACTS_FILE`/`_INSIGHTS_FILE`/`Final` 导入。
+
+**实测验证**：34 passed（memory_maintenance + vector_trigger + tools_memory +
+nodes_tools）；真实 e2e 调 `start_long_term_update` 写「八段锦」→ 向量库 `stored:13`
+立即刷新，查「我最近在干嘛」召回相关画像——**主动写路径不再漏同步**。
+
+**待办更新**
+- [x] 统一记忆写入口（向量同步收口 persist_entry）。
+- [ ] scheduler 日报沉淀路径（批量 batch 写）确认是否也应经 `persist_entry` 收口，避免第三条写路径再漏。

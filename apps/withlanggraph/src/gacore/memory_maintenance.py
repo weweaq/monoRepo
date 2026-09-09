@@ -361,7 +361,6 @@ def apply(verdict: Verdict, cfg: Config) -> dict:
     if not verdict.fact.strip():
         return {"aux": verdict.action, "action": VERDICT_NOOP, "updated": False, "paths": []}
     try:
-        cfg.memory_dir.mkdir(parents=True, exist_ok=True)
         ts = _now_east8_ts()
         day = datetime.now(UTC).astimezone().date().isoformat()
         if verdict.action == VERDICT_MERGE:
@@ -373,20 +372,19 @@ def apply(verdict: Verdict, cfg: Config) -> dict:
             cleaned_fact = _strip_std_prefix(verdict.fact)
             fact_line = f"[{ts}] {cleaned_fact}"
             insight_line = f"[{day}] insight: {cleaned_fact}"
-        _append(cfg.memory_dir / _FACTS_FILE, fact_line)
-        _append(cfg.memory_dir / _INSIGHTS_FILE, insight_line)
-        # Mirror a compact, retrieval-friendly statement into the facts portrait so the
-        # vector store (which feeds on global_mem_facts.txt) tracks this update in
-        # near-real-time. Best-effort: a write failure must not fail the main turn.
-        try:
-            _append(cfg.memory_dir / _RETRIEVAL_FACTS, _as_fact_statement(verdict))
-        except OSError as exc:
-            _logger.warning("facts portrait mirror failed", action=verdict.action, error=str(exc))
+        written = persist_entry(
+            cfg,
+            fact_line=fact_line,
+            insight_line=insight_line,
+            facts_statement=_as_fact_statement(verdict),
+        )
+        if not written.get("updated"):
+            return {"action": "ERROR", "updated": False, "paths": [], "error": written.get("error")}
         return {
             "action": verdict.action,
             "updated": True,
             "fact": verdict.fact,
-            "paths": [str(cfg.memory_dir / _FACTS_FILE), str(cfg.memory_dir / _INSIGHTS_FILE)],
+            "paths": written["paths"],
         }
     except OSError as exc:
         _logger.warning("memory_maintenance apply failed", action=verdict.action, error=str(exc))
@@ -402,6 +400,56 @@ def _as_fact_statement(verdict: Verdict) -> str:
     """
     category = f"[{verdict.field_hint}]" if verdict.field_hint else ""
     return f"{category} {verdict.fact}".strip()
+
+
+def _sync_vector_store(cfg: Config) -> None:
+    """Best-effort resync of the facts portrait into pgvector; never raises.
+
+    The ONLY place topological/profile writes fan out to the vector store, so it stays
+    consistent no matter which entry point wrote memory (passive ``memory_maintain`` or the
+    active ``start_long_term_update`` tool). A missing/offline backend is swallowed — the
+    txt files remain the source of truth and the next sync heals the gap.
+    """
+    try:
+        from gacore import vector_store
+        vector_store.ensure_schema()
+        vector_store.sync_portrait(cfg)
+        _logger.info("facts portrait synced to vector store")
+    except Exception as exc:  # noqa: BLE001 — vector sync must never break memory write
+        _logger.warning("vector sync skipped", error_type=type(exc).__name__, error=str(exc))
+
+
+def persist_entry(
+    cfg: Config,
+    *,
+    fact_line: str,
+    insight_line: str,
+    facts_statement: str,
+    sync: bool = True,
+) -> dict:
+    """Persist one entry across the memory family, then resync the vector store.
+
+    Single helper for the long-term-memory family, used by both write paths
+    (``apply`` for judged MERGE/NEW, ``memory_tools.start_long_term_update`` for the
+    active tool). Writes the verbose event log + insight index, mirrors a compact
+    retrieval statement into the facts portrait, and fan-outs to pgvector. A failure in
+    the vector fan-out is swallowed so a memory persist never fails the caller.
+    """
+    try:
+        cfg.memory_dir.mkdir(parents=True, exist_ok=True)
+        _append(cfg.memory_dir / _FACTS_FILE, fact_line)
+        _append(cfg.memory_dir / _INSIGHTS_FILE, insight_line)
+        if facts_statement:
+            _append(cfg.memory_dir / _RETRIEVAL_FACTS, facts_statement)
+    except OSError as exc:
+        _logger.warning("memory persist_entry failed", error=str(exc))
+        return {"updated": False, "paths": [], "error": str(exc)}
+    if sync:
+        _sync_vector_store(cfg)
+    return {
+        "updated": True,
+        "paths": [str(cfg.memory_dir / _FACTS_FILE), str(cfg.memory_dir / _INSIGHTS_FILE)],
+    }
 
 
 def _strip_std_prefix(fact: str) -> str:

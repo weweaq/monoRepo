@@ -217,24 +217,12 @@ def memory_maintain(state: GAState) -> dict:
         except Exception as exc:  # noqa: BLE001 — never let maintenance break a turn
             _node_logger.error("memory_maintain failed", error_type=type(exc).__name__, error=str(exc))
             res = {"action": "ERROR", "triggered": True, "updated": False, "error": str(exc)}
-        if res.get("updated"):
-            _sync_portrait_best_effort(cfg, res)
+        # Vector sync is now owned by persist_entry (inside apply), not this node — every
+        # memory write path (here or the active tool) resyncs through the single helper.
         record_audit(cfg, res, trigger=trigger, ms=int((time.monotonic() - _start) * 1000))
     except Exception as exc:  # noqa: BLE001 — trigger/audit must never break a turn either
         _node_logger.error("memory_maintain gate failed", error_type=type(exc).__name__, error=str(exc))
     return {}
-
-
-def _sync_portrait_best_effort(cfg: Config, res: dict) -> None:
-    """Push the (changed) portrait into pgvector; any failure is swallowed, never raised."""
-    try:
-        from gacore import vector_store
-        vector_store.ensure_schema()
-        vector_store.sync_portrait(cfg)
-        _node_logger.info("portrait synced to vector store", action=res.get("action"))
-    except Exception as exc:  # noqa: BLE001 — vector sync must never break the turn
-        _node_logger.warning("portrait vector sync failed (skipping)",
-                             error_type=type(exc).__name__, error=str(exc))
 
 
 @contextmanager

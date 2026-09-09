@@ -77,12 +77,15 @@ def test_start_long_term_update_returns_updated_topic_and_paths(tmp_path: Path) 
     """Given a tmp cfg, When a topic is distilled, Then the result reports updated status, topic, and paths."""
     cfg = Config.for_tests(tmp_path)
     result = start_long_term_update.func(topic="fact", _cfg=cfg)
-    assert result["updated"] == "global_mem+insight"
+    assert result["updated"] == "global_mem+insight+facts"
     assert result["topic"] == "fact"
     assert result["paths"] == [
         str(cfg.memory_dir / "global_mem.txt"),
         str(cfg.memory_dir / "global_mem_insight.txt"),
     ]
+    # The facts portrait must mirror the topic so the vector store (fed on facts) catches
+    # it — 阶段二 方案2: every write path is synced through the single persist_entry helper.
+    assert (cfg.memory_dir / "global_mem_facts.txt").read_text(encoding="utf-8").strip() == "fact"
 
 
 def test_start_long_term_update_returns_error_dict_on_io_failure(tmp_path: Path) -> None:

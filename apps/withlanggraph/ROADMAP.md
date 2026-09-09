@@ -427,3 +427,38 @@ huggingface.co，而办公网络外网全不通（系统代理 127.0.0.1:7897 �
 **待办更新**：勾选「阶段二实测闭环」中 sync_flags 入库部分。补充待办：真实阈值调优
 与 `global_mem_facts.txt` 随画像持续充实（10 条核心事实锚点 vs 事件日志全量），
 留待真实数据攒一段后做。
+
+### 2026-09-09 — 统一记忆写入口：向量同步收口 persist_entry（修复主动写不漏同步）
+
+**背景**：方案2 落地后发现架构裂缝——记忆有**两条写路径**：
+1. 被动节点 `memory_maintain`（graph.py）
+2. 主动工具 `start_long_term_update`（memory_tools.py）
+
+向量同步只挂在被动节点的 `_sync_portrait_best_effort` 上，**主动工具写记忆根本不同步
+向量库**（只写 txt，不镜像 facts、不写 pgvector）。用户指出：新增/修改长期记忆时
+向量库会滞后。按用户确认的**方案2**（抽统一写函数）根治。
+
+**已完成**：
+- 在 `memory_maintenance` 抽 `persist_entry(cfg, *, fact_line, insight_line,
+  facts_statement, sync=True)`：写 `global_mem.txt`+`insight`+`facts` 镜像，再
+  best-effort `_sync_vector_store`（`ensure_schema`+`sync_portrait` 幂等全量重嵌）。
+  写失败与同步失败皆吞掉，txt 仍是真相源，下次 sync 自愈。
+- `apply()` 改为委托 `persist_entry`（返回结构不变）；`start_long_term_update` 也改
+  委托它（获得 facts 镜像 + 向量同步能力），返回值由 `global_mem+insight` 变为
+  `global_mem+insight+facts`。
+- 删除 graph.py 节点层 `_sync_portrait_best_effort`（同步收口到 persist_entry，避免
+  被动节点重复全量重嵌）。
+- memory_tools 清理不再使用的 `_FACTS_FILE`/`_INSIGHTS_FILE`/`Final` 导入。
+
+**实测验证**：
+- 34 passed（memory_maintenance + vector_trigger + tools_memory + nodes_tools），
+  ruff 零告警。
+- 真实 e2e：调 `start_long_term_update` 写「八段锦」→ 返回 `global_mem+insight+facts`，
+  向量库 `stored: 13` 立即刷新，查「我最近在干嘛/八段锦」能召回相关画像——
+  **主动写路径不再漏同步**。
+
+**偏差说明**：`persist_entry` 仍是 txt 为真、向量为索引的架构；全量重嵌 13 行很便宜，
+暂不做增量同步（画像数据量级足够轻）。
+
+**待办更新**：勾选「统一记忆写入口」为已完成。新增待办：确认 scheduler 日报沉淀路径
+（批量 batch 写）是否也应经 `persist_entry` 收口，避免第三条写路径再漏同步。
