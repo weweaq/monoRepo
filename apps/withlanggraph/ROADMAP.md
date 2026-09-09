@@ -46,7 +46,8 @@ langTrack 数据链路服务端：`/ingest` 接收 + ETL 加工 + 报告 + dashb
       `subject='[gacore] daily-report · 2026-09-08（补跑）'`，收件人收到即为终验
 - [x] memory 目录迁移遗漏修复（2026-09-09）：qq_chat_log/global_mem/daily
       notes/ocr_history 从旧仓合并迁入，9-08 QQ 摘录验证恢复
-- [ ] 9-08 完整版日报（含 QQ 摘录）是否重发，待用户定
+- [x] 9-08 完整版日报已重发（2026-09-09 16:16，含 7 条 QQ 摘录），
+      归档 `daily-report_20260909_161635.md`
 
 ---
 
