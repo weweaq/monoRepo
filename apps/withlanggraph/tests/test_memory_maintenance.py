@@ -11,13 +11,10 @@ import re
 from pathlib import Path
 
 from gacore.config import Config
-from gacore.memory_audit import query_day, read_entries, record_audit
 from gacore.memory_maintenance import (
     VERDICT_MERGE,
     VERDICT_NEW,
     VERDICT_NOOP,
-    KeywordTrigger,
-    TriggerResult,
     Verdict,
     apply,
     build_llm_judge,
