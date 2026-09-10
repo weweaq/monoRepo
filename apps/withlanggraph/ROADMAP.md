@@ -493,3 +493,37 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 **待办更新**：新增待办——日报路径是否收口 persist_entry（**决策：不并入**，各管各表、共享 vector_store
 工具，见 docs/langTrack-roadmap.md「架构决策」）；episodic 90 天窗/阈值长期观测调优（调法见 tech.md
 「调优参数一览」）；scheduler 重启后真实日报 job 验证 `_sync_episodic` 日志落盘。
+
+### 2026-09-11 — 日报反馈闭环（QQ 订正 + LLM 主持澄清 + 分批重发）
+
+**背景**：用户此前指出自动日报存在内容不准或缺漏，但无反馈渠道。需求几轮收敛为：
+①QQ 直连回指任一分节条目订正/补充；②信息不全时由 LLM 主持式追问（不是机械填空）；
+③多笔修改各自确认、**只写真相源不逐笔重发**，末笔「确认重发」统一重发一次。
+
+**已完成**：
+- 抽取新增 `feedback.py`（纯逻辑、依赖轻）：`parse_feedback` / `is_feedback_intent` +
+  新增 `feedback_route`（edit/confirm/redeliver 三态路由）、`analyze_feedback`（五个维度
+  确定性守卫）、`merge_context` / `draft_from_context`（跨轮澄清累积）、`confirm_feedback`、
+  `redeliver_day` / `redeliver_latest`（幂等分批发，ledger 去重）。
+- `apply_feedback` 改为**只写真相源、不内嵌重发**（原 `_redeliver` 删除）；删改后上报有
+  `logs/delivered_report/{date}.md` 真相源（scheduler 日报成功即 `save_delivered` 落库）。
+- QQ 前端 `qq.py`：`on_message` 在闲聊图前插入反馈路由（含「澄清会话中任何消息都回流」），
+  新增 `_handle_feedback` 处理器，`get_llm([], bind_tools=False)` 直调 LLM；跨轮分片
+  `_feedback_sessions`（RAM only）。
+- LLM 主持式澄清 `clarify_feedback`：吸收开源 Rich-Elicitation 的提问纪律（≤3 题/轮、
+  语境化推荐项并标单个(推荐)、按组、智能停止），失败回退确定性追问。
+
+**实测验证**：
+- `test_feedback.py` **33 passed**（新增 analyze/merge/draft/route/batch 幂等/clarify 成功与
+  回退），ruff 三个改动文件零告警。
+- 全仓 pytest **1076 passed, 1 skipped**（2 失败均在无关既有 langTrack 场所异常文件；
+  5 处 lint 错误在无关既有 test_memory_maintenance.py，均非本次引入）。
+
+**偏差说明**：
+- 澄清会话期间用户任何普通消息都会并入反馈（避免答复无关键字被吞），以会话存在与否判定——
+  轻微抢占闲聊，接受该取舍（`_handle_feedback` 只向澄清方向回流，不跑闲聊图）。
+- 未移除 2 处既有 langTrack 失败与 test_memory_maintenance 的 F401 存量 lint（超出本次范围）。
+
+**待办更新**：新增——QQ 真实环境联调一轮（澄清→确认→确认重发）；两段确认 if 中间态文案
+（反馈 ID 短 hash）与「确认」即生效的取舍待用户实测反馈；`feedback.py` 后续可考虑并入
+`redeliver_latest` 的按日批量聚合重发阈值观测。
