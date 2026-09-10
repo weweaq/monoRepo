@@ -96,17 +96,28 @@ from langgraph.types import Command
 
 from gacore.character import card_name, card_prompt, list_cards
 from gacore.config import Config, load_dotenv
-
 from gacore.graph import DEFAULT_RECURSION_LIMIT, build_graph
-
 from gacore.llm import get_llm
 from gacore.jsonl_logger import get_logger
 from gacore.proactive import record_last_active, record_user_emotion
 
 from gacore.state import new_state
-
 from gacore.tools.daily_notes import load_recent_daily_summaries
 from gacore.tools.ocr_tools import ocr_image
+
+from gacore.feedback import (
+    FeedbackContext,
+    analyze_feedback,
+    apply_feedback,
+    clarify_feedback,
+    confirm_feedback,
+    draft_from_context,
+    feedback_route,
+    latest_pending,
+    merge_context,
+    redeliver_latest,
+    save_pending,
+)
 
 
 
@@ -848,6 +859,14 @@ class QQApp:
         # turn after a cross-day _maybe_rollover (kept in RAM only; never persisted).
         self._pending_rollover: dict[str, str] = {}
 
+        # user_id -> FeedbackContext accumulating across clarifying turns for one edit
+        # (RAM only; cleared once the edit resolves into a pending draft).
+        self._feedback_sessions: dict[str, "FeedbackContext"] = {}
+
+        # user_id -> asyncio.Lock serializing feedback handling so two quick messages
+        # from the same user can't race on _feedback_sessions.
+        self._feedback_locks: dict[str, "asyncio.Lock"] = {}
+
 
 
     # --------------------------------------------------------------- sending
@@ -1042,16 +1061,21 @@ class QQApp:
 
 
             # 3) If this user has a pending ask_user interrupt, resume the graph.
-
             if user_id in _pending_interrupt:
-
                 config = _pending_interrupt.pop(user_id)
-
                 asyncio.create_task(self._resume_agent(chat_id, content, config, msg_id=msg_id, is_group=is_group, user_id=user_id))
-
                 return
 
-
+            # 3.5) Daily-report feedback: edits / confirms / batch re-send go to the
+            #      feedback module, NOT the chatty agent loop. Keeps fixes off the graph.
+            #      An active clarification session also routes ANY message back to the
+            #      feedback loop, since the user's answer may not carry intent keywords.
+            route = feedback_route(content)
+            if route is not None or user_id in self._feedback_sessions:
+                asyncio.create_task(
+                    self._handle_feedback(chat_id, content, user_id, route, msg_id=msg_id, is_group=is_group)
+                )
+                return
 
             # Phase 1 gate: ultra-short / casual words get a light one-liner reply
             # without building an agent task or touching the graph. Fail-open.
@@ -1073,6 +1097,87 @@ class QQApp:
 
             traceback.print_exc()
 
+
+
+    async def _handle_feedback(self, chat_id, content, user_id, route, *, msg_id=None, is_group=False):
+        """Edit/confirm/resend router for the daily-report feedback loop (off the chat graph).
+
+        Intercepts ``edit`` messages (create a pending draft, or ask the LLM host to elicit
+        missing details), ``confirm`` (apply the newest — or an explicitly id''d — pending
+        draft to the truth source, no re-send), and ``redeliver`` (batch-send one
+        consolidated revision). A per-user lock stops concurrent messages from racing on the
+        clarification session.
+        """
+        lock = self._feedback_locks.setdefault(user_id, asyncio.Lock())
+        async with lock:
+            await self._handle_feedback_locked(chat_id, content, user_id, route, msg_id=msg_id, is_group=is_group)
+
+    async def _handle_feedback_locked(self, chat_id, content, user_id, route, *, msg_id, is_group):
+        try:
+            cfg = Config.default()
+            if route == "confirm":
+                id_match = re.search(r"#([0-9a-fA-F]{4,12})", content or "")
+                if id_match:
+                    res = confirm_feedback(cfg, id_match.group(1))
+                    if res.get("status") != "ok":
+                        await self.send_text(chat_id, f"生效失败：{res.get('msg', '')}", msg_id=msg_id, is_group=is_group)
+                        return
+                    fb_tag = f"{res['section']}-{res['index']}"
+                else:
+                    fb = latest_pending(cfg)
+                    if fb is None:
+                        await self.send_text(chat_id, "当前没有待确认的订正草稿。", msg_id=msg_id, is_group=is_group)
+                        return
+                    res = apply_feedback(cfg, fb)
+                    if res.get("status") != "ok":
+                        await self.send_text(chat_id, f"生效失败：{res.get('msg', '')}", msg_id=msg_id, is_group=is_group)
+                        return
+                    fb_tag = f"{res['section']}-{res['index']}"
+                await self.send_text(
+                    chat_id,
+                    f"✅ 已生效「{fb_tag}」。可继续改；全部改完回复「确认重发」统一重发。",
+                    msg_id=msg_id, is_group=is_group,
+                )
+                return
+            if route == "redeliver":
+                res = redeliver_latest(cfg)
+                if res.get("status") == "ok":
+                    await self.send_text(chat_id, f"✅ 已统一重发 {res['date']} 修订后的日报。", msg_id=msg_id, is_group=is_group)
+                elif res.get("status") == "noop":
+                    await self.send_text(chat_id, "当前没有已确认但未重发的修改。", msg_id=msg_id, is_group=is_group)
+                else:
+                    await self.send_text(chat_id, f"重发失败：{res.get('msg', '')}", msg_id=msg_id, is_group=is_group)
+                return
+            # route == "edit"
+            new_ctx = analyze_feedback(content, cfg)
+            base_ctx = self._feedback_sessions.get(user_id)
+            ctx = merge_context(base_ctx, new_ctx) if base_ctx else new_ctx
+            fb = draft_from_context(ctx)
+            if fb is not None:
+                self._feedback_sessions.pop(user_id, None)
+                save_pending(cfg, fb)
+                kind = "订正" if fb.intent == "fix" else "追加"
+                await self.send_text(
+                    chat_id,
+                    f"已记为一笔订正【#{fb.id[:6]}】（{fb.section}-{fb.index} · {kind}）。"
+                    "回复「确认」生效；可继续下一条，全部改完回复「确认重发」统一重发。",
+                    msg_id=msg_id, is_group=is_group,
+                )
+                return
+            # Clarification needed: keep the partial ctx, then ask the LLM host.
+            self._feedback_sessions[user_id] = ctx
+            try:
+                llm = get_llm([], bind_tools=False)
+            except Exception:  # noqa: BLE001 - missing key: fall back to a deterministic ask
+                llm = None
+            if llm is None:
+                reply = "请补充：哪天、哪个节、第几条、改成什么（或补充什么）？"
+            else:
+                reply = await clarify_feedback(llm, cfg, ctx, date=ctx.date)
+            await self.send_text(chat_id, reply, msg_id=msg_id, is_group=is_group)
+        except Exception:  # noqa: BLE001 - feedback loop must never crash the message handler
+            logger.error("QQ feedback handler error", stack_trace=traceback.format_exc())
+            await self.send_text(chat_id, "反馈处理出错，请稍后重试。", msg_id=msg_id, is_group=is_group)
 
 
     async def _maybe_rollover(self, user_id: str) -> None:

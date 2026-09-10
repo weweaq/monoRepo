@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Final
 
 from gacore.config import Config, load_dotenv
+from gacore.feedback import save_delivered, stamp_report_bullets
 from gacore.jsonl_logger import get_logger
 from gacore.proactive import PROACTIVE_POOL, proactive_due, run_proactive_job
 
@@ -438,7 +439,24 @@ def run_job(
         except Exception as e:  # noqa: BLE001 — vector sync must never break the report
             logger.error("episodic sync failed", job=name, error_type=type(e).__name__, stack_trace=str(e))
     if deliver:
-        _deliver(job, cfg, reply, error, for_day=for_day)
+        deliver_reply = reply
+        if error is None and _is_daily_job(job) and (reply or "").strip():
+            # 投递正文统一打 [节-序号] 锚点并落真相源：用户按锚点回指订正，
+            # 反馈读写与邮件/QQ 看到的是同一份正文。钉锚失败绝不影响投递。
+            try:
+                deliver_reply = stamp_report_bullets(reply)
+                save_delivered(
+                    cfg, for_day or datetime.now(UTC).astimezone().date().isoformat(), deliver_reply
+                )
+            except Exception as e:  # noqa: BLE001 — stamping must never break delivery
+                logger.error(
+                    "anchor stamping failed; delivering raw",
+                    job=name,
+                    error_type=type(e).__name__,
+                    stack_trace=str(e),
+                )
+                deliver_reply = reply
+        _deliver(job, cfg, deliver_reply, error, for_day=for_day)
     else:
         logger.info("delivery skipped (deliver=False)", job=name)
 
