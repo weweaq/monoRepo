@@ -1467,99 +1467,11 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 
 ---
 
-## 附录 B：全应用架构总览（总图 + 模块下钻）
+## 附录 B：全应用架构（总图 + 流程详图）
 
-> 由 codemap 走查生成（`apps/withlanggraph/src/gacore/`），总图给全局视野、下钻给每模块真实节点，全部可回溯源码符号。视角是**全应用**，上一节 §1 是其中 langTrack 子系统专用链路。
+> 单一真源：**架构图只维护一份**，位于 `docs/architecture-flow.mmd`（codemap 走查生成，每条边标真实判据，节点可回溯源码）。
+> tech 文档不再内嵌副本，避免双份维护失真（对齐 R5）。此处仅挂链接。
 
-```mermaid
-flowchart LR
-    %% 总图: 5 层 + 层间数据流; 主图与反馈闭环为精简焦点
+📄 **全应用架构 / 核心对话流程图**：[`architecture-flow.mmd`](./architecture-flow.mmd)
 
-    subgraph S1["① 入口/触发层"]
-        direction TB
-        QQ["QQ 前端 frontends/qq.py<br/>消息·反馈路由"]
-        SCD["定时调度 scheduler.py<br/>run_loop · run_job"]
-        PRC["主动外呼 proactive.py<br/>PROACTIVE_POOL"]
-        CLI["CLI / __main__<br/>cli.main/run_repl"]
-        RRN["日报补跑 rerun.py<br/>复用 scheduler.run_job(for_day)"]
-    end
-
-    subgraph S2["② 核心智能层"]
-        direction TB
-        GPH["主图 graph.build_graph()<br/>核心枢纽"]
-        subgraph STSM["主图状态机"]
-            direction TB
-            CLA["classify_message"]
-            RTR["route_after_classify<br/>→ wait|process"]
-            WTF["wait_for_text"]
-            MNT["memory_maintain<br/>→ 长记忆维护"]
-            CLU["cleanup_images"]
-        end
-        CTX["上下文 context.py<br/>build_system/turn_prompt"]
-        STT["state.py GAState<br/>working/轮次/exit_reason"]
-        LLM["llm.py get_llm()<br/>openai/anthropic/deepseek"]
-        MDW["middleware.py<br/>GAPrompt · GATurnLogic<br/>+ langchain ModelRetry"]
-    end
-
-    subgraph S3["③ 工具 / 记忆"]
-        direction TB
-        AGT["核心 agent 子图<br/>_build_core_agent + ToolNode"]
-        subgraph T["工具集 tools/ (按职能归并)"]
-            direction TB
-            T1["get_time/code_run/file_RW"]
-            T2["web_scan/browser/bili_history"]
-            T3["daily_notes/memory_tools"]
-            T4["ncm_* 网易云系列"]
-            T5["send_email/qq_push"]
-            T6["ocr_image/ocr_screen"]
-            T7["langTrack_stats"]
-        end
-        subgraph MEM["记忆·检索"]
-            direction TB
-            MMA["memory_maintenance<br/>Keyword/Vector/Combined→Verdict"]
-            VS["vector_store<br/>portrait+episodic RAG"]
-            EMB["embedding.py bge-small-zh"]
-            PK["daily_info_pack build_info_pack()"]
-            AUD["memory_audit record_audit()"]
-        end
-    end
-
-    subgraph S4["④ 退出 / 投递"]
-        direction TB
-        FBK["反馈闭环 feedback.py<br/>edit/confirm/redeliver"]
-        LOG["jsonl_logger + llm_request_log"]
-    end
-
-    subgraph S5["⑤ langTrack 数据子系统"]
-        direction LR
-        ING["POST /ingest server.py"]
-        RAW["原始层 storage.py<br/>events/batches"]
-        ETL["ETL 事实层 etl.py<br/>12+ 事实表"]
-        OUT["读方出口<br/>fact_card·report·dashboard<br/>trajectory_map·qq_push·langTrack_stats"]
-    end
-
-    %% ===== 层间数据流 =====
-    QQ --> GPH
-    SCD --> GPH
-    PRC --> GPH
-    CLI --> GPH
-    RRN --> SCD
-
-    GPH --> CTX --> LLM --> GPH
-    GPH <--> MDW
-    GPH <--> STT
-
-    GPH --> AGT
-    AGT --> T
-    GPH --> MNT
-    MNT --> MMA
-    MNT --> AUD
-
-    T7 --> OUT
-    T3 --> MEM
-
-    GPH -- "反馈消息" --> FBK
-    GPH --> LOG
-
-    ING --> RAW --> ETL --> OUT
-```
+（图示视角为**全应用**：①入口/触发 → ②主图状态机 + process(create_agent) → ③记忆维护 → ④退出/投递 → ⑤langTrack 数据子系统。上一节 §1 是其中 langTrack 子系统专用链路。）
