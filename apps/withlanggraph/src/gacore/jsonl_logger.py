@@ -20,10 +20,11 @@ import json
 import logging
 import os
 import sys
-import time
+import threading
 import uuid
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Final, final
 
 from gacore.config import Config, ConfigError
@@ -167,15 +168,56 @@ _sink: logging.Handler | None = None
 _console_sink: logging.Handler | None = None
 
 
+class _DailyFileHandler(logging.Handler):
+    """File sink that routes each record to logs/<emitting-day>/app.jsonl.
+
+    Unlike a plain FileHandler bound to a fixed path at startup, this resolves the
+    day from each record's timestamp, so a long-running process (QQ bot, scheduler)
+    rolls to a fresh per-day file on midnight instead of keeping everything under
+    the process start date. Directory and file are created on first use.
+    """
+
+    def __init__(self, log_root: Path) -> None:
+        super().__init__()
+        self._log_root = Path(log_root)
+        self._day: str | None = None
+        self._fh: object = None  # opened file handle for current day
+        self._lock = threading.Lock()
+        self.setFormatter(_JsonlFormatter())
+
+    def _open_day(self, day: str) -> None:
+        if self._fh is not None:
+            self._fh.close()
+        day_dir = self._log_root / day
+        day_dir.mkdir(parents=True, exist_ok=True)
+        self._fh = open(day_dir / _LOG_FILENAME, mode="a", encoding="utf-8")
+        self._day = day
+
+    def emit(self, record: logging.LogRecord) -> None:
+        day = datetime.fromtimestamp(record.created, tz=timezone(_LOG_UTC_OFFSET)).strftime(_LOG_DIR_FORMAT)
+        with self._lock:
+            try:
+                if self._day != day:
+                    self._open_day(day)
+                message = self.format(record)
+                self._fh.write(message + "\n")
+                self._fh.flush()
+            except Exception:  # noqa: BLE001 - logging must never raise
+                self.handleError(record)
+
+    def close(self) -> None:
+        with self._lock:
+            if self._fh is not None:
+                self._fh.close()
+                self._fh = None
+        super().close()
+
+
 def _build_sink() -> logging.Handler:
     """Create the process-wide file handler; degrades to a no-op sink if setup fails."""
     try:
         config = Config.default()
-        log_dir = config.logs_dir / time.strftime(_LOG_DIR_FORMAT)
-        log_dir.mkdir(parents=True, exist_ok=True)
-        handler = logging.FileHandler(log_dir / _LOG_FILENAME, mode="a", encoding="utf-8")
-        handler.setFormatter(_JsonlFormatter())
-        return handler
+        return _DailyFileHandler(config.logs_dir)
     except (OSError, ConfigError):
         handler = logging.NullHandler()
         handler.setFormatter(_JsonlFormatter())
