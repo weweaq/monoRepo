@@ -1469,8 +1469,8 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 
 ## 附录 B：全应用架构（总图 + 流程详图）
 
-> 单一真源：**架构图只维护一份**，位于 `docs/architecture-flow.mmd`（codemap 走查生成，每条边标真实判据，节点可回溯源码）。
-> tech 文档不再内嵌副本，避免双份维护失真（对齐 R5）。此处仅挂链接。
+> 单一真源：**全应用架构图只维护一份**，位于 `docs/architecture-flow.mmd`（codemap 走查生成，每条边标真实判据，节点可回溯源码）。
+> tech 文档引用这份架构图用链接、不复制维护，避免双份失真（对齐 R5）；各小节自己的机制/接口流程图仍正常内嵌。
 
 📄 **全应用架构 / 核心对话流程图**：[`architecture-flow.mmd`](./architecture-flow.mmd)
 

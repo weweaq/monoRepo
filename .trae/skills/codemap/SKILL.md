@@ -121,7 +121,7 @@ flowchart LR
 ### Step 5 — 可选交付
 
 - **交互式 walkthrough HTML**：`apps/<app>/docs/walkthrough-<app>.html`，总览真 SVG 可点击节点 → 跳下方模块明细卡
-- **同步 tech 文档**：若涉数据流/接口，tech 文档**只添加一个相对链接**指向 `architecture-flow.mmd`（如 `[architecture-flow.mmd](./architecture-flow.mmd)`），**禁止**在 tech 内嵌 mermaid 副本——架构图单一真源，避免双份维护失真（对齐仓库 R5）
+- **同步 tech 文档**：若涉数据流/接口，tech 引用**全应用架构图**时只加相对链接指向 `architecture-flow.mmd`（如 `[architecture-flow.mmd](./architecture-flow.mmd)`），不得把这份架构图复制进 tech 维护（对齐仓库 R5 单一真源）。但 tech 各小节**自己的**机制/接口流程图不在此列，可正常内嵌
 - **ROADMAP 执行记录**：按仓库规则补一段
 
 ### Step 6 — 子代理复审（成稿前必做，不是可选项）
