@@ -551,3 +551,32 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
   沿用同一 Handler 即可，未另抽基类。
 
 **待办更新**：无新增。
+
+### 2026-09-11 — 历史日报正片补种 + 多份只留最新（覆盖式）
+
+**背景**：日报反馈闭环的真相源 `logs/delivered_report/{date}.md` 是 2026-09-11 才接入
+`save_delivered` 开始落库的；更早的日报只以完整运行归档存在 `logs/scheduled/` 下，
+反馈循环对这些历史日没有可读可改的真相源。用户要求把历史日报统一补种出来，且**同一天
+多次运行只留最新一份，用覆盖式**（补跑/多次生成以最新为准，不做融合）。
+
+**已完成**：
+- 新增 `tools/scripts/backfill_delivered.py`：遍历 `logs/scheduled/daily-report_*.md`
+  归档，按文件名日标记分组 → 剔除失败/空跑（error!=none 或 Reply 为空）→ 每天**只取最新
+  一份有效正文**（按 mtime），复用 `_sanitize_reply` 剥离 `<summary>` 等 DSL 残迹，
+  经 `save_delivered` 打节锚点并**覆盖写入** `logs/delivered_report/{date}.md`。
+- 跨天补跑矫正：正文含「补跑·YYYY-MM-DD」或「信息包：YYYY-MM-DD」标记时，改归入其实际
+  覆盖日的真相源，避免并入文件名标记日。
+
+**实测验证**：
+- 实跑补种 **25 天**写入 delivered_report，2 天（09-03/09-04）无有效正文被跳过；
+  输出与 `--dry-run` 完全一致，可重复执行（覆盖语义幂等）。
+- `load_delivered` 读回最新一份（2026-09-10）正常，bullet 均已打 `[节-N]` 锚点
+  （如 `[今日状态-1]`、`[工作日志-2]`），反馈可据此定位订正。
+- `ruff check tools/scripts/backfill_delivered.py` 零告警；`test_feedback.py` 35 passed。
+
+**偏差说明**：
+- 覆盖范围为历史归档日（补种产物，可再生成）；2026-09-11 后由运行期 `save_delivered`
+  实时产生的真相源不受影响（脚本只扫 scheduled 归档日的文件，且最新原则即运行期行为）。
+- 09-03/09-04 无有效正文（两次运行均为失败/空跑），维持无真相源状态。
+
+**待办更新**：无新增。
