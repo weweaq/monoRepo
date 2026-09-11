@@ -116,6 +116,40 @@ flowchart LR
 - 连线：层间 `-- "语义" -->`；内部流转 `A --> B --> C`
 - 顶部注释标注「总/分结构 + 依据源码」
 
+#### 配色与节点语义规范（编辑级，吸收 diagram-design 取舍）
+
+**比"多色好看"更优先的三条原则：**
+
+1. **强调色只给 1–2 个焦点**。全图唯一强色（默认强调橙）只落到核心枢纽 / 核心闭环（如 `process` 的 reAct 循环、反馈闭环）。其余节点一律中性语义——强调色给到 5 个节点就等于没有焦点。焦点实线加粗；边界/闭环用强调橙**虚线**。
+2. **模块区分 = 「容器淡底色 + 节点白底同色描边」**。每模块保留一色的辨识，但容器用低饱和浅底、内部节点白底同色（模块色）描边，不做满屏彩色填充。
+3. **节点按语义分档**：状态/存储 = 淡墨灰底；步骤/后端 = 白底模块色描边；异步/写回连线 = 虚线；上述焦点/边界用强调橙。
+
+> 附带编辑级习惯：无阴影（用边框分区）；圆角 ≤8px 或不要；箭头标注要与线分离、不糊线；**能删则删**——密度目标约 4/10，两两总一起出现的节点就合并成一个。
+
+**可直接复用的 mermaid 语义色模板**（语义 token 一次定好，换项目只改色源 hex 即可）：
+
+```mermaid
+flowchart LR
+    %% ---- 语义 token: 焦点=强调橙 | 状态=淡墨灰 | 其余=模块白底同色描边 ----
+    classDef mod0 fill:#ffffff,stroke:#1E88E5,color:#0D47A1      %% 模块蓝
+    classDef mod1 fill:#ffffff,stroke:#66BB6A,color:#1B5E20       %% 模块绿
+    classDef mod2 fill:#ffffff,stroke:#8E24AA,color:#4A148C      %% 模块紫
+    classDef mod3 fill:#ffffff,stroke:#F9A825,color:#E65100       %% 模块橙
+    classDef mod4 fill:#ffffff,stroke:#00ACC1,color:#006064       %% 模块青
+    classDef mod5 fill:#ffffff,stroke:#EC407A,color:#880E4F      %% 模块粉
+    classDef state fill:#f3f4f6,stroke:#2D3142,color:#2D3142     %% 状态/存储 淡墨灰
+    classDef focus fill:#FFF3E0,stroke:#EB6C36,stroke-width:2.5px,color:#B33900  %% 焦点(仅1-2个)
+    classDef bnd   fill:#ffffff,stroke:#EB6C36,stroke-width:1.5px,stroke-dasharray:5 4,color:#B33900  %% 边界/闭环
+
+    %% 容器底色: 低饱和淡背景, 只作模块分界
+    style S1 fill:#EBF3FB,stroke:#1E88E5,stroke-width:1.5px
+    style S2 fill:#F6FAF5,stroke:#43A047,stroke-width:1.5px
+    %% ... 每模块一个 style; 嵌套子图用更浅底色
+
+    %% 归组: 用 class 批量挂, 不要对每个节点单写 style(便于换肤)
+    class 节点A,节点B mod0
+```
+
 落地文件：`apps/<app>/docs/architecture-flow.mmd`；若画的是共享包，则为 `packages/<pkg>/docs/architecture-flow.mmd`（命名保持一致）。
 
 ### Step 5 — 可选交付
@@ -151,7 +185,9 @@ flowchart LR
 - [ ] 每一个 mermaid 节点都能回溯到真实源码符号（不许有编造）
 - [ ] 层间与层内连线都标注了语义
 - [ ] 有总图全局视野 + 每模块下钻细节，两者都存在（不是只有一张大杂烩）
-- [ ] 全图焦点 ≤2 处（枢纽/核心闭环用强调色）
+- [ ] 全图真正焦点 ≤2（强调橙只落核心枢纽/闭环，不是"重要节点都上色"）
+- [ ] 模块区分用「容器淡底色 + 节点白底同色描边」，无满屏彩色填充
+- [ ] 异步/写回连线用虚线；状态/存储节点用淡墨灰
 - [ ] 工具多时已归并，没有密到不可读
 - [ ] 已起子代理按 Step 6 复审，UNVERIFIED 已清、关键 MISSING 已补
 - [ ] 产出落盘（.mmd 必交付；交互 HTML / tech 同步按需）
