@@ -1259,7 +1259,9 @@ def infer_home_work_candidates(conn: sqlite3.Connection) -> int:
 
 
 
-def detect_anomalies(conn: sqlite3.Connection, lookback_days: int = 7) -> int:
+def detect_anomalies(
+    conn: sqlite3.Connection, lookback_days: int = 7, now_ms: int | None = None
+) -> int:
     """P1-3 新地点/异常事件探测：识别打破规律的点，写入 anomalies 表。
 
     三类异常（作画像叙事节点）：
@@ -1289,7 +1291,7 @@ def detect_anomalies(conn: sqlite3.Connection, lookback_days: int = 7) -> int:
 
     conn.execute("DELETE FROM anomalies")
 
-    now_ms = int(time.time() * 1000)
+    now_ms = int(time.time() * 1000) if now_ms is None else now_ms
 
     if v2:
         home = {(r[0], r[1]) for r in conn.execute(

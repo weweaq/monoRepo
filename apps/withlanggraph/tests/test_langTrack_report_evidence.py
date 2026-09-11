@@ -190,7 +190,7 @@ class TestNewPlaceEvidence:
         )
         conn.commit()
         try:
-            etl.detect_anomalies(conn, lookback_days=7)
+            etl.detect_anomalies(conn, lookback_days=7, now_ms=now_ms)
             rows = conn.execute(
                 "SELECT kind, detail FROM anomalies WHERE kind='new_place'"
             ).fetchall()
@@ -222,7 +222,7 @@ class TestNewPlaceEvidence:
         )
         conn.commit()
         try:
-            etl.detect_anomalies(conn, lookback_days=7)
+            etl.detect_anomalies(conn, lookback_days=7, now_ms=now_ms)
             rows = conn.execute(
                 "SELECT kind, detail FROM anomalies WHERE kind='new_place'"
             ).fetchall()
