@@ -235,9 +235,9 @@
     
     - 别被 `[stderr]` + exit 1 误导，看断言结果（`assert PASS` 才算数）
 
-14. **服务/后台进程必须用正确的解释器**（本项目双环境：langTrack 用 `.venv` 有 uvicorn，gacore 用 py12）
+14. **服务/后台进程必须用正确的解释器**（mono 单一根环境：用仓库根 `.venv`，经 `uv run` 调用；本地不再有包级 `.venv` 与 py12 双环境）
     
-    - 启动前先确认目标进程的依赖装在哪个环境（`python -c "import uvicorn"`）
+    - 启动前先确认目标进程依赖已装（`uv run python -c "import uvicorn"`）
       
       
 
@@ -247,27 +247,27 @@
 
 ```powershell
 
-# 服务端测试（py12 环境）
+# 服务端测试（mono 单一根环境，在 apps/withlanggraph 下执行）
 
 $env:PYTHONPATH = "src"
 
-& "D:\softwares\miniconda\envs\py12\python.exe" -m pytest tests/test_langTrack_*.py -q
+uv run pytest tests/test_langTrack_*.py -q
 
 
 
 # ETL + 清理 + 报告
 
-python -m gacore.langTrack.etl --purge
+uv run python -m gacore.langTrack.etl --purge
 
-python -m gacore.langTrack.report --day 2026-08-18
+uv run python -m gacore.langTrack.report --day 2026-08-18
 
 
 
 # 高德逆编码 / 标签确认
 
-python -m gacore.langTrack.geocode
+uv run python -m gacore.langTrack.geocode
 
-python -m gacore.langTrack.label_places
+uv run python -m gacore.langTrack.label_places
 
 
 

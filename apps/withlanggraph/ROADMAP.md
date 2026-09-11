@@ -580,3 +580,88 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 - 09-03/09-04 无有效正文（两次运行均为失败/空跑），维持无真相源状态。
 
 **待办更新**：无新增。
+
+### 2026-09-11 — RAG 召回基线（只读打点，为 query 改写决策铺数据）
+
+**背景**：评估在 `context.py::_rag_recall_block` 检索前加 LLM 改写（`rewrite_for_recall`）前，
+需要先量化现状——「真实用户轮次里，向量召回到底注入了多少次、带回多少命中、相似度多高」，
+避免往一个经常注空的管道里做无谓改动。要求只读、零依赖、完全不碰生产逻辑。
+
+**已完成**：
+- 新增 `src/gacore/recall_baseline.py`（`python -m gacore.recall_baseline --days N`）：纯 stdlib 回放
+  `logs/*/llm_requests.jsonl`，识别生产系统提示词里的 `=== 向量召回记忆 ===` 头，统计
+  逐条 invoke 的用户 query（兼容 LangChain 序列化的 `human` 角色）、是否注入、语义/情景命中数与
+  `(sim x.xxx)` 相似度，输出 JSON 报告 + 人类可读摘要到 `data/`（gitignore，不入库）。
+- 新增 `tests/test_recall_baseline.py`（6 用例）：解析去图片标记、命中计数、去重聚合、注入率均过。
+
+**实测验证**（`--days 7`：2026-09-05~09-11，204 条 LLM 调用）：
+- 去重后真实用户查询 15 个（gate 全过）；**注入 5 个 / 空 10 个 → 注入率 33.3%、空返回率 66.7%**。
+- 注入时平均带回 3.0 条事实（语义 27 + 情景 25），**sim 仅 [0.502, 0.661]、均值 0.574**，贴近 0.5 阈值。
+- 按天：09-08 注入 0/5（全空），09-09：1/5，09-10：3/4，09-11：1/1。空返回 query 中多为本条事件类
+  提问（如「领结婚证的日子改了 九月十二」「尚婧身份证弄丢了…领证」），而注入样例里恰好含「婚姻·登记
+  日期改为 2026-09-12」事实——提示不少空返回是「该召回却没召回」。
+- `ruff` 零告警；`test_recall_baseline.py` 6 passed。
+
+**偏差说明**：
+- 「空返回」≠ 100% 命中失败：部分 query 与长期记忆本就无关（情绪化表达/工具类请求），空注入是正确结果；
+  真实 miss 率需人工复核相关性，或下一步对空返回项做 DB 回查 + 改写 A/B 才能定。
+- 时间窗仅 7 天、样本 15 个查询，统计显著性有限；个别空返回可能是「该时刻记忆尚未写入向量库」（写入时间
+  晚于提问），而非召回失败。注入只出现在 09-08 之后，早于该日期的窗口（阶段三上线前）应排除在公平基线外。
+
+**待办更新**：
+- [ ] 抽取「空返回」示例 query 对实际 pgvector 库回查，区分「该召回未召回」vs「确实无需召回」。
+- [ ] 以同为门的 query 做改写 A/B（raw vs LLM 改写），对比注入率 / 命中条数 / sim，验证改写收益后再决定是否落地。
+
+### 2026-09-11 — 结构化召回/改写日志 + 改写 A/B 脚手架
+
+**背景**：用户认可基线 report 的结构，希望「向量库召回/改写」的日志今后就用这种结构化格式
+落盘，便于后续统计、维护、离线测试；并在基线之后做改写 A/B 判断 `rewrite_for_recall` 是否落地。
+
+**已完成**：
+- 新增 `src/gacore/recall_log.py`：JSONL 结构化日志层（`logs/<day>/recall.jsonl`），每条一个
+  recall 事件，schema 含 `variant(raw/rewritten)`、`input_query`、`query_used`、`rewrite`、
+  `semantic[]/episodic[]`（`sim=1-dist`）、`injected`；提供 `RecallLog` 写入/`iter_records`
+  读取/`summarize` 聚合，全部纯 stdlib、可离线测试。
+- 新增 `src/gacore/recall_ab.py`（`python -m gacore.recall_ab`）：从基线日志取真实 query，
+  用 deepseek 改写后对**活 pgvector 库**分别做 raw/rewritten 召回对比，两条结果都写结构化日志。
+- 新增 `tests/test_recall_log.py`（6 用例）+ `tests/test_recall_baseline.py`（7 用例），13 passed。
+- 环境事实查明：现有 conda env /`.venv` 均未装 `vector` extra（psycopg/pgvector/sentence-transformers），
+  起初 `recall_context` 属静默 no-op；postgres 服务本身在 5432 正常。轻件 `psycopg[binary]+pgvector`
+  已装入 `py12`，验证 `vector_store._connect()` 可读 `gacore_memory_vectors`(132 行) /
+  `gacore_episodic_vectors`。bge 模型在本地缓存 `D:\models\bge-small-zh-v1.5`，无需下载。
+
+**实测验证**（`python -m gacore.recall_ab --subset all --max 8`，对活 pgvector 库重放 8 个真实 query）：
+- 环境就位：复用 conda `base`（已有 torch 2.11-cpu）+ 补 `sentence-transformers`/`pgvector`；bge 512 维载入 OK，无重下 torch。
+- 口径修正：**把旧 query 对「今天的库」重放，raw 8/8 全部注入、avg max-sim 0.764（0.59~0.83）**——一旦事实已入库，`recall_context` 的向量召回本身很强。
+  基线里「66% 空返回」主因是**写入时机**：婚姻/身份证等事实在提问数小时后才同步进向量库，非检索失败。
+- 改写对比：rewritten 仅 5/8 注入（3 次 deepseek 空响应失败），avg max-sim 0.714，**未超过 raw，且因改写失败反降了注入可靠性**。
+- 唯一明确收益在 query「找不到了翻遍了也找不到」：raw 召回 langTrack 无关内容，改写后命中「尚婧身份证遗失当晚翻遍家中」。
+- 结论：对本存储/本嵌入，query 改写在聚合口径上是**弱/负收益且脆弱**；更高杠杆是**记忆写入及时性**，而非改写。
+
+**待办更新**：
+- [x] sentence-transformers 就绪，recall_ab 真 A/B 已跑。
+- [ ] 不建议仓促接入生产改写；优先核实并缩短「事件发生→向量库同步」的写入延迟。
+- [ ] 保留 `recall_log` + `summarize` 作为长期召回/改写统计与回归测试底座（已落 `logs/<day>/recall.jsonl`）。
+
+### 2026-09-11 — 清理迁移遗留的包级 `.venv`，统一到 mono 单一根环境
+
+**背景**：审查 monorepo 环境模型时发现 `apps/withlanggraph/.venv` 是从原独立仓库迁入时带进的遗留
+产物——uv workspace 本就共用仓库根一份 `.venv` + 一份 `uv.lock`，包级 `.venv` 会造成环境分叉：
+在里面手工 `pip install` 会绕过 `uv.lock`，踩中 R2「顺手 pip install 不落盘」。AGENTS.md 中
+「双环境：langTrack 用 `.venv`、gacore 用 py12」的旧描述均为迁移前过期说法。
+
+**已完成**：
+- 删除 `apps/withlanggraph/.venv`：确认它为 uv 创建的空壳（17 文件 / 0.48MB，Python 3.13.3，
+  `prompt=withlanggraph`），无任何进程在用，git 早已忽略（`git check-ignore` 命中），删除后无残留跟踪。
+- 修正 `AGENTS.md` 三处过期描述到 mono 单一根环境：① 踩坑记录第 14 条「双环境/py12」→「mono 单一
+  根环境，经 `uv run` 调用」；② 测试命令 `& miniconda\py12\python.exe` → `uv run pytest`；
+  ③ ETL/逆编码/标签命令 `python -m` → `uv run python -m`。
+
+**实测验证**：
+- 清除后 `apps/`、`packages/` 下已无任何 `.venv`，仅剩仓库根 `.venv`。
+- 根环境 `import gacore / langgraph / langchain` 全部 OK；旧 `.venv` 装不上的 langchain/langgraph/
+  pygraphviz 问题在 mono 根环境（uv.lock 统一解析）不成立。
+
+**待办更新**：
+- [x] 删除遗留包级 `.venv`，统一走 mono 根环境。
+- [ ] 历史文档（roadmap/tech 执行记录）里的 `.\.venv` 命令字样为当时实测记录，留作历史，不改写。
