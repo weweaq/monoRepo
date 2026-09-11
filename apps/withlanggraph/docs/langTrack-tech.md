@@ -360,6 +360,33 @@ erDiagram
     location_migration_metrics ||..o{ location_migration_issues : "run 审计"
 ```
 
+### 4.4 出口读方一览 + persona 判定阈值（吸收自原 langTrack-tech-v2.md）
+
+> 字段字典之上补「谁在读 / 读什么字段影响什么判断」的俯瞰视角。以下读方与判定阈值与 §5 出口契约、§4 各表字段一一对应。
+
+**出口读方一览**：出口层全部**只读事实表**，不反向写采集数据。
+
+| 读方（出口） | 直接读哪些事实表 | 产出 |
+|---|---|---|
+| report.py | daily_stats / places / anomalies / stays / trips / route_grids / grid_pois / contract_coverage | 日报文字：屏幕？应用？熬夜？去哪？通勤变没变？ |
+| persona.py | daily_stats / sessions / stays / places / trips | 七日画像：category_usage / screen_health / rhythm / routine / traits / card |
+| dashboard.py | sessions / daily_stats / contract_coverage / dirty_events / fact_card | 深色单页仪表盘（含事实审查块） |
+| fact_card.py | daily_stats / stays / trips / places / anomalies / audio_env / contract_coverage | 统一「今日生活事实」单一数据源（§5.4），langTrack_stats / dashboard / context 共用 |
+| langTrack_stats 工具 | fact_card（outlet=full） | agent 日报自我观察的 JSON |
+
+**persona 判定阈值 → 底层字段对照**（`persona.py:69-77` 等）：
+
+| 画像维度 | 规则 | 底层字段 |
+|---|---|---|
+| 重度屏幕 | 单日 >5h（`_DEFAULT_HEAVY_MS`）且窗口内 ≥60% 天（`_DEFAULT_HEAVY_FRAC`）→ heavy_user | `daily_stats.total_screen_ms` 逐日比对 |
+| 屏幕趋势 | 今日 vs 其余天均值偏差 >±10% → up/down，否则 flat | `daily_stats.total_screen_ms` 日环比 |
+| 夜猫子 | 深夜+凌晨(23:00-05:00)会话占比 ≥25% | `sessions.duration_ms` 按时段聚合 |
+| 作息规律 | 家停驻 ≥3 天 且 公司停驻 ≥3 天 | `places.label`=家/公司 的天然日累计（经 stays→places） |
+| 通勤稳定 | 窗口内 trips ≥3 段 | `trips` 行数 |
+| 时段分桶 | `_SEGMENTS`：凌晨0-5/上午5-11/午后11-14/下午14-18/晚上18-23/深夜23-24（东八区，与 report 一致） | `sessions.start_ms` 归桶累加 |
+
+分类映射：`data/app_categories.json`（gitignore，显示名→大类）覆盖代码内置 `_DEFAULT_CATEGORIES` 兜底（persona.py:87-101），未登录 app 归"其他"并进 `uncategorized`。
+
 ---
 
 ## 5. 出口实体（消费侧契约）
@@ -1339,3 +1366,200 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 - embedding 冒烟：本地 `D:\models\bge-small-zh-v1.5` 秒载（safetensors），`dim=512`；「搬去朝阳」↔「家住朝阳」cos 0.70、「↔吃饺子」0.43——阈值 0.50–0.55 合适。
 - `nearby` 修 `%s::vector` 后对真实 pgvector 查询正常。
 - **方案2 事实画像**：`sync_portrait` 喂 13 行 facts（非 106 行日志），召回质量大幅提升：`婚期是什么`→`[婚姻] 婚期 2026-09-12 领证` (0.344)、`今晚又熬夜`→`[作息] 深夜工作` (0.320)、`搬到朝阳`→`[居住] 现居南京观云润府` (0.544)。初版喂事件日志时，`搬朝阳`误召回`婚期定档`(0.478)——事实画像根除该噪声。
+
+---
+
+## 10. 核心链路字段流转示例（优先字段字典之上的"字段的一生"，吸收自原 langTrack-tech-v2.md）
+
+> 前面是"字段字典"，这一节是"字段的一生"——挑 4 条最难懂的链路，用带具体数值的例子看字段怎么一步步串成最终输出。所有示例均为说明用合理取值，非真实数据。读取方映射见 §4.4，字段含义见 §4。
+
+### 10.1 屏幕使用：一条 usage 事件如何变成日报里"重度使用"这句话
+
+```
+① events 原始行（来源）
+   {type:"usage", ts:1755800001000, data:{screen_on:1, unlock:1, package:"com.tencent.mm", ...}}
+   →（同日多条 usage 按 app 拼接 gap）
+② sessions（事实表，build_sessions 产出）
+   pkg=com.tencent.mm, app=微信, start_ms=1755800001000, end_ms=..., duration_ms=720000(12min)
+   →（当日全部 session duration 汇总）
+③ daily_stats（事实表，build_daily_stats 产出）
+   day=2026-08-22, total_screen_ms=22320000(6h12m), unlock_count=42,
+   app_ranking_json=[{"app":"微信","ms":10800000},{"app":"抖音","ms":9000000},...]
+   →（persona 读 daily_stats）
+④ persona.screen_health
+   avg_total_ms 取窗口 7 天 total_screen_ms 均值；heavy_user 判「单日>5h 且 ≥60% 天数」
+   → 今日 6h12m > 5h → heavy_days 达标 → heavy_user=true
+   trend：今日 vs 其余天均值偏差 >±10% → up
+⑤ report 屏幕节 → 输出句子
+   「今天屏幕用了 6小时12分，比前几天多，属于重度使用」
+```
+
+产出物明确标注字段来源：`6小时12分`=`daily_stats.total_screen_ms`；`重度使用`=`persona.screen_health.heavy_user`；`比前几天多`=`screen_health.trend`。
+
+### 10.2 家/公司识别：candidate_label 一路升级到画像 routine
+
+```
+① daily_stats（前端输入） + stays（位置证据）
+   stays: grid_key=g_1212, 工作日 20:30-07:30 高频停驻，center 靠近某住宅区
+   grid_key=g_3434, 工作日 09:00-18:30 高频停驻
+② build_places → UPSERT places（按 grid_key 归并）
+   两个网格各自 first/last_seen、visit_count 递增；lat/lon/address 等 regeo 回填
+③ infer_home_work_candidates（来源函数）
+   按停留规律打分 → grid_key=g_1212: confidence_home=0.82, confidence_work=0.05
+                    → grid_key=g_3434: confidence_home=0.03, confidence_work=0.78
+   写入 candidate_label（g_1212="home", g_3434="work"）
+   ⚠️ 此时 label 仍是"未知"，候选不污染正式 label（防误判）
+④ label_places 人工确认（或确认脚本）
+   船长确认 g_1212=家 → label="home"，写入 data/place_labels.json
+⑤ 每次 ETL 末尾 apply_labels 恢复 label（重跑不丢人工结论）
+   is_primary 自动标记 top2
+⑥ persona.routine 读取
+   home_days = 窗口内 label=家 的天数(≥3?) 且 work_days(≥3?) → regular=true
+→ 画像输出 「作息规律：家和公司两点一线」
+```
+
+### 10.3 通勤换路线：route_key 指纹怎么触发"路线变了"
+
+```
+① trips（事实表，build_trips 产出）
+   家(grid_key=g_1212) → 公司(grid_key=g_3434)，每天 08:05 一条，dist_m≈12000
+   incremental_encode_trips 补路成功 → polyline=<坐标串>, route_key="v2#a1b2c3", route_encoded_at=...
+② route_grids（build_route_grids 产出，纯本地）
+   trips.polyline 网格量化 → 高频经过网格集合（零配额免费算）
+③ detect_route_changes 比对
+   今天同一起终点 trips.route_key="v2#d4e5f6" ≠ 昨天"v2#a1b2c3" → 通则(路线指纹不一致)
+   → 写 anomalies：kind="route_change", day=today, grid_key=g_1212~
+④ report 移动叙事 → 输出句子
+   「今天通勤走的线路和平时不一样」
+```
+
+### 10.4 数据健康自检：contract_coverage 怎么让 agent 发现自己"瞎了"
+
+```
+① events（GROUP BY type 统计）+ contract.EXPECTED_EVENT_TYPES（契约）
+   build_contract_coverage 重建：type=location 的 last_seen_ts 距今已 9 天
+② contract_coverage 行
+   type=location, arrived=1, event_count=312, last_seen_ts=9天前, status=stale（>STALE_DAYS=7）
+③ fact_card / langTrack_stats.coverage 读 status≠ok 的行
+   coverage=[{type:"location", status:"stale", ...}]
+④ agent 日报自我观察 → 输出
+   「今天没收到 location 上报，位置类数据已停滞 9 天，建议检查采集端权限/开关」
+```
+
+---
+
+## 附录 A：常见"这字段干嘛用的"速查（由 §4/§5/§10 汇总，吸收自原 langTrack-tech-v2.md）
+
+| 你想知道的事 | 去读哪个字段 |
+|---|---|
+| 今天总共刷了多久手机 | `daily_stats.total_screen_ms` |
+| 谁最耗时间 / 画像按类统计 | `daily_stats.app_ranking_json`（persona 按大类聚合） |
+| 是不是夜猫子 | `sessions.duration_ms`（23-05 点占比，persona `night_owl`） |
+| 哪里是家/公司（确认版） | `places.label`（人工确认，ETL 不覆盖） |
+| 系统自己猜的家/公司（未确认） | `places.candidate_label` + `confidence_home/work` |
+| 哪些地方是常驻点 | `places`（按 grid_key 归并，`visit_count` 排序；v2 canonical 看 `places_v2`） |
+| 通勤走的什么路线 | `trips.polyline / route_key` + `route_grids` |
+| 通勤路线变没变 | `trips.route_key` 跨日比对 + `anomalies(kind=route_change)` |
+| 某类事件还上报吗 | `contract_coverage.status` |
+| 上次加工到哪天 | `etl_state.last_event_ts`（增量锚点） |
+| 这次画像/日报的源头 | 全部最终落到 `events` 原始层（唯一事实来源） |
+*（内容由AI生成，仅供参考）*
+
+---
+
+## 附录 B：全应用架构总览（总图 + 模块下钻）
+
+> 由 codemap 走查生成（`apps/withlanggraph/src/gacore/`），总图给全局视野、下钻给每模块真实节点，全部可回溯源码符号。视角是**全应用**，上一节 §1 是其中 langTrack 子系统专用链路。
+
+```mermaid
+flowchart LR
+    %% 总图: 5 层 + 层间数据流; 主图与反馈闭环为精简焦点
+
+    subgraph S1["① 入口/触发层"]
+        direction TB
+        QQ["QQ 前端 frontends/qq.py<br/>消息·反馈路由"]
+        SCD["定时调度 scheduler.py<br/>run_loop · run_job"]
+        PRC["主动外呼 proactive.py<br/>PROACTIVE_POOL"]
+        CLI["CLI / __main__<br/>cli.main/run_repl"]
+        RRN["日报补跑 rerun.py<br/>复用 scheduler.run_job(for_day)"]
+    end
+
+    subgraph S2["② 核心智能层"]
+        direction TB
+        GPH["主图 graph.build_graph()<br/>核心枢纽"]
+        subgraph STSM["主图状态机"]
+            direction TB
+            CLA["classify_message"]
+            RTR["route_after_classify<br/>→ wait|process"]
+            WTF["wait_for_text"]
+            MNT["memory_maintain<br/>→ 长记忆维护"]
+            CLU["cleanup_images"]
+        end
+        CTX["上下文 context.py<br/>build_system/turn_prompt"]
+        STT["state.py GAState<br/>working/轮次/exit_reason"]
+        LLM["llm.py get_llm()<br/>openai/anthropic/deepseek"]
+        MDW["middleware.py<br/>GAPrompt · GATurnLogic<br/>+ langchain ModelRetry"]
+    end
+
+    subgraph S3["③ 工具 / 记忆"]
+        direction TB
+        AGT["核心 agent 子图<br/>_build_core_agent + ToolNode"]
+        subgraph T["工具集 tools/ (按职能归并)"]
+            direction TB
+            T1["get_time/code_run/file_RW"]
+            T2["web_scan/browser/bili_history"]
+            T3["daily_notes/memory_tools"]
+            T4["ncm_* 网易云系列"]
+            T5["send_email/qq_push"]
+            T6["ocr_image/ocr_screen"]
+            T7["langTrack_stats"]
+        end
+        subgraph MEM["记忆·检索"]
+            direction TB
+            MMA["memory_maintenance<br/>Keyword/Vector/Combined→Verdict"]
+            VS["vector_store<br/>portrait+episodic RAG"]
+            EMB["embedding.py bge-small-zh"]
+            PK["daily_info_pack build_info_pack()"]
+            AUD["memory_audit record_audit()"]
+        end
+    end
+
+    subgraph S4["④ 退出 / 投递"]
+        direction TB
+        FBK["反馈闭环 feedback.py<br/>edit/confirm/redeliver"]
+        LOG["jsonl_logger + llm_request_log"]
+    end
+
+    subgraph S5["⑤ langTrack 数据子系统"]
+        direction LR
+        ING["POST /ingest server.py"]
+        RAW["原始层 storage.py<br/>events/batches"]
+        ETL["ETL 事实层 etl.py<br/>12+ 事实表"]
+        OUT["读方出口<br/>fact_card·report·dashboard<br/>trajectory_map·qq_push·langTrack_stats"]
+    end
+
+    %% ===== 层间数据流 =====
+    QQ --> GPH
+    SCD --> GPH
+    PRC --> GPH
+    CLI --> GPH
+    RRN --> SCD
+
+    GPH --> CTX --> LLM --> GPH
+    GPH <--> MDW
+    GPH <--> STT
+
+    GPH --> AGT
+    AGT --> T
+    GPH --> MNT
+    MNT --> MMA
+    MNT --> AUD
+
+    T7 --> OUT
+    T3 --> MEM
+
+    GPH -- "反馈消息" --> FBK
+    GPH --> LOG
+
+    ING --> RAW --> ETL --> OUT
+```
