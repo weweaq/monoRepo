@@ -38,10 +38,19 @@
 - type 限定：feat / fix / docs / test / style / refactor / chore / perf
 - 一个提交只做一件事；跨包联动改动允许一个提交覆盖所涉包，但 scope 写明（如 `feat(langTrack,amap-sdk): ...`）
 
-### R5 文档同步
-- 任何代码改动：对应 app 的 ROADMAP.md 追加执行记录（背景 / 已完成 / 实测验证 / 偏差说明 / 待办更新）
-- 涉及接口、表结构、数据流：同步更新该 app 的 tech 文档
-- 文档变更单独成提交（`docs(scope): ...`），不与代码混提
+### R5 文档同步（三处强制同步，缺一即失配）
+任何代码改动，**必须同时同步以下三处**，确保三者始终反映同一份真实并互不失真：
+
+1. **ROADMAP.md** — 追加执行记录（背景 / 已完成 / 实测验证 / 偏差说明 / 待办更新）
+2. **该 app 的 tech 文档**（如 `apps/<app>/docs/<app>-tech.md`）— 涉及接口、表结构、数据流、架构时同步更新
+3. **架构图**（`apps/<app>/docs/architecture-flow.mmd` 及嵌入 tech 的 mermaid）— 涉及模块/数据流/依赖变化时必须同步，用 codemap skill 走查并更新，未经核实不得手改
+
+**"不失真"硬性约定：**
+- 三处描述同一接口/表/数据流时，符号名、字段名、连线方向必须一字不差，禁止含糊措辞掩盖真实实现
+- 架构图每个节点必须可回溯到真实源码符号；改代码后如架构变动，用 codemap 复审（UNVERIFIED 清、关键 MISSING 补）再落盘
+- 三处之一若出现"与代码不一致"，等同代码缺陷，必须修复后才能提交
+
+文档变更单独成提交（`docs(scope): ...`），不与代码混提。
 
 ### R6 数据库约定
 - 每表必有 `created_at` / `updated_at`，默认值 `datetime('now','+8 hours')`；`created_at` = 首写，`updated_at` = 最近更新
@@ -96,9 +105,9 @@ uv run pre-commit install                       # 启用 git 提交钩子（首�
 
 - [ ] 按小步提交推进：本提交聚焦单一目的（R4）
 - [ ] ruff + pytest 全绿（R7）
-- [ ] 提交信息符合 `type(scope): 描述`（R4）
+- [ ] 涉及代码改动：ROADMAP、tech、架构图**三处已同步且不失真**（R5）
 - [ ] ROADMAP.md 追加了执行记录（R5）
-- [ ] 涉及接口/表结构时 tech 文档已同步（R5）
+- [ ] 涉及接口/表结构/数据流：tech 文档与架构图已同步（R5）
 - [ ] 无新硬编码密钥（R9）
 - [ ] 新增依赖已写入对应 pyproject.toml（R2）
 - [ ] 跨包改动依赖方向合规（R2）
