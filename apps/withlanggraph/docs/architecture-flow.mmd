@@ -94,3 +94,47 @@ flowchart TD
     CU -. 日报正文 .-> FB
 
     IG --> RW --> ET --> OU
+
+    %% ============================================================
+    %% 设计规范 (参照 diagram-design 编辑级原则)
+    %% 1. 强调色只给 1-2 个焦点: ① process 的 reAct 循环(核心智能 focus)
+    %%    ② 反馈闭环 FB(边界/回环 bnd, 虚线强调). 其余一律中性语义.
+    %% 2. 模块区分 = 容器淡底色 + 节点白底同色描边; 不做满屏彩色填充.
+    %% 3. 节点分档: 状态/存储=淡墨灰(state), 异步/写回=虚线, 焦点=强调橙.
+    %%    色系: 入口-蓝 | 主图-绿 | 记忆-紫 | 工具-橙 | langTrack-青 | 出口-粉
+    %% ============================================================
+
+    %% --- 节点语义 classDef (模块色一律白底同色描边, 低干扰) ---
+    classDef entry fill:#ffffff,stroke:#1E88E5,color:#0D47A1
+    classDef main  fill:#ffffff,stroke:#66BB6A,color:#1B5E20
+    classDef side  fill:#ffffff,stroke:#9CCC65,color:#33691E
+    classDef mem   fill:#ffffff,stroke:#8E24AA,color:#4A148C
+    classDef tools fill:#ffffff,stroke:#F9A825,color:#E65100
+    classDef lang  fill:#ffffff,stroke:#00ACC1,color:#006064
+    classDef out   fill:#ffffff,stroke:#EC407A,color:#880E4F
+    classDef state fill:#f3f4f6,stroke:#2D3142,color:#2D3142
+    classDef focus fill:#FFF3E0,stroke:#EB6C36,stroke-width:2.5px,color:#B33900
+    classDef bnd   fill:#ffffff,stroke:#EB6C36,stroke-width:1.5px,stroke-dasharray:5 4,color:#B33900
+
+    %% --- 容器底色 (模块分界, 低饱和 background) ---
+    style ENTRY fill:#EBF3FB,stroke:#1E88E5,stroke-width:1.5px,color:#0D47A1
+    style MAIN  fill:#F6FAF5,stroke:#43A047,stroke-width:1.5px,color:#1B5E20
+    style FLOW  fill:#EEF7ED,stroke:#66BB6A,color:#1B5E20
+    style PR    fill:#FFF3E0,stroke:#EB6C36,stroke-width:2px,color:#B33900
+    style SIDE  fill:#F8FBF0,stroke:#9CCC65,color:#33691E
+    style MM    fill:#FBF4FB,stroke:#8E24AA,stroke-width:1.5px,color:#4A148C
+    style TOOLS fill:#FFFBF0,stroke:#F9A825,stroke-width:1.5px,color:#E65100
+    style LANG  fill:#F1FAFC,stroke:#00ACC1,stroke-width:1.5px,color:#006064
+    style OUT   fill:#FEF5F7,stroke:#EC407A,stroke-width:1.5px,color:#880E4F
+
+    %% --- 节点归组 (按模块; 焦点/边界/状态单独强调) ---
+    class SC,QQ,RC entry
+    class S,CL,WT,MMX,CU main
+    class MD,TN focus
+    class ST state
+    class MDW side
+    class TR,JD,AP,AU,TRN mem
+    class T1,T2,T3,T4,T5,T6 tools
+    class IG,RW,ET,OU lang
+    class LG out
+    class FB bnd
