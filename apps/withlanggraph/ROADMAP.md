@@ -527,3 +527,27 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 **待办更新**：新增——QQ 真实环境联调一轮（澄清→确认→确认重发）；两段确认 if 中间态文案
 （反馈 ID 短 hash）与「确认」即生效的取舍待用户实测反馈；`feedback.py` 后续可考虑并入
 `redeliver_latest` 的按日批量聚合重发阈值观测。
+
+### 2026-09-11 — 日志跨天轮转收尾 + langTrack 时间依赖测试修复
+
+**背景**：补上日报反馈闭环落地当天的两件收尾——①前端订阅队列日志仍钉进程启动日，
+需按实际记录日跨天轮转；②`detect_anomalies` 依赖系统当前时间导致测试不稳定
+（随跑测时刻漂移）。
+
+**已完成**：
+- `jsonl_logger.py` 新增 `_DailyFileHandler`：按每条 `LogRecord.created` 推算发出日，
+  `logs/{发出日}/app.jsonl` 落盘，跨午夜自动切新文件（线程安全），不再钉进程启动日。
+- `etl.detect_anomalies` 增加 `now_ms: int | None` 注入参数，兼容原有行为；
+  `test_langTrack_report_evidence.py` 两处探测用例改为注入固定时间戳。
+- 根 `.gitignore` 追加 `.trae-html-share-packages/` 与 `**_shared/`（TRAE html-share
+  运行时生成产物，非源码）。
+
+**实测验证**：
+- `test_jsonl_logger_daily.py` 新增 3 用例：跨天轮转 / 同日追加 / 记录带格式化 ts，全过。
+- 全仓 pytest **1080 passed, 1 skipped**（1 skipped 为既知上游 qq 角色卡切换）。
+
+**偏差说明**：
+- 日志轮转仅覆盖审计日志流（app.jsonl 等 Handler 族）；若未来引入需跨天聚合的独立写入，
+  沿用同一 Handler 即可，未另抽基类。
+
+**待办更新**：无新增。
