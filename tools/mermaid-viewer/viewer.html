@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mermaid Viewer - 本地 mmd 查看器</title>
+<style>
+  :root {
+    --paper: #fbfbfa;
+    --ink: #1f2733;
+    --muted: #8a919c;
+    --accent: #2f6fed;
+    --border: #e3e7ee;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--paper); color: var(--ink); font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  #toolbar {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 10;
+    display: flex; align-items: center; gap: 8px;
+    padding: 8px 14px; background: rgba(255,255,255,.92); backdrop-filter: blur(4px);
+    border-bottom: 1px solid var(--border);
+  }
+  #toolbar .logo { font-weight: 600; margin-right: 6px; }
+  #toolbar .btn {
+    border: 1px solid var(--border); background: #fff; color: var(--ink);
+    border-radius: 6px; padding: 5px 12px; cursor: pointer; font-size: 13px; line-height: 1.2;
+    user-select: none;
+  }
+  #toolbar .btn:hover { border-color: var(--accent); color: var(--accent); }
+  #toolbar .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  #toolbar .spacer { flex: 1; }
+  #toolbar .hint { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  #fileName { color: var(--ink); font-size: 12px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #stage {
+    position: fixed; inset: 0; top: 45px; overflow: hidden; padding: 0;
+  }
+  #mmd-host {
+    position: absolute; inset: 0; display: block;
+  }
+  #mmd-host svg {
+    display: block; width: 100%; height: 100%;
+    max-width: none; max-height: none; background: var(--paper);
+  }
+  #empty {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 8px;
+    color: var(--muted); text-align: center; padding: 24px;
+  }
+  #empty .big { font-size: 18px; color: var(--ink); margin-bottom: 4px; }
+  #empty.dragover { background: rgba(47,111,237,.06); }
+  #error {
+    position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+    max-width: 70%; padding: 14px 18px; border-radius: 8px;
+    background: #fdecea; color: #b3261e; border: 1px solid #f5c6c2;
+    font-size: 13px; line-height: 1.6; white-space: pre-wrap; text-align: left;
+  }
+  #node-tooltip {
+    position: fixed; z-index: 20; pointer-events: none; display: none;
+    max-width: 320px; padding: 8px 10px; border-radius: 6px;
+    background: rgba(31,39,51,.94); color: #fff; font-size: 12px; line-height: 1.5;
+    box-shadow: 0 4px 14px rgba(0,0,0,.18); white-space: pre-wrap;
+  }
+  #status {
+    position: fixed; right: 12px; bottom: 10px; z-index: 10;
+    font-size: 11px; color: var(--muted);
+    background: rgba(255,255,255,.85); padding: 3px 8px; border-radius: 999px;
+    border: 1px solid var(--border);
+  }
+  input[type="file"] { display: none; }
+</style>
+</head>
+<body>
+  <div id="toolbar">
+    <span class="logo">Mermaid Viewer</span>
+    <button class="btn primary" id="btn-open">打开 .mmd</button>
+    <span class="spacer"></span>
+    <button class="btn" id="btn-fit">Fit</button>
+    <button class="btn" id="btn-in">+ Zoom in</button>
+    <button class="btn" id="btn-out">- Zoom out</button>
+    <button class="btn" id="btn-reset">Reset</button>
+    <span class="spacer"></span>
+    <span id="fileName"></span>
+    <span class="hint">拖拽文件到此窗口即可打开 · 拖动平移 / 滚轮缩放</span>
+  </div>
+  <div id="stage">
+    <div id="mmd-host"></div>
+    <div id="empty" class="">
+      <div class="big">拖拽 .mmd 文件到窗口，或点左上角「打开 .mmd」</div>
+      <div>离线运行 · 支持平移缩放 / Fit 自适应</div>
+    </div>
+  </div>
+  <input type="file" id="fileInput" accept=".mmd,.mermaid,.txt">
+  <div id="node-tooltip"></div>
+  <div id="status"></div>
+
+  <script src="./vendor/mermaid.min.js"></script>
+  <script src="./vendor/svg-pan-zoom.min.js"></script>
+  <script>
+    (function () {
+      var host = document.getElementById("mmd-host");
+      var empty = document.getElementById("empty");
+      var fileInput = document.getElementById("fileInput");
+      var fileNameEl = document.getElementById("fileName");
+      var tip = document.getElementById("node-tooltip");
+      var status = document.getElementById("status");
+      var panZoom = null;
+      var errorBox = null;
+
+      mermaid.initialize({
+        startOnLoad: false,
+        maxTextSize: 500000,
+        maxEdges: 200000,
+        securityLevel: "loose",
+        flowchart: { curve: "basis", htmlLabels: true }
+      });
+
+      function render(name, src) {
+        clearError();
+        fileNameEl.textContent = name;
+        renderWithMermaid(src);
+      }
+
+      function renderWithMermaid(src) {
+        try {
+          mermaid.render("mdv", src).then(function (res) {
+            host.innerHTML = res.svg;
+            empty.style.display = "none";
+            attachTip();
+            bindPanZoom();
+          }).catch(function (e) {
+            showError("渲染失败: " + (e && e.message ? e.message : e));
+          });
+        } catch (e) {
+          showError("渲染异常: " + (e && e.message ? e.message : e));
+        }
+      }
+
+      function bindPanZoom() {
+        var svg = host.querySelector("svg");
+        if (!svg) return;
+        if (panZoom) panZoom.destroy();
+        panZoom = svgPanZoom(svg, {
+          zoomEnabled: true, panEnabled: true,
+          controlIconsEnabled: false, fit: true, center: true,
+          minZoom: 0.1, maxZoom: 10
+        });
+        updateStatus();
+      }
+
+      function attachTip() {
+        var svg = host.querySelector("svg");
+        if (!svg) return;
+        var nodes = svg.querySelectorAll(".node");
+        Array.prototype.forEach.call(nodes, function (n) {
+          var g = svg.querySelector('g[aria-labelledby="' + n.id.replace(/graph-/g, "") + '"]');
+          n.addEventListener("mousemove", function (ev) {
+            tip.textContent = (g && g.getAttribute("aria-label")) || n.id;
+            showTip(ev);
+          });
+          n.addEventListener("mouseleave", function () { tip.style.display = "none"; });
+        });
+      }
+
+      function showTip(ev) {
+        var off = 14;
+        tip.style.left = (ev.clientX + off) + "px";
+        tip.style.top = (ev.clientY + off) + "px";
+        tip.style.display = "block";
+      }
+
+      function updateStatus() {
+        if (!panZoom) return;
+        status.textContent = "zoom " + Math.round(panZoom.getZoom() * 100) + "%";
+      }
+
+      function showError(msg) {
+        clearError();
+        errorBox = document.createElement("div");
+        errorBox.id = "error";
+        errorBox.textContent = msg;
+        document.getElementById("stage").appendChild(errorBox);
+        status.textContent = "error";
+      }
+      function clearError() {
+        if (errorBox) { errorBox.remove(); errorBox = null; }
+      }
+
+      // ---- open by picker ----
+      document.getElementById("btn-open").addEventListener("click", function () { fileInput.click(); });
+      fileInput.addEventListener("change", function () {
+        var f = fileInput.files && fileInput.files[0];
+        if (!f) return;
+        var reader = new FileReader();
+        reader.onload = function () { render(f.name, String(reader.result)); };
+        reader.readAsText(f, "utf-8");
+        fileInput.value = "";
+      });
+
+      // ---- open by drag & drop ----
+      window.addEventListener("dragover", function (ev) {
+        ev.preventDefault();
+        empty.classList.add("dragover");
+      });
+      window.addEventListener("dragleave", function () { empty.classList.remove("dragover"); });
+      window.addEventListener("drop", function (ev) {
+        ev.preventDefault();
+        empty.classList.remove("dragover");
+        var f = ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0];
+        if (!f) return;
+        var reader = new FileReader();
+        reader.onload = function () { render(f.name, String(reader.result)); };
+        reader.readAsText(f, "utf-8");
+      });
+
+      // ---- zoom / fit ----
+      document.getElementById("btn-fit").addEventListener("click", function () { if (panZoom) { panZoom.fit(); panZoom.center(); } });
+      document.getElementById("btn-in").addEventListener("click", function () { if (panZoom) panZoom.zoomIn(); });
+      document.getElementById("btn-out").addEventListener("click", function () { if (panZoom) panZoom.zoomOut(); });
+      document.getElementById("btn-reset").addEventListener("click", function () { if (panZoom) { panZoom.resetZoom(); panZoom.resetPan(); } });
+
+      // click on empty area focuses window so zoom shortcuts work
+      window.addEventListener("click", function () { });
+    })();
+  </script>
+</body>
+</html>
