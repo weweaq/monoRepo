@@ -43,7 +43,7 @@
 
 1. **ROADMAP.md** — 追加执行记录（背景 / 已完成 / 实测验证 / 偏差说明 / 待办更新）
 2. **该 app 的 tech 文档**（如 `apps/<app>/docs/<app>-tech.md`）— 涉及接口、表结构、数据流、架构时同步更新
-3. **架构图**（`apps/<app>/docs/architecture-flow.mmd` 及嵌入 tech 的 mermaid）— 涉及模块/数据流/依赖变化时必须同步，用 codemap skill 走查并更新，未经核实不得手改
+3. **架构图**（`apps/<app>/docs/architecture-flow.mmd`）— 涉及模块/数据流/依赖变化时必须同步，用 codemap skill 走查并更新，未经核实不得手改。**架构图单一真源**：tech 文档只以相对链接引用 `.mmd`，禁止在 tech 里内嵌 mermaid 副本（避免双份维护失真）
 
 **"不失真"硬性约定：**
 - 三处描述同一接口/表/数据流时，符号名、字段名、连线方向必须一字不差，禁止含糊措辞掩盖真实实现
