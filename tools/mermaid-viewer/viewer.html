@@ -11,6 +11,8 @@
     --muted: #8a919c;
     --accent: #2f6fed;
     --border: #e3e7ee;
+    --ok: #2e7d32;
+    --danger: #b3261e;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; height: 100%; background: var(--paper); color: var(--ink); font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
@@ -28,15 +30,14 @@
   }
   #toolbar .btn:hover { border-color: var(--accent); color: var(--accent); }
   #toolbar .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  #toolbar .btn.outline { background: #fff; color: var(--accent); border-color: var(--accent); }
   #toolbar .spacer { flex: 1; }
   #toolbar .hint { color: var(--muted); font-size: 12px; white-space: nowrap; }
-  #fileName { color: var(--ink); font-size: 12px; max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #fileName { color: var(--ink); font-size: 12px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #stage {
     position: fixed; inset: 0; top: 45px; overflow: hidden; padding: 0;
   }
-  #mmd-host {
-    position: absolute; inset: 0; display: block;
-  }
+  #mmd-host { position: absolute; inset: 0; display: block; }
   #mmd-host svg {
     display: block; width: 100%; height: 100%;
     max-width: none; max-height: none; background: var(--paper);
@@ -51,7 +52,7 @@
   #error {
     position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
     max-width: 70%; padding: 14px 18px; border-radius: 8px;
-    background: #fdecea; color: #b3261e; border: 1px solid #f5c6c2;
+    background: #fdecea; color: var(--danger); border: 1px solid #f5c6c2;
     font-size: 13px; line-height: 1.6; white-space: pre-wrap; text-align: left;
   }
   #node-tooltip {
@@ -66,6 +67,69 @@
     background: rgba(255,255,255,.85); padding: 3px 8px; border-radius: 999px;
     border: 1px solid var(--border);
   }
+
+  /* ---- review side panel ---- */
+  #side {
+    position: fixed; top: 45px; right: 0; bottom: 0; z-index: 30;
+    width: 320px; max-width: 86vw; background: #fff;
+    border-left: 1px solid var(--border);
+    transform: translateX(100%); transition: transform .2s ease;
+    display: flex; flex-direction: column; box-shadow: -6px 0 18px rgba(0,0,0,.06);
+  }
+  #side.open { transform: translateX(0); }
+  #side .head {
+    display: flex; align-items: center; gap: 8px; padding: 12px 14px;
+    border-bottom: 1px solid var(--border); font-weight: 600;
+  }
+  #side .head .btn { margin-left: auto; }
+  #side .list { flex: 1; overflow: auto; padding: 8px 12px; }
+  #side .list .empty-hint { color: var(--muted); font-size: 13px; padding: 12px 4px; }
+  .rvw {
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin-bottom: 8px;
+    background: #fcfcfd;
+  }
+  .rvw .r-top { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+  .rvw .r-sym { font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: var(--accent); background: #eef4ff; border-radius: 4px; padding: 1px 6px; }
+  .rvw .r-type {
+    font-size: 10px; padding: 1px 6px; border-radius: 999px; text-transform: uppercase; font-weight: 600;
+  }
+  .rvw .r-type.review { background: #fff3e0; color: #b33900; }
+  .rvw .r-type.fix    { background: #fdecea; color: var(--danger); }
+  .rvw .r-type.idea   { background: #e3f2fd; color: #0d47a1; }
+  .rvw .r-type.question { background: #f3eefd; color: #5e35b1; }
+  .rvw .r-txt { font-size: 13px; color: var(--ink); white-space: pre-wrap; word-break: break-word; }
+  .rvw .r-del { cursor: pointer; color: var(--muted); font-size: 12px; padding: 0 4px; margin-left: auto; }
+  .rvw .r-del:hover { color: var(--danger); }
+
+  /* ---- comment composer modal ---- */
+  #modal-cover {
+    position: fixed; inset: 0; z-index: 40; background: rgba(20,26,35,.38);
+    display: none; align-items: center; justify-content: center; padding: 20px;
+  }
+  #modal-cover.show { display: flex; }
+  #composer {
+    background: #fff; border-radius: 10px; width: 460px; max-width: 96vw;
+    padding: 16px; box-shadow: 0 12px 40px rgba(0,0,0,.22);
+  }
+  #composer h3 { margin: 0 0 10px; font-size: 15px; }
+  #composer .anchor {
+    font-size: 12px; color: var(--muted); background: #f2f4f7; border-radius: 6px;
+    padding: 6px 8px; margin-bottom: 10px; word-break: break-all; font-family: ui-monospace, Consolas, monospace;
+  }
+  #composer .field { margin-bottom: 10px; }
+  #composer .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  #composer .type-pick { display: flex; gap: 6px; }
+  #composer .type-pick button {
+    flex: 1; padding: 6px 0; border: 1px solid var(--border); border-radius: 6px; background: #fff;
+    font-size: 13px; cursor: pointer; color: var(--ink);
+  }
+  #composer .type-pick button.active { border-color: var(--accent); color: var(--accent); background: #eef4ff; font-weight: 600; }
+  #composer textarea {
+    width: 100%; min-height: 84px; resize: vertical; padding: 8px 10px;
+    border: 1px solid var(--border); border-radius: 6px; font-size: 13px; font-family: inherit; line-height: 1.5;
+  }
+  #composer textarea:focus { outline: none; border-color: var(--accent); }
+  #composer .cmds { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
   input[type="file"] { display: none; }
 </style>
 </head>
@@ -73,6 +137,10 @@
   <div id="toolbar">
     <span class="logo">Mermaid Viewer</span>
     <button class="btn primary" id="btn-open">打开 .mmd</button>
+    <button class="btn outline" id="btn-side">评论 (<span id="side-count">0</span>)</button>
+    <span class="spacer"></span>
+    <button class="btn primary" id="btn-export">导出标记</button>
+    <button class="btn outline" id="btn-png">导出 PNG</button>
     <span class="spacer"></span>
     <button class="btn" id="btn-fit">Fit</button>
     <button class="btn" id="btn-in">+ Zoom in</button>
@@ -80,18 +148,51 @@
     <button class="btn" id="btn-reset">Reset</button>
     <span class="spacer"></span>
     <span id="fileName"></span>
-    <span class="hint">拖拽文件到此窗口即可打开 · 拖动平移 / 滚轮缩放</span>
+    <span class="hint">点击节点/连线条目可评论 · 拖拽平移 / 滚轮缩放</span>
   </div>
   <div id="stage">
     <div id="mmd-host"></div>
     <div id="empty" class="">
       <div class="big">拖拽 .mmd 文件到窗口，或点左上角「打开 .mmd」</div>
-      <div>离线运行 · 支持平移缩放 / Fit 自适应</div>
+      <div>离线运行 · 点击节点/连线可评论 · 平移缩放 / Fit 自适应</div>
     </div>
+  </div>
+  <div id="side">
+    <div class="head">
+      评论
+      <button class="btn" id="btn-close-side">关闭</button>
+      <button class="btn" id="btn-clear-side" title="清空">清空</button>
+    </div>
+    <div class="list" id="rvw-list"></div>
   </div>
   <input type="file" id="fileInput" accept=".mmd,.mermaid,.txt">
   <div id="node-tooltip"></div>
   <div id="status"></div>
+
+  <!-- comment composer -->
+  <div id="modal-cover">
+    <div id="composer">
+      <h3>标注</h3>
+      <div class="anchor" id="cm-anchor"></div>
+      <div class="field">
+        <label>类型</label>
+        <div class="type-pick" id="cm-types">
+          <button data-t="review" class="active">review</button>
+          <button data-t="fix">fix</button>
+          <button data-t="idea">idea</button>
+          <button data-t="question">question</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>意见 / 说明</label>
+        <textarea id="cm-text" placeholder="这里哪里不对 / 希望怎么改..."></textarea>
+      </div>
+      <div class="cmds">
+        <button class="btn" id="cm-cancel">取消</button>
+        <button class="btn primary" id="cm-save">保存</button>
+      </div>
+    </div>
+  </div>
 
   <script src="./vendor/mermaid.min.js"></script>
   <script src="./vendor/svg-pan-zoom.min.js"></script>
@@ -106,6 +207,19 @@
       var panZoom = null;
       var errorBox = null;
 
+      // ---- state: symbols parsed from mmd + reviews (per file) ----
+      var currentSrc = "";
+      var currentNodeMap = {};   // { displayText_lower: [symbolName,...] }
+      var currentEdgeList = [];  // [{sym,label}]  raw edge strings w/ label
+      var currentReviews = [];   // [{id,type,sym,date,text}]
+      var currentSvg = null;     // last rendered <svg> element (for PNG export)
+      var cleanSvgString = "";   // pristine mermaid SVG (no pan/zoom), for PNG export
+
+      var SYMS_KEY = "mdv_syms"; // fileKey -> reviews object
+
+      // --------------------------------------------------------------
+      // mermaid config
+      // --------------------------------------------------------------
       mermaid.initialize({
         startOnLoad: false,
         maxTextSize: 500000,
@@ -114,9 +228,99 @@
         flowchart: { curve: "basis", htmlLabels: true }
       });
 
+      // --------------------------------------------------------------
+      // mmd symbol parsing (best-effort) — build text->symbol map so we
+      // can anchor a clicked node/edge back to its .mmd source symbol.
+      // --------------------------------------------------------------
+      function parseSymbols(src) {
+        currentNodeMap = {};
+        currentEdgeList = [];
+
+        // strip comments
+        var code = src.split("\n").filter(function (l) { return !/^\s*%%/.test(l); }).join("\n");
+
+        // 1) node ids and their display text.
+        //    Match: ID["text"] | ID[["text"]] | ID(("text")) | ID(["text"])
+        //    also ID--> , ID-.-> anchors without labels are node ids only.
+        var re = /([A-Za-z_][A-Za-z0-9_]*)\s*(\[\[|\{|\(\(|\[)([^\]\]]*?)(\]\]|\}\}|\]\)|\])/g;
+        // We'll do a simpler two-pass: first collect all NODEDEF patterns.
+        var nodeRe = /([A-Za-z_][A-Za-z0-9_]*)\s*(\[\s*\[|\{\{|\(\(|\[)([\s\S]*?)(\]\s*\]|\}\}|\)\)|\])/g;
+        var m;
+        var defined = {};
+        while ((m = nodeRe.exec(code)) !== null) {
+          var sym = m[1], inner = m[2], text = m[3];
+          // value inside can contain XING marks but not container chars we already captured
+          var clean = text.replace(/[X_#]/g, "").replace(/<br\/?>/gi, " ").trim();
+          // the outer "]" we matched also matches simple A["b"] and cyl/hex shapes
+          if (inner.indexOf("[") === -1 && inner.indexOf("{") === -1 && inner.indexOf("(") === -1) {
+            if (clean) defined[sym] = clean;
+          } else if (inner.indexOf("(") !== -1 || inner.indexOf("{") !== -1) {
+            // stady [[A]] or hex {{A}} or subroutine (A)
+            if (clean) defined[sym] = clean;
+          }
+        }
+
+        // 2) additionally, a bare node used as edge endpoint w/o def may still
+        //    appear in repositioning: `A-->B`. We only care about text lookup.
+
+        // index by lowercase display text
+        Object.keys(defined).forEach(function (k) {
+          var key = String(defined[k]).toLowerCase().trim();
+          if (!key) return;
+          if (!currentNodeMap[key]) currentNodeMap[key] = [];
+          currentNodeMap[key].push(k);
+        });
+
+        // 3) edges with labels:  A -->|label| B  /  A-.label.->B / A--text-->B
+        var edgeRe = /([A-Za-z_][A-Za-z0-9_]*)\s*(?:-->|\-\.->|--o\-\-|--)|\|([^|]*)\||\s*(?:[\-.])?->?/gi;
+        // simplify: capture `-->label-->` pattern and `-. text .->`
+        var edgeLabelRe = /([A-Za-z_][A-Za-z0-9_]*)\s*(-\.|\-\-)>?\s*\|\s*([^|]*)\s*\|/g;
+        var e;
+        while ((e = edgeLabelRe.exec(code)) !== null) {
+          var edg = { sym: (e[1] + " -->|" + e[3].trim() + "| ..."), label: e[3].trim() };
+          if (edg.label) currentEdgeList.push(edg);
+        }
+        var edgeDotRe = /([A-Za-z_][A-Za-z0-9_]*)\s*\-\-\s*(.*?)\s*\-\->/g;
+        // (kept minimal to avoid false positives)
+      }
+
+      // --------------------------------------------------------------
+      // reviews persistence (localStorage, keyed by file name)
+      // --------------------------------------------------------------
+      function fileKey() { return fileNameEl.textContent || "(untitled)"; }
+      function loadStore() {
+        try {
+          var o = JSON.parse(localStorage.getItem("mdv_reviews_v1") || "{}");
+          return o || {};
+        } catch (e) { return {}; }
+      }
+      function saveStore() {
+        try {
+          var all = loadStore();
+          all[fileKey()] = currentReviews;
+          localStorage.setItem("mdv_reviews_v1", JSON.stringify(all));
+        } catch (e) { /* storage blocked */ }
+      }
+      function loadCurrent() {
+        currentReviews = loadStore()[fileKey()] || [];
+        updateSideCount();
+        renderSideList();
+      }
+      function nextId() {
+        var max = 0;
+        currentReviews.forEach(function (r) { if (r.id > max) max = r.id; });
+        return max + 1;
+      }
+
+      // --------------------------------------------------------------
+      // render + pan zoom
+      // --------------------------------------------------------------
       function render(name, src) {
         clearError();
+        currentSrc = src;
         fileNameEl.textContent = name;
+        parseSymbols(src);
+        loadCurrent();
         renderWithMermaid(src);
       }
 
@@ -125,7 +329,9 @@
           mermaid.render("mdv", src).then(function (res) {
             host.innerHTML = res.svg;
             empty.style.display = "none";
-            attachTip();
+            currentSvg = host.querySelector("svg");
+            cleanSvgString = res.svg;
+            attachInteract();
             bindPanZoom();
           }).catch(function (e) {
             showError("渲染失败: " + (e && e.message ? e.message : e));
@@ -145,47 +351,309 @@
           minZoom: 0.1, maxZoom: 10
         });
         updateStatus();
+        panZoom.off && null;
       }
 
-      function attachTip() {
+      // --------------------------------------------------------------
+      // interaction: hover tooltip + click-to-comment (node or edge)
+      // Some classes of mermaid comment descriptors:
+      //   node:  <g class="node" id="..."><...><text>label</text>
+      //   edge:  <g class="edgePaths"><path/></g> ... title gives "A-->|x|B"
+      // We map display text -> symbol via currentNodeMap, and edge labels
+      // via currentEdgeList (fall back to title text).
+      // --------------------------------------------------------------
+      var lastClickPt = null;
+      var lastClickCls = null;
+
+      function attachInteract() {
         var svg = host.querySelector("svg");
         if (!svg) return;
+
+        // --- edges (click on a path edge) ---
+        var edgePaths = svg.querySelectorAll(".edgePaths .edgePath path, .edgePaths .edge-thickness .path");
+        Array.prototype.forEach.call(edgePaths, function (p) {
+          p.addEventListener("mousemove", function (ev) {
+            var t = edgeTitle(p);
+            tip.textContent = t || "edge";
+            showTip(ev);
+          });
+          p.addEventListener("mouseleave", function () { tip.style.display = "none"; });
+          p.addEventListener("click", function (ev) {
+            ev.stopPropagation();
+            var t = edgeTitle(p) || "";
+            openComposer(t, t);
+          });
+        });
+
+        // --- nodes ---
         var nodes = svg.querySelectorAll(".node");
         Array.prototype.forEach.call(nodes, function (n) {
-          var g = svg.querySelector('g[aria-labelledby="' + n.id.replace(/graph-/g, "") + '"]');
           n.addEventListener("mousemove", function (ev) {
-            tip.textContent = (g && g.getAttribute("aria-label")) || n.id;
+            var sym = nodeCommentSym(n);
+            tip.textContent = sym;
             showTip(ev);
           });
           n.addEventListener("mouseleave", function () { tip.style.display = "none"; });
+          // click on a node (svg-pan-zoom may treat as pan; we only open when
+          // not a drag, handled below via mousedown/click delta guard)
+        });
+
+        // node clicks with drag guard (svg-pan-zoom pans on drag)
+        var startX = 0, startY = 0, downTarget = null, downCls = false;
+        svg.addEventListener("mousedown", function (ev) {
+          startX = ev.clientX; startY = ev.clientY;
+          downTarget = ev.target;
+          downCls = ev.target.closest && ev.target.closest(".node");
+        });
+        svg.addEventListener("click", function (ev) {
+          var moved = Math.hypot(ev.clientX - startX, ev.clientY - startY);
+          if (moved > 6) return;          // it was a pan, not a click
+          var nodeEl = ev.target && ev.target.closest ? ev.target.closest(".node") : null;
+          if (nodeEl) {
+            ev.stopPropagation();
+            var sym = nodeCommentSym(nodeEl);
+            openComposer(sym, sym);
+          }
         });
       }
 
-      function showTip(ev) {
-        var off = 14;
-        tip.style.left = (ev.clientX + off) + "px";
-        tip.style.top = (ev.clientY + off) + "px";
-        tip.style.display = "block";
+      function edgeTitle(p) {
+        var t = p.querySelector && p.querySelector("title");
+        return t ? t.textContent.trim() : "";
       }
 
-      function updateStatus() {
-        if (!panZoom) return;
-        status.textContent = "zoom " + Math.round(panZoom.getZoom() * 100) + "%";
+      function nodeCommentSym(nodeEl) {
+        // prefer the aria-label (contains display text), map back to mmd symbol
+        var textEl = nodeEl.querySelector && (nodeEl.querySelector("text") || nodeEl);
+        var disp = (textEl && textEl.textContent) || nodeEl.id;
+        disp = disp.replace(/<br\/?>/gi, " ").trim();
+        var key = disp.toLowerCase();
+        if (currentNodeMap[key] && currentNodeMap[key].length) {
+          return "节点 " + currentNodeMap[key][0] + "（" + disp + "）";
+        }
+        // fallback: node id
+        return "节点 " + (nodeEl.id || disp) + "（" + disp + "）";
       }
 
-      function showError(msg) {
-        clearError();
-        errorBox = document.createElement("div");
-        errorBox.id = "error";
-        errorBox.textContent = msg;
-        document.getElementById("stage").appendChild(errorBox);
-        status.textContent = "error";
+      // --------------------------------------------------------------
+      // composer modal
+      // --------------------------------------------------------------
+      var composer = document.getElementById("composer");
+      var cover = document.getElementById("modal-cover");
+      var cmAnchor = document.getElementById("cm-anchor");
+      var cmText = document.getElementById("cm-text");
+      var cmTypeEl = "review";
+      var cmAnchorRaw = "";
+
+      function openComposer(anchor, raw) {
+        cmAnchorRaw = raw;
+        cmAnchor.textContent = anchor;
+        cmText.value = "";
+        cmTypeEl = "review";
+        setTypePick();
+        cover.classList.add("show");
+        setTimeout(function () { cmText.focus(); }, 30);
       }
-      function clearError() {
-        if (errorBox) { errorBox.remove(); errorBox = null; }
+      function closeComposer() { cover.classList.remove("show"); cmText.value = ""; }
+
+      function setTypePick() {
+        var bts = document.querySelectorAll("#cm-types button");
+        Array.prototype.forEach.call(bts, function (b) {
+          b.classList.toggle("active", b.getAttribute("data-t") === cmTypeEl);
+        });
+      }
+      Array.prototype.forEach.call(
+        document.querySelectorAll("#cm-types button"), function (b) {
+          b.addEventListener("click", function () { cmTypeEl = b.getAttribute("data-t"); setTypePick(); });
+        });
+      document.getElementById("cm-cancel").addEventListener("click", closeComposer);
+      document.getElementById("cm-save").addEventListener("click", function () {
+        var text = cmText.value.trim();
+        if (!text) { status.textContent = "意见为空"; return; }
+        var rec = { id: nextId(), type: cmTypeEl, sym: cmAnchorRaw || fileKey(), date: new Date().toISOString(), text: text };
+        currentReviews.push(rec);
+        saveStore();
+        updateSideCount();
+        renderSideList();
+        closeComposer();
+        openSide();
+        status.textContent = "已标注 #" + rec.id;
+      });
+      cover.addEventListener("click", function (ev) { if (ev.target === cover) closeComposer(); });
+
+      // --------------------------------------------------------------
+      // side panel + list + export + clear
+      // --------------------------------------------------------------
+      var side = document.getElementById("side");
+      function openSide() { side.classList.add("open"); }
+      function closeSide() { side.classList.remove("open"); }
+      document.getElementById("btn-side").addEventListener("click", function () {
+        side.classList.toggle("open");
+      });
+      document.getElementById("btn-close-side").addEventListener("click", closeSide);
+      document.getElementById("btn-clear-side").addEventListener("click", function () {
+        if (currentReviews.length && confirm("清空当前文件的全部评论？")) {
+          currentReviews = [];
+          saveStore();
+          updateSideCount();
+          renderSideList();
+        }
+      });
+
+      function updateSideCount() {
+        document.getElementById("side-count").textContent = currentReviews.length;
       }
 
-      // ---- open by picker ----
+      function renderSideList() {
+        var list = document.getElementById("rvw-list");
+        if (!currentReviews.length) {
+          list.innerHTML = '<div class="empty-hint">还没有评论。点击图上的节点或连线，即可在那一处打标。</div>';
+          return;
+        }
+        list.innerHTML = "";
+        var sorted = currentReviews.slice().sort(function (a, b) { return a.id - b.id; });
+        sorted.forEach(function (r) {
+          var div = document.createElement("div");
+          div.className = "rvw";
+          var top = document.createElement("div");
+          top.className = "r-top";
+          var sym = document.createElement("span");
+          sym.className = "r-sym"; sym.textContent = r.sym;
+          var typ = document.createElement("span");
+          typ.className = "r-type " + r.type; typ.textContent = r.type;
+          var del = document.createElement("span");
+          del.className = "r-del"; del.textContent = "✕";
+          del.title = "删除";
+          del.addEventListener("click", function () {
+            currentReviews = currentReviews.filter(function (x) { return x.id !== r.id; });
+            saveStore();
+            updateSideCount();
+            renderSideList();
+          });
+          top.appendChild(typ); top.appendChild(sym); top.appendChild(del);
+          var txt = document.createElement("div");
+          txt.className = "r-txt"; txt.textContent = r.text;
+          div.appendChild(top);
+          div.appendChild(txt);
+          list.appendChild(div);
+        });
+      }
+
+      // --------------------------------------------------------------
+      // export markers (scan-mmd-reviews.py compatible)
+      // --------------------------------------------------------------
+      function buildMarkers() {
+        var out = [];
+        currentReviews.slice().sort(function (a, b) { return a.id - b.id; }).forEach(function (r) {
+          out.push("%% [" + r.type + ":" + r.id + "] " + oneLine(r.text));
+          out.push("%%   loc: " + oneLine(r.sym));
+          if (hasDetail(r.text)) {
+            out.push("%%   note: " + r.text.replace(/\s+/g, " ").trim());
+          }
+        });
+        return out.join("\n");
+      }
+      function oneLine(s) { return s.replace(/\s+/g, " ").trim(); }
+      function hasDetail(s) {
+        // if the one-liner title already carries the meaning, note is optional.
+        return s.length > 60;
+      }
+
+      function exportMarkers() {
+        if (!currentReviews.length) { status.textContent = "没有可导出的评论"; return; }
+        var block = buildMarkers();
+        var blob = new Blob([block], { type: "text/plain;charset=utf-8" });
+        var a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = (fileKey() || "reviews") + ".review.txt";
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(a.href);
+        // Also copy to clipboard if allowed.
+        try {
+          if (navigator.clipboard) navigator.clipboard.writeText(block);
+        } catch (e) {}
+        status.textContent = "已导出 " + currentReviews.length + " 条标记（同时复制到剪贴板）";
+      }
+      document.getElementById("btn-export").addEventListener("click", exportMarkers);
+
+      // --------------------------------------------------------------
+      // export PNG (rasterize a pristine, fresh copy of the SVG off-screen)
+      // --------------------------------------------------------------
+      function exportPNG() {
+        if (!cleanSvgString) { status.textContent = "还没有可导出的图"; return; }
+        status.textContent = "导出中...";
+        // Build a fresh, detached SVG from the pristine string so pan/zoom
+        // state and live-DOM attr pollution are ignored.
+        var holder = document.createElement("div");
+        holder.style.cssText = "position:absolute;left:-10000px;top:-10000px;width:0;height:0;overflow:hidden;";
+        holder.innerHTML = cleanSvgString;
+        document.body.appendChild(holder);
+        var svg = holder.querySelector("svg");
+        if (!svg) { holder.remove(); status.textContent = "PNG 导出失败: 未找到 SVG"; return; }
+
+        // Natural content bounds (px), honouring the mmd's own whitespace.
+        var bbox = null;
+        try { bbox = svg.getBBox(); } catch (e) { bbox = null; }
+        var vb = svg.viewBox && svg.viewBox.baseVal;
+        var w = vb && vb.width ? vb.width : (bbox && bbox.width ? bbox.width + bbox.x * 2 : 1200);
+        var h = vb && vb.height ? vb.height : (bbox && bbox.height ? bbox.height + bbox.y * 2 : 800);
+
+        // Normalise: strip the inline width/height so the Image scales via viewBox.
+        svg.removeAttribute("width");
+        svg.removeAttribute("height");
+        if (vb) {
+          svg.setAttribute("viewBox", vb.x + " " + vb.y + " " + vb.width + " " + vb.height);
+        }
+        var scale = 2;            // 2x zoom for crisp output
+        var W = Math.round(w * scale);
+        var H = Math.round(h * scale);
+
+        try {
+          var src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(new XMLSerializer().serializeToString(svg));
+          var img = new Image();
+          img.onload = function () {
+            try {
+              var canvas = document.createElement("canvas");
+              canvas.width = W; canvas.height = H;
+              var ctx = canvas.getContext("2d");
+              ctx.fillStyle = "#fbfbfa";
+              ctx.fillRect(0, 0, W, H);
+              ctx.drawImage(img, 0, 0, W, H);
+              canvas.toBlob(function (blob) {
+                holder.remove();
+                img.src = "";
+                if (!blob) { status.textContent = "PNG 导出失败"; return; }
+                var a = document.createElement("a");
+                a.href = URL.createObjectURL(blob);
+                a.download = (fileKey() || "diagram") + ".png";
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(a.href);
+                status.textContent = "PNG 已导出 (" + W + "x" + H + ")";
+              }, "image/png");
+            } catch (e) {
+              holder.remove();
+              status.textContent = "PNG 导出异常: " + (e && e.message ? e.message : e);
+            }
+          };
+          img.onerror = function () {
+            holder.remove();
+            status.textContent = "PNG 导出失败: SVG 图片加载出错";
+          };
+          img.src = src;
+        } catch (e) {
+          holder.remove();
+          status.textContent = "PNG 导出异常: " + (e && e.message ? e.message : e);
+        }
+      }
+      document.getElementById("btn-png").addEventListener("click", exportPNG);
+
+      // --------------------------------------------------------------
+      // open by picker / drag-drop
+      // --------------------------------------------------------------
       document.getElementById("btn-open").addEventListener("click", function () { fileInput.click(); });
       fileInput.addEventListener("change", function () {
         var f = fileInput.files && fileInput.files[0];
@@ -195,12 +663,7 @@
         reader.readAsText(f, "utf-8");
         fileInput.value = "";
       });
-
-      // ---- open by drag & drop ----
-      window.addEventListener("dragover", function (ev) {
-        ev.preventDefault();
-        empty.classList.add("dragover");
-      });
+      window.addEventListener("dragover", function (ev) { ev.preventDefault(); empty.classList.add("dragover"); });
       window.addEventListener("dragleave", function () { empty.classList.remove("dragover"); });
       window.addEventListener("drop", function (ev) {
         ev.preventDefault();
@@ -212,14 +675,18 @@
         reader.readAsText(f, "utf-8");
       });
 
-      // ---- zoom / fit ----
+      // --------------------------------------------------------------
+      // zoom / fit / misc
+      // --------------------------------------------------------------
       document.getElementById("btn-fit").addEventListener("click", function () { if (panZoom) { panZoom.fit(); panZoom.center(); } });
       document.getElementById("btn-in").addEventListener("click", function () { if (panZoom) panZoom.zoomIn(); });
       document.getElementById("btn-out").addEventListener("click", function () { if (panZoom) panZoom.zoomOut(); });
       document.getElementById("btn-reset").addEventListener("click", function () { if (panZoom) { panZoom.resetZoom(); panZoom.resetPan(); } });
 
-      // click on empty area focuses window so zoom shortcuts work
-      window.addEventListener("click", function () { });
+      function showTip(ev) { var off = 14; tip.style.left = (ev.clientX + off) + "px"; tip.style.top = (ev.clientY + off) + "px"; tip.style.display = "block"; }
+      function updateStatus() { if (panZoom) status.textContent = "zoom " + Math.round(panZoom.getZoom() * 100) + "%"; }
+      function showError(msg) { clearError(); errorBox = document.createElement("div"); errorBox.id = "error"; errorBox.textContent = msg; document.getElementById("stage").appendChild(errorBox); status.textContent = "error"; }
+      function clearError() { if (errorBox) { errorBox.remove(); errorBox = null; } }
     })();
   </script>
 </body>
