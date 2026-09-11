@@ -40,3 +40,7 @@ apps/withlanggraph/gacore.log.err
 *.swp
 Thumbs.db
 .DS_Store
+
+# TRAE html-share 运行时共享资源（生成产物，非源码）
+.trae-html-share-packages/
+**_shared/
