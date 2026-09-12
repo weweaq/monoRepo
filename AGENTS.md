@@ -101,6 +101,12 @@ uv run pre-commit install                       # 启用 git 提交钩子（首�
 
 > 注意：uv 默认只安装根项目依赖，workspace 成员不会进环境——涉及成员的命令必须带 `--all-packages` 或 `--package <name>`。
 
+### 技能指引（按需调用对应 skill）
+
+- 新建/接入一个 app（mono 规范 + dev-console 受管服务）：调用 [`buildApp`](.trae/skills/buildApp/SKILL.md)
+- 生成架构图 / 走查代码结构与模块依赖：调用 `codemap`
+- 网页/PPT/文档等交付物制作：调用 `html-report` / `html-deck` / `doc-writing-guide`
+
 ## 4. 提交前检查清单
 
 - [ ] 按小步提交推进：本提交聚焦单一目的（R4）

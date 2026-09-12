@@ -16,7 +16,7 @@
 
 ### 2.2 配置双层制
 - `services.json` 是模板（入库），含服务定义骨架与默认值
-- `services.local.json` 是本地覆盖（gitignored），仅保留 `interpreter / args / cwd / env / ports` 五个可编辑字段
+- `services.local.json` 是本地覆盖（gitignored）；可编辑字段清单及接入规范见 [`buildApp`](../../.trae/skills/buildApp/SKILL.md) skill（接新服务时以其为准）
 - "恢复默认" = 删除该服务在 local 中的覆盖条目
 
 ### 2.3 日志规范
