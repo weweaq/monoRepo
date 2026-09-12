@@ -664,4 +664,30 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 
 **待办更新**：
 - [x] 删除遗留包级 `.venv`，统一走 mono 根环境。
-- [ ] 历史文档（roadmap/tech 执行记录）里的 `.\.venv` 命令字样为当时实测记录，留作历史，不改写。
+- [ ] 历史文档（roadmap/tech 执行记录）里的 `.\\.venv` 命令字样为当时实测记录，留作历史，不改写。
+
+### 2026-09-12 — 日报 git 提交：按仓库分组 + 纳入 weiCheckApp
+
+**背景**：日报「当日 git 提交」此前只对 `cfg.root`（mono 所属仓库）跑 `git log`。用户主开发仓库有
+两个——`mono` 与 `weiCheckApp`（均在 `D:\AAAmyPrj\github\myrepos\` 下），希望日报同时收录两个仓库的
+当日提交。此前 git 仓库路径不可配置（硬编码 `_PROJECT_ROOT` 推算）。
+
+**已完成**：
+- `config.py` 新增字段 `extra_git_repos: tuple[Path, ...]`，从 `GACORE_EXTRA_GIT_REPOS` 解析
+  （分号分隔路径，绝对路径原样、相对路径基于仓库根）；未设置时默认为空，行为与旧版完全一致。
+- `daily_info_pack._build_git()` 改为遍历 `[cfg.root, *cfg.extra_git_repos]`，每仓库跑 `git log`，
+  非空提交按 `【仓库名】` 分组输出；仓库名取最近含 `.git` 祖先的目录名（`_repo_label`）。
+  单仓库无提交则跳过该组，全部为空返回「今日无 git 提交」；某仓库读取失败单独标注，不中断其它。
+- `.env` 设置 `GACORE_EXTRA_GIT_REPOS=D:/AAAmyPrj/github/myrepos/weiCheckApp`；`.env.example` 补键说明。
+- `_GIT_CAP` 700 → 1200（容纳两个仓库）。
+- 新增单测 `test_git_multirepo_groups`（多仓库分组输出）；既有 3 条 git 测试因默认单仓库兼容不改。
+
+**实测验证**：
+- `uv run ruff check apps/withlanggraph/src apps/withlanggraph/tests` 通过。
+- `pytest apps/withlanggraph/tests/test_daily_info_pack.py` 32 passed。
+- 真实 `_build_git`：mono 当日 8 条按 `【mono】` 输出；9-08 两仓库提交分别出 `【mono】` / `【weiCheckApp】`。
+
+**待办更新**：
+- [x] 日报 git 提交支持多仓库并按仓库分组。
+- [x] weiCheckApp 纳入日报 git 来源（经 `GACORE_EXTRA_GIT_REPOS`）。
+- [ ] 后续新增主开发仓库，只需在 `.env` 的 `GACORE_EXTRA_GIT_REPOS` 增补路径即可。
