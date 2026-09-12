@@ -691,3 +691,42 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 - [x] 日报 git 提交支持多仓库并按仓库分组。
 - [x] weiCheckApp 纳入日报 git 来源（经 `GACORE_EXTRA_GIT_REPOS`）。
 - [ ] 后续新增主开发仓库，只需在 `.env` 的 `GACORE_EXTRA_GIT_REPOS` 增补路径即可。
+
+### 2026-09-12 — 召回链路基线 + Query Rewrite A/B + vector 环境就绪
+
+**背景**：探讨「用户不会提问 → Query Rewrite」时，先量化现状召回是否真是瓶颈。线上 09-08~09-09
+期间 `_rag_recall_block` 大量「空返回」，需区分是「用户 query 太模糊」「向量召回弱」还是「事实未及时
+入库」，避免凭空接入改写。
+
+**已完成**：
+- `recall_log.py`：结构化召回/改写日志层，`logs/<day>/recall.jsonl` 每条一事件，字段含
+  `variant(raw/rewritten)`、`input_query/query_used`、`rewrite`、`semantic[]/${episodic[]}(sim)`、
+  `injected`；提供 `summarize` 聚合。为后续统计/维护/回归的日志底座。
+- `recall_baseline.py`：只读基线回放日志（`--days N`），零依赖，不写生产。
+- `recall_ab.py`：A/B——取真实 query → LLM 改写 → 对活 pgvector 库分别按 raw/rewritten 召回，
+  双份都落结构化日志。配套 `tests/`（13 用例全绿，ruff 通过）。
+- 首轮基线（近 7 天）注入率 33.3%（5/15）；但逐条复核发现多数「空返回」是「事实当晚批量同步才入库、
+  提问时库中尚无数条 或 与长期记忆本就无关」，非检索失败；真正问题反而是 5 条注入里 4 条跑题/弱相关。
+- 重放 A/B（8 条真实 query，对已写满的库）：raw 召回 8/8 命中、avg max-sim 0.764；改写后 5/8、
+  0.714。结论：`bge-small-zh` + `recall_context` 召回本身健康，Query Rewrite 在现存储下是弱收益且脆弱
+  （3 次改写返回空反降注入率），不建议仓促接入生产。
+
+**实测验证**：
+- mono 根 uv 环境安装 `[vector]` extra（清华镜像）：psycopg 3.3.5 / pgvector / transformers 5.17 /
+  sentence-transformers 6.0.1 / torch 2.14.0+cpu / onnxruntime 1.29.0 全部可 import。
+- `recall_context('领证日期 结婚登记 婚期 最近定了哪天')` 在正式环境实测命中 sim 0.795，
+  成功召回「婚期改到 09-12」——正是当初 09-08 口语 query 查不到的那条，复核 A/B 结论成立。
+- 结构日志 `logs/2026-09-11/recall.jsonl` 16 条（raw+rewritten 各 8）已写入，可经 `summarize` 聚合。
+
+**偏差说明**：
+- `embedding.py` 的 `get_sentence_embedding_dimension` 在 ST 6.0 下触发 FutureWarning（重命名告警），
+  仅提示性，不影响功能。
+
+**待办更新**：
+- [x] 量化现状召回（baseline），判断 Query Rewrite 是否值得接入。
+- [x] 结构化召回/改写日志底座（`recall_log.py`），便于日后统计维护。
+- [x] mono 正式环境补齐 `vector` extra，语义召回可跑通。
+- [ ] 高杠杆待办：把 `_sync_vector_store` 由「全量重嵌入」改为「增量同步新增/变更行」，缩短
+      「事件发生 → 向量库可见」从当天晚上批量缩到判定当刻（需走 R7 review-loop，动生产链路）。
+- [ ] 消除 vector sync 静默失败：缺失 extra / 异常时应告警或统计（可接 `recall_log`）。
+- [ ] 考虑让召回/改写日志作为长期统计与回归测试的数据底座（已具备 `summarize`，未接入 CI）。
