@@ -85,7 +85,7 @@ def main() -> int:
 
     path = sys.argv[1]
     try:
-        with open(path, "r", encoding="utf-8") as fh:
+        with open(path, encoding="utf-8") as fh:
             text = fh.read()
     except OSError as exc:
         print(f"[ERROR] cannot read {path}: {exc}", file=sys.stderr)

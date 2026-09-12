@@ -1,0 +1,38 @@
+%% mermaid-viewer 应用架构图（单一真源，节点可回溯源码符号）
+%% 数据流: 查看 与 评注 两条路径
+
+flowchart LR
+    subgraph Frontend["apps/mermaid-viewer/viewer.html (原生JS)"]
+        OPEN[打开/拖入 .mmd]
+        RENDER[mermaid.render + svg-pan-zoom]
+        REVIEW[点节点/连线 → 写意见]
+        DUAL[评论: HTTP→SQLite / file→localStorage]
+    end
+
+    subgraph Server["apps/mermaid-viewer/viewer_server.py (stdlib)"]
+        API_GET["do_GET /api/reviews/<key>"]
+        API_POST["do_POST /api/reviews/<key>"]
+        STATIC["translate_path → docroot=仓库根"]
+        H["Handler (SimpleHTTPRequestHandler)"]
+    end
+
+    subgraph Store["data/reviews.db (SQLite)"]
+        TBL["reviews(file_key PK, payload, updated_at)"]
+    end
+
+    OPEN --> RENDER --> REVIEW --> DUAL
+    REVIEW -->|"POST /api/reviews/<key>"| API_POST
+    API_POST -->|"upsert ON CONFLICT"| TBL
+    DUAL -->|"GET /api/reviews/<key>"| API_GET
+    API_GET -->|"SELECT payload"| TBL
+    API_GET -->|"{reviews:[...]}"| DUAL
+
+    H --> STATIC
+    STATIC -->|"html/js/vendor 静态资源"| RENDER
+
+    classDef entry fill:#eef2ff,stroke:#6366f1;
+    classDef core fill:#fff7ed,stroke:#f97316;
+    classDef store fill:#ecfdf5,stroke:#10b981;
+    class INCRI,RENDER,REVIEW,DUAL core;
+    class OPEN entry;
+    class TBL store;

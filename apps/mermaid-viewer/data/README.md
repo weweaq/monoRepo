@@ -1,6 +1,6 @@
 # viewer 运行时数据
 
-本目录存放 mmd 查看器（tools/mermaid-viewer/viewer.html）的运行时评论数据，整目录不入 git（R11）。
+本目录存放 mmd 查看器（apps/mermaid-viewer/viewer.html）的运行时评论数据，整目录不入 git（R11）。
 
 | 文件 | 说明 | 生成方式 |
 |------|------|----------|

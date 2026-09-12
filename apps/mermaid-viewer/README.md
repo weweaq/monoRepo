@@ -20,9 +20,10 @@
 **B. 评论要真正断电恢复 —— 用服务打开(推荐给你这种场景)**：
 
 ```powershell
-python tools/mermaid-viewer/viewer_server.py
-# 自动打开浏览器到 http://127.0.0.1:8123/tools/mermaid-viewer/viewer.html
+python apps/mermaid-viewer/viewer_server.py
+# 自动打开浏览器到 http://127.0.0.1:8123/apps/mermaid-viewer/viewer.html
 # 可选: --port 8123 / --no-browser
+# 或用 pyproject 入口(需 uv sync --all-packages): uv run --package mermaid-viewer mermaid-viewer
 ```
 
 服务模式下评论写进 `data/reviews.db`，重启机器都还在。前端做了双后端：http 走 SQLite，file 自动回退 localStorage，互不干扰。
@@ -39,7 +40,7 @@ python tools/mermaid-viewer/viewer_server.py
 ## 生成独立 HTML(给别人/提交时)
 
 ```powershell
-node tools/mermaid-viewer/gen-mmd-viewer.mjs apps/withlanggraph/docs/architecture-flow.mmd
+node apps/mermaid-viewer/gen-mmd-viewer.mjs apps/withlanggraph/docs/architecture-flow.mmd
 ```
 
 （R10: 脚本与文档均为 ASCII/英文；数据 README 用中文说明数据来源）

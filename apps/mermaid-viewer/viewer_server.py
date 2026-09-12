@@ -1,18 +1,19 @@
 """Local single-user viewer server for the mermaid .mmd viewer.
 
-Serves the repo root over HTTP so the viewer (tools/mermaid-viewer/viewer.html)
+Serves the repo root over HTTP so the viewer (apps/mermaid-viewer/viewer.html)
 can be opened locally without a file:// sandbox, and persists review comments
-into SQLite under tools/mermaid-viewer/data/reviews.db -- so comments survive
+into SQLite under apps/mermaid-viewer/data/reviews.db -- so comments survive
 a reload or a reboot.
 
 Usage (PowerShell):
-    python tools/mermaid-viewer/viewer_server.py
-    python -m tools.mermaid_viewer.viewer_server --port 8123 --no-browser
+    python apps/mermaid-viewer/viewer_server.py
+    python -m mermaid-viewer  (via [project.scripts], needs uv sync)
+    python apps/mermaid-viewer/viewer_server.py --port 8123 --no-browser
 
 Standard library only. Everything runs on 127.0.0.1 (loopback); no internet.
 
 Endpoints:
-    GET  /tools/mermaid-viewer/viewer.html   (static files, repo root)
+    GET  /apps/mermaid-viewer/viewer.html   (static files, repo root)
     GET  /api/reviews/<name>                 -> {"reviews": [...]}
     POST /api/reviews/<name>                 body {"reviews": [...]} upserts
 """
@@ -28,7 +29,7 @@ import threading
 import webbrowser
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
-# Repo root = two levels up from this file (tools/mermaid-viewer/).
+# Repo root = two levels up from apps/mermaid-viewer/.
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 DB_PATH = os.path.join(DATA_DIR, "reviews.db")
@@ -127,7 +128,7 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 def _browser_target(port: int) -> str:
-    return "http://127.0.0.1:%d/tools/mermaid-viewer/viewer.html" % port
+    return "http://127.0.0.1:%d/apps/mermaid-viewer/viewer.html" % port
 
 
 def main() -> None:

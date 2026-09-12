@@ -74,12 +74,12 @@
       "id": "mermaid-viewer",
       "name": "mermaid .mmd 查看器 (viewer_server)",
       "ports": [8123],
-      "cwd": "D:\\AAAmyPrj\\github\\myrepos\\mono\\tools\\mermaid-viewer",
+      "cwd": "D:\\AAAmyPrj\\github\\myrepos\\mono\\apps\\mermaid-viewer",
       "env": {},
       "interpreter": "D:\\AAAmyPrj\\github\\myrepos\\mono\\.venv\\Scripts\\python.exe",
       "args": ["viewer_server.py", "--no-browser"],
       "match": ["viewer_server.py"],
-      "notes": "本地离线 mmd 查看器服务；评论持久化到 data/reviews.db；仅绑 127.0.0.1。--no-browser：由 dev-console 启停时不需自拉浏览器"
+      "notes": "本地离线 mmd 查看器服务；评论持久化到 apps/mermaid-viewer/data/reviews.db；仅绑 127.0.0.1。--no-browser：由 dev-console 启停时不需自拉浏览器"
     }
   ]
 }
