@@ -285,26 +285,61 @@
       }
 
       // --------------------------------------------------------------
-      // reviews persistence (localStorage, keyed by file name)
+      // reviews persistence
+      //   - when served over http (local viewer server), write to SQLite
+      //     via fetch /api/reviews so comments survive a reload/reboot.
+      //   - otherwise (file://) fall back to localStorage.
       // --------------------------------------------------------------
+      var USE_BACKEND = (location.protocol === "http:" || location.protocol === "https:");
       function fileKey() { return fileNameEl.textContent || "(untitled)"; }
+
       function loadStore() {
         try {
           var o = JSON.parse(localStorage.getItem("mdv_reviews_v1") || "{}");
           return o || {};
         } catch (e) { return {}; }
       }
-      function saveStore() {
+      function saveStoreLocal() {
         try {
           var all = loadStore();
           all[fileKey()] = currentReviews;
           localStorage.setItem("mdv_reviews_v1", JSON.stringify(all));
         } catch (e) { /* storage blocked */ }
       }
+      function pushBackend() { // fire-and-forget; best effort
+        if (!USE_BACKEND) return;
+        try {
+          fetch("/api/reviews/" + encodeURIComponent(fileKey()), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ reviews: currentReviews })
+          }).then(function (r) {
+            if (!r.ok) { /* non-fatal */ }
+          }).catch(function () { /* non-fatal */ });
+        } catch (e) { /* non-fatal */ }
+      }
+      function saveStore() { // unified: backend first, then local mirror
+        saveStoreLocal();
+        pushBackend();
+      }
       function loadCurrent() {
         currentReviews = loadStore()[fileKey()] || [];
         updateSideCount();
         renderSideList();
+        if (USE_BACKEND) {
+          // authoritative copy lives on the server; if it has reviews for
+          // this file, adopt them (they may be newer than the local mirror).
+          fetch("/api/reviews/" + encodeURIComponent(fileKey()))
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+              if (data && Array.isArray(data.reviews) && data.reviews.length) {
+                currentReviews = data.reviews;
+                saveStoreLocal();
+                updateSideCount();
+                renderSideList();
+              }
+            }).catch(function () { /* keep local */ });
+        }
       }
       function nextId() {
         var max = 0;

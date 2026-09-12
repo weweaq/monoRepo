@@ -1,0 +1,3 @@
+# Runtime data (reviews.db) -- only README is tracked (R11)
+data/*
+!data/README.md
