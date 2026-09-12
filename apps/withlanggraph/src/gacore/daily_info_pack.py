@@ -43,7 +43,7 @@ _CHAT_CAP: int = 1200     # 当日 QQ 对话摘录（用户侧）
 _LANGTRACK_CAP: int = 800  # langTrack 手机细维度
 _BILI_CAP: int = 1200      # B站当日 top20
 _EDGE_CAP: int = 900       # Edge 域名归并 top10
-_GIT_CAP: int = 700        # git 当日提交
+_GIT_CAP: int = 1200       # git 当日提交（mono + 附加仓库，按仓库分组）
 _FILES_CAP: int = 1000     # 当日文件活动 top15
 _NCM_CAP: int = 700        # ncm 歌单/收藏静态基线
 _MEDIA_CAP: int = 900      # 当日听歌与视频伴音（music_play 分两类）
@@ -374,15 +374,29 @@ def _run_git(root: Path, date: str) -> tuple[int, str]:
     return proc.returncode, proc.stdout
 
 
+def _repo_label(root: Path) -> str:
+    """Return the git repository root's directory name (first ancestor containing .git)."""
+    for p in (root, *root.parents):
+        if (p / ".git").exists():
+            return p.name
+    return root.name
+
+
 def _build_git(date: str, cfg: Config) -> tuple[str, str]:
-    """当日 git 提交（hash 截断 + 消息精简）。"""
-    try:
-        rc, stdout = _run_git(cfg.root, date)
+    """当日 git 提交（hash 截断 + 消息精简），按仓库分组。
+
+    主开发仓库 = cfg.root（mono），附加仓库来自 cfg.extra_git_repos（如 weiCheckApp）。
+    """
+    repos: list[Path] = [cfg.root, *cfg.extra_git_repos]
+    sections: list[str] = []
+    for root in repos:
+        rc, stdout = _run_git(root, date)
         if rc != 0:
-            return "〔工作·当日 git 提交〕", "- 该源失败/不可用：git log 读取失败（可能非 git 仓库）"
+            sections.append(f"- {_repo_label(root)}：git log 读取失败（非 git 仓库？）")
+            continue
         lines = [ln.strip() for ln in stdout.splitlines() if ln.strip()]
         if not lines:
-            return "〔工作·当日 git 提交〕", "- 今日无 git 提交"
+            continue
         shown = []
         for ln in lines:
             parts = ln.split("|")
@@ -391,10 +405,11 @@ def _build_git(date: str, cfg: Config) -> tuple[str, str]:
                 subject = parts[1][:60]
                 author = parts[2] if len(parts) > 2 else ""
                 shown.append(f"- {short_hash} {subject}（{author}）")
-        return "〔工作·当日 git 提交〕", "\n".join(shown)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("daily_info_pack: git failed", error_type=type(exc).__name__, error=str(exc))
-        return "〔工作·当日 git 提交〕", f"- 该源失败：{exc}"
+        if shown:
+            sections.append(f"【{_repo_label(root)}】\n" + "\n".join(shown))
+    if not sections:
+        return "〔工作·当日 git 提交〕", "- 今日无 git 提交"
+    return "〔工作·当日 git 提交〕", "\n\n".join(sections)
 
 
 def _build_files(date: str, cfg: Config) -> tuple[str, str]:

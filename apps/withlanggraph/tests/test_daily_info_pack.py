@@ -195,6 +195,33 @@ def test_git_full(tmp_path, monkeypatch):
     assert "feat: 重构日报信息包" in body
 
 
+def test_git_multirepo_groups(tmp_path, monkeypatch):
+    main = tmp_path / "main"
+    extra = tmp_path / "weiCheckApp"
+    (main / ".git").mkdir(parents=True)
+    (extra / ".git").mkdir(parents=True)
+    cfg = Config(
+        root=main,
+        asset_dir=main / "a",
+        memory_dir=main / "m",
+        logs_dir=main / "l",
+        temp_dir=main / "t",
+        extra_git_repos=(extra,),
+    )
+
+    def fake_run(root, date):
+        if root == main:
+            return (0, "aaa1111111|commit main|aos\n")
+        return (0, "bbb2222222|commit wei|aos\n")
+
+    monkeypatch.setattr(dip, "_run_git", fake_run)
+    _header, body = dip._build_git("2026-09-02", cfg)
+    assert "aaa11111" in body and "commit main" in body
+    assert "bbb22222" in body and "commit wei" in body
+    assert "main" in body        # 分组标签 = 目录名（无 .git 时的 fallback）
+    assert "weiCheckApp" in body
+
+
 # --------------------------------------------------------------------------- #
 # 文件活动：空 / 满（目录聚合 top15）                                         #
 # --------------------------------------------------------------------------- #

@@ -40,6 +40,21 @@ def _parse_max_turns(raw: str) -> int:
     return max_turns
 
 
+def _resolve_repo_list(root: Path, env: Mapping[str, str]) -> tuple[Path, ...]:
+    """Resolve extra git repos from GACORE_EXTRA_GIT_REPOS (semicolon-separated paths)."""
+    raw = env.get("GACORE_EXTRA_GIT_REPOS")
+    if not raw:
+        return ()
+    repos: list[Path] = []
+    for part in raw.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        candidate = Path(part)
+        repos.append(candidate if candidate.is_absolute() else root / candidate)
+    return tuple(repos)
+
+
 def _parse_bool(raw: str | None, default: bool) -> bool:
     """Parse a boolean env value; unknown/missing values fall back to the given default."""
     if raw is None:
@@ -92,6 +107,7 @@ class Config:
     memory_dir: Path
     logs_dir: Path
     temp_dir: Path
+    extra_git_repos: tuple[Path, ...] = ()
     max_turns: int = _DEFAULT_MAX_TURNS
     rollover: RolloverConfig = RolloverConfig()
 
@@ -105,6 +121,7 @@ class Config:
             memory_dir=_resolve_dir(_PROJECT_ROOT, source, "GACORE_MEMORY_DIR", Path("memory")),
             logs_dir=_resolve_dir(_PROJECT_ROOT, source, "GACORE_LOGS_DIR", Path("logs")),
             temp_dir=_resolve_dir(_PROJECT_ROOT, source, "GACORE_TEMP_DIR", Path("temp")),
+            extra_git_repos=_resolve_repo_list(_PROJECT_ROOT, source),
             max_turns=_parse_max_turns(source.get("DEFAULT_MAX_TURNS", str(_DEFAULT_MAX_TURNS))),
             rollover=RolloverConfig(
                 enabled=_parse_bool(source.get("GACORE_ROLLOVER_ENABLED"), True),
