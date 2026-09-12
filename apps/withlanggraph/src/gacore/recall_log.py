@@ -91,6 +91,35 @@ def build_record(
     }
 
 
+def build_sync_failure(
+    *,
+    error_type: str,
+    error: str,
+    step: str,
+    extra_line: str = "",
+    ts: datetime | None = None,
+) -> dict:
+    """Build one canonical vector-sync failure record (pure — mirrors recall events).
+
+    Distinct from ``build_record``: this is a *write-path* diagnostic (a ``sync_portrait`` /
+    ``sync_line`` step threw), not a recall event, so the record is tagged ``event:
+    "sync_failure"`` and holds no query/sim shape. Swallowing the original exception is the
+    existing production contract (txt is the source of truth); the only gap this closes is
+    making the swallow *observable* — threaded into the same daily JSONL the recall logs
+    land in, easy to grep / count for "vector sync silently off".
+    """
+    timestamp = _now_iso(ts)
+    return {
+        "ts": timestamp,
+        "day": timestamp[:10],
+        "event": "sync_failure",
+        "step": step,
+        "error_type": error_type,
+        "error": error,
+        "extra_line": extra_line,
+    }
+
+
 def record_line(record: dict) -> str:
     """Serialize one record to a single JSONL line (no trailing newline)."""
     return json.dumps(record, ensure_ascii=False, separators=(",", ":"))
@@ -172,6 +201,7 @@ __all__ = (
     "FILENAME",
     "RecallLog",
     "build_record",
+    "build_sync_failure",
     "iter_records",
     "record_line",
     "summarize",

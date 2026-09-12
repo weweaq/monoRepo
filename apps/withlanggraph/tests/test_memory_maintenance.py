@@ -293,3 +293,49 @@ def test_sync_vector_store_never_raises_on_backend_failure(monkeypatch, tmp_path
     cfg = Config.for_tests(tmp_path)
     res = mm.persist_entry(cfg, fact_line="a", insight_line="b", facts_statement="c")
     assert res["updated"] is True
+
+
+def test_sync_failure_recorded_to_recall_log(tmp_path: Path, monkeypatch) -> None:
+    """Given a failing vector sync, When persisting, Then a sync_failure record lands + write still succeeds."""
+    import gacore
+    import gacore.memory_maintenance as mm
+    import types
+    from gacore.recall_log import iter_records
+
+    monkeypatch.setattr(
+        gacore, "vector_store",
+        types.SimpleNamespace(
+            ensure_schema=lambda: None,
+            sync_portrait=lambda _cfg: (_ for _ in ()).throw(RuntimeError("pg down")),
+        ),
+    )
+    cfg = Config.for_tests(tmp_path)
+    res = mm.persist_entry(cfg, fact_line="[婚姻] 婚期 2026-09-12", insight_line="y", facts_statement="[婚姻] 婚期 2026-09-12")
+    assert res["updated"] is True  # memory write never broken by vector failure
+    records = [r for r in iter_records(cfg.logs_dir) if r.get("event") == "sync_failure"]
+    assert len(records) == 1
+    assert records[0]["error_type"] == "RuntimeError"
+    assert records[0]["step"] == "sync_portrait"
+    assert "[婚姻]" in records[0]["extra_line"]
+
+
+def test_sync_failure_recording_itself_never_breaks_write(tmp_path: Path, monkeypatch) -> None:
+    """Given a vector failure AND an unwritable recall log, When persisting, Then write still succeeds."""
+    import gacore
+    import gacore.memory_maintenance as mm
+    import types
+
+    monkeypatch.setattr(
+        gacore, "vector_store",
+        types.SimpleNamespace(
+            ensure_schema=lambda: None,
+            sync_portrait=lambda _cfg: (_ for _ in ()).throw(RuntimeError("pg down")),
+        ),
+    )
+    # break recall_log module so the failure-bookkeeping path itself throws
+    def _boom(base_dir, **kw):
+        raise OSError("logs dir unwritable")
+    monkeypatch.setattr(gacore, "recall_log", types.SimpleNamespace(RecallLog=_boom, build_sync_failure=lambda **kw: {}))
+    cfg = Config.for_tests(tmp_path)
+    res = mm.persist_entry(cfg, fact_line="a", insight_line="b", facts_statement="c")
+    assert res["updated"] is True

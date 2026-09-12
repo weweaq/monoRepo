@@ -413,6 +413,11 @@ def _sync_vector_store(cfg: Config, extra_line: str | None = None) -> None:
     Runs the full portrait pass (idempotent) and, when a ``extra_line`` from the current
     write is given, fans it in as a single incremental line so the just-written fact is
     recallable immediately rather than waiting for the next full pass.
+
+    A missing/offline vector backend must not break the memory write, so the failure is
+    logged (stdout/jsonl) AND recorded as an observable ``sync_failure`` event via
+    ``recall_log`` — closing the "vector sync silently off" blind spot (e.g. deploy
+    without the ``vector`` extra, or the pg/pgvector service is down).
     """
     try:
         from gacore import vector_store
@@ -423,6 +428,22 @@ def _sync_vector_store(cfg: Config, extra_line: str | None = None) -> None:
         _logger.info("facts portrait synced to vector store")
     except Exception as exc:  # noqa: BLE001 — vector sync must never break memory write
         _logger.warning("vector sync skipped", error_type=type(exc).__name__, error=str(exc))
+        _record_sync_failure(cfg, type(exc).__name__, str(exc), step="sync_portrait", extra_line=extra_line or "")
+
+
+def _record_sync_failure(cfg: Config, error_type: str, error: str, *, step: str, extra_line: str = "") -> None:
+    """Record a vector-sync failure to the daily recall log; never raises.
+
+    Best-effort bookkeeping that must stay off the memory-write hot path — if even this
+    fails (e.g. logs dir unwritable) we simply drop it rather than surface a second error.
+    """
+    try:
+        from gacore.recall_log import RecallLog, build_sync_failure
+        rec = build_sync_failure(error_type=error_type, error=error, step=step, extra_line=extra_line)
+        log = RecallLog(cfg.logs_dir)
+        log.append(rec)
+    except Exception as log_exc:  # noqa: BLE001 — failure bookkeeping must never interrupt memory write
+        _logger.warning("failed to record vector sync failure", error_type=type(log_exc).__name__, error=str(log_exc))
 
 
 def persist_entry(

@@ -3,7 +3,7 @@
 import json
 from datetime import datetime
 
-from gacore.recall_log import RecallLog, build_record, iter_records, record_line, summarize
+from gacore.recall_log import RecallLog, build_record, build_sync_failure, iter_records, record_line, summarize
 
 
 def _rec(**kw):
@@ -66,3 +66,29 @@ def test_summarize_empty_and_populated():
     assert stats["empty"] == 1
     assert stats["inject_rate"] == round(2 / 3, 3)
     assert stats["sim_max"] == 0.66
+
+
+def test_build_sync_failure_shape():
+    rec = build_sync_failure(
+        error_type="RuntimeError",
+        error="pg down",
+        step="sync_portrait",
+        extra_line="[婚姻] 婚期 2026-09-12 领证",
+        ts=datetime(2026, 9, 10, 12, 0, 0),
+    )
+    assert rec["event"] == "sync_failure"
+    assert rec["day"] == "2026-09-10"
+    assert rec["step"] == "sync_portrait"
+    assert rec["error_type"] == "RuntimeError"
+    assert "pg down" in rec["error"]
+    assert "[婚姻]" in rec["extra_line"]
+
+
+def test_sync_failure_lands_in_recall_log(tmp_path):
+    """A sync_failure record is appendable + readable through the same daily JSONL store."""
+    log = RecallLog(tmp_path)
+    log.append(build_sync_failure(error_type="EmbeddingUnavailable", error="vector extra missing", step="sync_portrait"))
+    back = iter_records(tmp_path)
+    assert len(back) == 1
+    assert back[0]["event"] == "sync_failure"
+    assert back[0]["error_type"] == "EmbeddingUnavailable"
