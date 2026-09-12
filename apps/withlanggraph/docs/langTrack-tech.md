@@ -1225,13 +1225,14 @@ python -m gacore.rerun --day 2026-09-08 --job weekly-summary
   - `upsert_line(content, chunk_key, embedding)`：`ON CONFLICT DO NOTHING`（去重，不覆盖历史）。
   - `nearby(query, k=3, threshold=0.45)`：`embedding <=> %s` cosine 距离升序，返回 `< threshold` 的 `{content, chunk_key, dist}`。**须 `%s::vector` 显式类型转换**（否则 psycopg 把 list 绑成 `double precision[]` 报 `operator does not exist: vector <=>`）。
   - `sync_portrait(cfg)`：batch embed 画像行，逐条 upsert（MERGE/NEW 后调用，近实时同步画像）。
+  - `sync_line(content, chunk_key=None)`（2026-09-12 增量同步）：**单行增量**批量嵌入+upsert，幂等、非破坏（`ON CONFLICT DO NOTHING`）。与 `sync_portrait` 全量互补：全量兜底健康全表，单行让**当次刚写的那条**立即可召回，不必等下一次全量。chunk_key 缺省按 `_source_of` 推断（insight/fact）。
   - **`_portrait_lines(cfg)`（方案2 画像源策略）**：**优先喂 `memory/global_mem_facts.txt`**（简短可检索事实句，每行一条，如 `[婚姻] 婚期（最新修订）：2026-09-12（周六）领证`）；该文件不存在时回退到 `global_mem*.txt` 事件日志。原因：日志行带 `[2026-09-08T...]` 时间戳前缀 + 长描述，embedding 噪声大，导致"搬家到朝阳"回忆到不相关的"婚期定档"。事实画像让召回精准（实测：`婚期是什么`→`婚期 2026-09-12` dist 0.344）。
 - `memory_maintenance.py`（改）：
   - `VectorTrigger`（新）：向量召回触发。`probe(text)` → `nearby` 命中即 `vector_hit`，`context` 携带召回画像行。后端异常优雅降级为 `vector_unavailable`（triggered=False，绝不抛）。
   - `CombinedTrigger`（新）：`keyword OR vector`，**keyword 优先**（命中即省掉 vector、省 LLM）。
   - `maintain_once`：trigger 的 `context`（召回行）注入 judge 的 portrait 前，让 MERGE 判定对着最相关事实做。
   - `apply()`：MERGE/NEW 调统一 `persist_entry()`；NOOP 直接返回。
-  - **`persist_entry(cfg, *, fact_line, insight_line, facts_statement, sync=True)`（统一写入口 + 向量同步收口，2026-09-09 方案2 加固）**：写 `global_mem.txt`/`global_mem_insight.txt`、镜像简短事实到 `global_mem_facts.txt`，再 best-effort `_sync_vector_store`（`ensure_schema`+`sync_portrait` 全量重嵌，幂等去重）。**这是所有记忆写路径唯二汇流点**——被动节点 `memory_maintain` 与主动工具 `start_long_term_update` 都经它落盘，因此**任何写入口都不会漏向量同步**。向量同步失败被吞（txt 仍是真相源，下次 sync 自愈），绝不带崩写动作。
+  - **`persist_entry(cfg, *, fact_line, insight_line, facts_statement, sync=True)`（统一写入口 + 向量同步收口，2026-09-09 方案2 加固 / 09-12 两步式）**：写 `global_mem.txt`/`global_mem_insight.txt`、镜像简短事实到 `global_mem_facts.txt`，再 best-effort `_sync_vector_store`（`ensure_schema` + `sync_portrait` 全量重嵌 + 当次 `facts_statement` 单行**增量** `sync_line`，幂等去重）。**这是所有记忆写路径唯二汇流点**——被动节点 `memory_maintain` 与主动工具 `start_long_term_update` 都经它落盘，因此**任何写入口都不会漏向量同步**。向量同步失败被吞（txt 仍是真相源，下次 sync 自愈），绝不带崩写动作。
 - `graph.py` `memory_maintain` 节点（改）：改用 `CombinedTrigger`；判定到 MERGE/NEW 交给 `apply`→`persist_entry` 落盘并同步向量库（**节点层不再单独同步**，同步统一收口在 `persist_entry`，避免重复全量重嵌）。
 
 ### 数据流（修复当日触发 + 沉淀后写库）

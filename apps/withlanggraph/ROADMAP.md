@@ -730,3 +730,38 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
       「事件发生 → 向量库可见」从当天晚上批量缩到判定当刻（需走 R7 review-loop，动生产链路）。
 - [ ] 消除 vector sync 静默失败：缺失 extra / 异常时应告警或统计（可接 `recall_log`）。
 - [ ] 考虑让召回/改写日志作为长期统计与回归测试的数据底座（已具备 `summarize`，未接入 CI）。
+
+### 2026-09-12 — 向量同步改两步式：`sync_line` 单行增量即时入召回（步骤1）
+
+**背景**：改写 A/B 证明召回链路本身健康（`bge-small-zh` + `recall_context` 命中 raw 8/8、sim 0.59~0.83），
+真正短板是把「事件发生 → 向量库可见」拉长的批量写时滞。按既定三步骤，先落地力度最小、不破坏现有
+全量幂等的第 1 步：全量兜底 + 当次单行增量，让刚判定的事实当刻即可被语义召回，不必等下一次全量。
+
+**已完成**：
+- `vector_store.py` 新增 `sync_line(content, chunk_key=None)`：单行增量 batch 嵌入 + upsert，幂等去重
+  （`ON CONFLICT DO NOTHING`），chunk_key 缺省按 `_source_of` 推断（insight/fact）。
+- `memory_maintenance._sync_vector_store(cfg, extra_line=None)` 由「全量 `sync_portrait`」改为两步：
+  `ensure_schema` + 全量 `sync_portrait`（兜底健康全表）+ 当次 `sync_line(facts_statement)`（刚写那条立即可召回）。
+- `persist_entry` 在 `sync` 时为 `_sync_vector_store` 传 `extra_line=facts_statement or None`；无 statement 时仅全量，
+  行为与旧版一致。向量同步失败仍被吞（best-effort，txt 为真相源），绝不带崩写动作。
+- 单测 +3（`tests/test_memory_maintenance.py`）：增量下传、无 statement 跳过增量、后端异常不中断写路径；
+  mock 采用 patch `gacore.vector_store` 包属性（`_sync_vector_store` 内 `from gacore import vector_store`）。
+
+**实测验证**：
+- `test_memory_maintenance.py` 18 passed；`test_recall_log.py` 24 passed（合计，含 embedding 冷启动）。
+- `uv run ruff check src tests` 通过。
+- 正式库真实验证：`sync_line('ZZ_TESTMARK_20260912_量子球…')` → `stored:1` → 立即 `nearby` 命中刚写行，
+  耗时 0.69s ——「当刻写入 → 立即可召回」达成。
+- 环境修正：此前 root venv 里 `sentence-transformers/transformers/torch` **实际未落 site-packages**（曾误判
+  "六件套 OK"，实为 `find_spec` 在 resolver 层命中）。已用 `uv sync --package gacore --extra vector`（仓库根）
+  正式落入 root venv，`st.__version__==6.0.1`、torch 2.14.0+cpu。
+
+**偏差说明**：
+- 未做情景（episodic）实时触发（既定步骤2，动调度热链路，未在本提交触碰）。
+- 未做缺 extra 告警化（既定步骤3，接 recall_log，留待下步）。
+
+**待办更新**：
+- [x] 步骤1：语义画像全量 + 增量两步式，刚写事实当刻可召回。
+- [ ] 步骤2：情景事件触发式实时补写（`sync_episodic_daily` 由纯调度改为判定当刻触发，需走 R7 review-loop）。
+- [ ] 步骤3：消除 vector sync 静默失败（缺 extra/连不上 → recall_log 记 failed 或告警）。
+- [ ] 观察「事件发生 → 向量库可见」延迟是否从"当天晚间批量"缩到"判定当刻"（对比 baseline）。
