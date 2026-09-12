@@ -225,3 +225,68 @@ def test_empty_result_is_valid(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _is_success(result)
     assert result["total"] == 0
     assert result["entries"] == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: lock handling in _open_db (Edge running)
+# ---------------------------------------------------------------------------
+
+
+def test_open_db_snapshots_when_locked(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """When Edge locks the live DB, _open_db snapshots to temp and still reads commits."""
+    db_path = tmp_path / "History"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE urls (url TEXT)")
+    conn.execute("INSERT INTO urls VALUES ('https://a.com')")
+    conn.commit()
+    conn.close()
+
+    real_connect = sqlite3.connect
+    calls = {"n": 0}
+
+    def fake_connect(*args, **kwargs):  # noqa: ANN002
+        if calls["n"] == 0:  # first attempt: live Edge DB is locked
+            calls["n"] += 1
+            raise sqlite3.OperationalError("database is locked")
+        calls["n"] += 1
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(bh_mod.sqlite3, "connect", fake_connect)
+
+    opened = bh_mod._open_db(db_path)
+    try:
+        row = opened.execute("SELECT COUNT(*) FROM urls").fetchone()
+        assert row[0] == 1
+    finally:
+        opened.close()
+
+    # First connect raised; second (snapshot) succeeded.
+    assert calls["n"] == 2
+
+
+def test_open_db_no_snapshot_when_unlocked(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """Without a lock, _open_db connects once directly and does not snapshot."""
+    db_path = tmp_path / "History"
+    conn = sqlite3.connect(db_path)
+    conn.execute("CREATE TABLE urls (url TEXT)")
+    conn.execute("INSERT INTO urls VALUES ('https://a.com')")
+    conn.commit()
+    conn.close()
+
+    calls = {"n": 0}
+    real_connect = sqlite3.connect
+
+    def fake_connect(*args, **kwargs):  # noqa: ANN002
+        calls["n"] += 1
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(bh_mod.sqlite3, "connect", fake_connect)
+
+    opened = bh_mod._open_db(db_path)
+    try:
+        row = opened.execute("SELECT COUNT(*) FROM urls").fetchone()
+        assert row[0] == 1
+    finally:
+        opened.close()
+
+    assert calls["n"] == 1

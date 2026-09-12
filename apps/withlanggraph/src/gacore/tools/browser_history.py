@@ -91,18 +91,49 @@ def _resolve_db_path() -> Path:
     return _EDGE_HISTORY_PATH
 
 
+def _snapshot_to_temp(db_path: Path) -> Path:
+    """Copy the history DB (and its WAL if present) to a private temp snapshot.
+
+    Edge acquires a write lock on its live History DB while running; the lock
+    surfaces on the first statement, not at connect(). Reading a private copy
+    avoids the lock entirely and, because we own the copy, WAL can be replayed.
+    """
+    tmp_dir = Path(tempfile.mkdtemp(prefix="gacore_edge_history_"))
+    snap = tmp_dir / db_path.name
+    shutil.copy2(db_path, snap)
+    wal = Path(str(db_path) + "-wal")
+    if wal.is_file():
+        shutil.copy2(wal, Path(str(snap) + "-wal"))
+    logger.info("Edge DB locked, snapshot to temp", temp_path=str(snap))
+    return snap
+
+
 def _open_db(db_path: Path) -> sqlite3.Connection:
-    """Open a read-only connection to the history DB, copying to temp if locked."""
-    try:
-        return sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
-    except sqlite3.OperationalError as exc:
-        if "locked" not in str(exc).lower():
-            raise
-        # Edge is running and locked the DB — copy to temp and open that instead.
-        tmp = Path(tempfile.gettempdir()) / f"gacore_edge_history_{os.getpid()}.db"
-        shutil.copy2(db_path, tmp)
-        logger.info("Edge DB locked, copied to temp", temp_path=str(tmp))
-        return sqlite3.connect(f"file:{tmp}?mode=ro", uri=True, timeout=5)
+    """Open the history DB, snapshotting to temp and retrying once if Edge locks it.
+
+    A read-only connect() alone does not grab a lock, and SELECT 1 (no table)
+    does not start a read transaction either, so we probe with a read of
+    sqlite_master to surface any lock before returning a connection that would
+    fail on the real query.
+    """
+    for attempt in range(2):
+        if attempt == 1:
+            # Edge holds the live DB — read a private snapshot instead. Opening it
+            # read-write lets SQLite manage its own WAL/-shm for a consistent view.
+            db_path = _snapshot_to_temp(db_path)
+        mode = "rw" if attempt == 1 else "ro"
+        try:
+            conn = sqlite3.connect(f"file:{db_path}?mode={mode}", uri=True, timeout=5)
+            conn.execute("SELECT 1 FROM sqlite_master")
+            return conn
+        except sqlite3.OperationalError:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            if attempt == 1:
+                raise
+    raise sqlite3.OperationalError("database is locked")
 
 
 def _build_query(
