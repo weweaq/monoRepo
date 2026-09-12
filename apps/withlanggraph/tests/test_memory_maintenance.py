@@ -212,3 +212,84 @@ def test_graph_node_merges_via_context_judge_patch(tmp_path: Path, monkeypatch) 
     assert out == {}
     facts = (cfg.memory_dir / "global_mem.txt").read_text(encoding="utf-8")
     assert "2026-09-12" in facts
+
+
+# --------------------------------------------------------------------------- vector sync (两步式：全量 + 当次增量)
+
+
+def _patch_vector_store(monkeypatch) -> "tuple[object, object, object]":
+    """Stub gacore.vector_store inside memory_maintenance; return the callables to assert on."""
+    import gacore
+    import types
+
+    fake = types.SimpleNamespace(
+        ensure_schema_calls=0,
+        sync_portrait_calls=0,
+        sync_line_calls=[],
+    )
+
+    def _ensure_schema():
+        fake.ensure_schema_calls += 1
+    def _sync_portrait(cfg):
+        fake.sync_portrait_calls += 1
+    def _sync_line(line, chunk_key=None):
+        fake.sync_line_calls.append(line)
+
+    # `_sync_vector_store` imports `from gacore import vector_store` inside the try-block.
+    # Patch the package attribute on the already-cached `gacore` module so that import
+    # resolves to our stub regardless of whether package-level imports preloaded it.
+    monkeypatch.setattr(
+        gacore, "vector_store",
+        types.SimpleNamespace(
+            ensure_schema=_ensure_schema,
+            sync_portrait=_sync_portrait,
+            sync_line=_sync_line,
+        ),
+    )
+    return fake, _sync_portrait, _sync_line
+
+
+def test_sync_vector_store_fans_out_extra_line(monkeypatch, tmp_path: Path) -> None:
+    """Given a facts_statement, When persisting with sync, Then the full pass + incremental line run."""
+    import gacore.memory_maintenance as mm
+
+    fake, _sp, _sl = _patch_vector_store(monkeypatch)
+    cfg = Config.for_tests(tmp_path)
+    mm.persist_entry(
+        cfg,
+        fact_line="[婚姻] 婚期 2026-09-12 领证",
+        insight_line="[婚姻] 婚期提前定档 2026-09-12",
+        facts_statement="[婚姻·登记日期] 领证日期调整为 2026-09-12",
+    )
+    assert fake.ensure_schema_calls == 1
+    assert fake.sync_portrait_calls == 1
+    assert fake.sync_line_calls == ["[婚姻·登记日期] 领证日期调整为 2026-09-12"]  # incremental fanned out
+
+
+def test_sync_vector_store_skips_incremental_when_no_statement(monkeypatch, tmp_path: Path) -> None:
+    """Given no facts_statement, When persisting with sync, Then only the full pass runs (no incremental)."""
+    import gacore.memory_maintenance as mm
+
+    fake, _sp, _sl = _patch_vector_store(monkeypatch)
+    cfg = Config.for_tests(tmp_path)
+    mm.persist_entry(cfg, fact_line="x", insight_line="y", facts_statement="")
+    assert fake.sync_portrait_calls == 1
+    assert fake.sync_line_calls == []
+
+
+def test_sync_vector_store_never_raises_on_backend_failure(monkeypatch, tmp_path: Path) -> None:
+    """Given a throwing vector_store, When persisting, Then the write path still succeeds (best-effort)."""
+    import gacore
+    import gacore.memory_maintenance as mm
+    import types
+
+    monkeypatch.setattr(
+        gacore, "vector_store",
+        types.SimpleNamespace(
+            ensure_schema=lambda: None,
+            sync_portrait=lambda _cfg: (_ for _ in ()).throw(RuntimeError("pg down")),
+        ),
+    )
+    cfg = Config.for_tests(tmp_path)
+    res = mm.persist_entry(cfg, fact_line="a", insight_line="b", facts_statement="c")
+    assert res["updated"] is True

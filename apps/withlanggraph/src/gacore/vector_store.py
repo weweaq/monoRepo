@@ -155,6 +155,26 @@ def sync_portrait(cfg: Config) -> dict:
     return {"lines": len(lines), "stored": stored}
 
 
+def sync_line(content: str, chunk_key: str | None = None) -> dict:
+    """Incrementally embed+upsert a single portrait line (dedup by content+chunk_key).
+
+    The cheap per-line counterpart to ``sync_portrait``: callers that just wrote one fact
+    fan the new line in here so it is recallable immediately, instead of waiting for the
+    next full portrait pass. Idempotent and non-destructive (ON CONFLICT DO NOTHING), so
+    safe to run alongside a full sync — a line already present is simply skipped.
+    """
+    if not content:
+        return {"stored": 0}
+    if chunk_key is None:
+        chunk_key = _source_of(content)
+    embedding = encode(content)
+    if not embedding:
+        return {"stored": 0}
+    upsert_line(content, chunk_key=chunk_key, embedding=embedding)
+    _logger.info("portrait line synced", chunk_key=chunk_key)
+    return {"stored": 1}
+
+
 def ensure_episodic_schema() -> None:
     """Create the episodic (day-tagged) vector table if absent (idempotent)."""
     with _cursor(commit=True) as cur:
@@ -340,6 +360,7 @@ __all__ = (
     "nearby",
     "nearby_episodic",
     "sync_portrait",
+    "sync_line",
     "sync_episodic_daily",
     "recall_context",
     "upsert_line",

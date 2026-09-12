@@ -402,18 +402,24 @@ def _as_fact_statement(verdict: Verdict) -> str:
     return f"{category} {verdict.fact}".strip()
 
 
-def _sync_vector_store(cfg: Config) -> None:
+def _sync_vector_store(cfg: Config, extra_line: str | None = None) -> None:
     """Best-effort resync of the facts portrait into pgvector; never raises.
 
     The ONLY place topological/profile writes fan out to the vector store, so it stays
     consistent no matter which entry point wrote memory (passive ``memory_maintain`` or the
     active ``start_long_term_update`` tool). A missing/offline backend is swallowed — the
     txt files remain the source of truth and the next sync heals the gap.
+
+    Runs the full portrait pass (idempotent) and, when a ``extra_line`` from the current
+    write is given, fans it in as a single incremental line so the just-written fact is
+    recallable immediately rather than waiting for the next full pass.
     """
     try:
         from gacore import vector_store
         vector_store.ensure_schema()
         vector_store.sync_portrait(cfg)
+        if extra_line:
+            vector_store.sync_line(extra_line)
         _logger.info("facts portrait synced to vector store")
     except Exception as exc:  # noqa: BLE001 — vector sync must never break memory write
         _logger.warning("vector sync skipped", error_type=type(exc).__name__, error=str(exc))
@@ -445,7 +451,7 @@ def persist_entry(
         _logger.warning("memory persist_entry failed", error=str(exc))
         return {"updated": False, "paths": [], "error": str(exc)}
     if sync:
-        _sync_vector_store(cfg)
+        _sync_vector_store(cfg, extra_line=facts_statement or None)
     return {
         "updated": True,
         "paths": [str(cfg.memory_dir / _FACTS_FILE), str(cfg.memory_dir / _INSIGHTS_FILE)],
