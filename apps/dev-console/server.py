@@ -600,6 +600,7 @@ class Handler(BaseHTTPRequestHandler):
                 "pid": pids[0] if pids else None,
                 "ports": declared,
                 "ports_open": opened,
+                "frontend": s.get("frontend") or "",
                 "log": service_log_file(s.get("id", "")) or "",
             })
         self._send_json(200, {"services": services})

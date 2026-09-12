@@ -67,3 +67,28 @@
 
 **待办更新**：上文「services.json 模板化」应一并覆盖 start.bat/start-console.vbs
 的硬编码路径，或改用环境变量注入。
+
+### 2026-09-12 — 服务卡片加「打开前端」直达按钮
+
+**背景**：多个受管服务带浏览器页面（WeiTrack 看板、APK 分发页、mmd 查看器、opencode web），但卡片只展示端口，没有直达入口。用户希望每个有前端的服务能一键新开网页；buildApp skill 此前也未声明"前端接入"字段。
+
+**已完成**：
+- `server.py::_serve_status`：每个服务返回新增 `frontend` 字段（透传 `services.json` 的 `frontend`，无则空串），接口不影响其他元数据
+- `public/index.html`：卡片 actions 区新增「打开」按钮（绿色、定宽），仅当服务声明 `frontend` 才显示；运行中且非 busy 时可点，点击 `window.open(s.frontend, "_blank")` 新开网页；未运行置灰
+- `services.json`：给 4 个有浏览器界面的服务补 `frontend` 完整 loopback URL（py-wei-web→5555/、opencode→4096/、app-apk→8080/、mermaid-viewer→8123/apps/mermaid-viewer/viewer.html）；langtrack（纯上报 API）/gacore/py-wei 无页面不填
+- `.trae/skills/buildApp/SKILL.md`：B 部分服务字段表新增 `frontend` 行；坑清单新增第 6 条（frontend 与端口手绑 + 后台服务防弹窗、建议 pythonw）
+
+**实测验证**：
+- `services.json` JSON 解析合法，`frontend` 共 4 条且值与端口对应
+- `uv run ruff check apps/dev-console` 通过
+- 重启 dev-console 后 `/api/status` 返回各服务 `frontend` 字段正确；（「打开」按钮的实际点选由仪表盘人工验证）
+
+**偏差说明**：
+- `frontend` 为完整绝对 URL，偏静态，刻意**不进配置面板可编辑集**（`EDITABLE_FIELDS` 不含它），只由 `services.json` 模板声明；改端口需手动同步 frontend，已写入 buildApp skill 坑清单
+- dev-console 为单文件微服务，无独立 tech/architecture-flow 文档（由 AGENTS.md 代码地图承载），本次只同步 ROADMAP/AGENTS 心智模型未失真
+
+**待办更新**：
+- [x] 服务卡片「打开」按钮 + frontend 字段（2026-09-12）
+- [ ] 补基础测试（进程探测纯函数部分）
+- [ ] services.json 模板化（去掉本机绝对路径）
+- [ ] Windows 服务化（nssm 或 Task Scheduler 常驻）

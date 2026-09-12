@@ -46,7 +46,8 @@
       "interpreter": "D:\\softwares\\miniconda\\pythonw.exe",
       "args": ["web/app.py"],
       "match": ["web/app"],
-      "notes": "独立 Flask 看板 :5555，与采集器分开启停（采集器 --no-dashboard 后不再内嵌看板）"
+      "notes": "独立 Flask 看板 :5555，与采集器分开启停（采集器 --no-dashboard 后不再内嵌看板）",
+      "frontend": "http://127.0.0.1:5555/"
     },
     {
       "id": "opencode",
@@ -57,7 +58,8 @@
       "interpreter": "C:\\Users\\17734\\AppData\\Roaming\\npm\\node_modules\\opencode-ai\\bin\\opencode.exe",
       "args": ["serve", "--hostname", "127.0.0.1", "--port", "4096"],
       "match": ["opencode", "--port 4096"],
-      "notes": "直连 opencode.exe（不再经 opencode.cmd -> cmd.exe 中转）；只读 127.0.0.1；未设密码。match 为 AND 语义：须同时含 opencode 与 --port 4096，避免误伤终端里交互式 opencode 会话"
+      "notes": "直连 opencode.exe（不再经 opencode.cmd -> cmd.exe 中转）；只读 127.0.0.1；未设密码。match 为 AND 语义：须同时含 opencode 与 --port 4096，避免误伤终端里交互式 opencode 会话",
+      "frontend": "http://127.0.0.1:4096/"
     },
     {
       "id": "app-apk",
@@ -68,7 +70,8 @@
       "interpreter": "D:\\softwares\\miniconda\\python.exe",
       "args": ["D:\\AAAmyPrj\\github\\myrepos\\weiCheckApp\\deploy\\serve_apk.py", "--port", "8080"],
       "match": ["serve_apk.py"],
-      "notes": "局域网 APK 分发服务（仅起分发进程，不自动构建；网页可点'立即构建'触发 assembleDebug）；默认 --dir 为 app/build/outputs/apk/debug，未构建 APK 时进程会立即退出；绑定 0.0.0.0:8080 供手机访问"
+      "notes": "局域网 APK 分发服务（仅起分发进程，不自动构建；网页可点'立即构建'触发 assembleDebug）；默认 --dir 为 app/build/outputs/apk/debug，未构建 APK 时进程会立即退出；绑定 0.0.0.0:8080 供手机访问",
+      "frontend": "http://127.0.0.1:8080/"
     },
     {
       "id": "mermaid-viewer",
@@ -79,7 +82,8 @@
       "interpreter": "D:\\AAAmyPrj\\github\\myrepos\\mono\\.venv\\Scripts\\python.exe",
       "args": ["viewer_server.py", "--no-browser"],
       "match": ["viewer_server.py"],
-      "notes": "本地离线 mmd 查看器服务；评论持久化到 apps/mermaid-viewer/data/reviews.db；仅绑 127.0.0.1。--no-browser：由 dev-console 启停时不需自拉浏览器"
+      "notes": "本地离线 mmd 查看器服务；评论持久化到 apps/mermaid-viewer/data/reviews.db；仅绑 127.0.0.1。--no-browser：由 dev-console 启停时不需自拉浏览器",
+      "frontend": "http://127.0.0.1:8123/apps/mermaid-viewer/viewer.html"
     }
   ]
 }

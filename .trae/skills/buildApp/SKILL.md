@@ -118,6 +118,7 @@ apps/<name>/
 | `env` | 否 | `{}` | 环境变量，与系统环境 merge |
 | `ports` | 否 | `[]` | 声明端口：启动前强杀占用者 + 状态展示 |
 | `match` | 否 | `[]` | 进程存活判定子串（AND 语义、大小写不敏感） |
+| `frontend` | 否 | `""` | 浏览器页面完整 URL（本地地址，如 `http://127.0.0.1:8123/apps/mermaid-viewer/viewer.html`）。填了，dev-console 仪表盘对该服务显示"打开"按钮（运行中可点，新开网页）。**非浏览器页面/纯 API 服务别填** |
 | `notes` | 否 | `""` | 注释 |
 
 ## 配置双层制
@@ -133,7 +134,8 @@ apps/<name>/
 3. **端口强杀是最高权力**：`_free_service_ports` 启动前会**无条件强杀所有占用声明端口的进程**（含外来进程），强杀失败则拒绝启动。所以端口号必须**选仓库内唯一的专属端口**。
 4. **`interpreter` 是"可执行文件"，`args` 是参数**，`cmd = [interpreter, *args]`；`args` 可为空（服务本身就是可执行文件，如 opencode.exe）。
 5. **绑定安全**：dev-console 自身强制只绑 loopback。它**不会**校验纳管服务绑什么 host，但安全上建议你的服务尽量只绑 `127.0.0.1`（langtrack/app-apk 绑 `0.0.0.0` 是为被手机/网络访问，属有意的例外）。
-6. **POST 全部需要 token**：`/api/start`、`/api/stop`、`/api/restart`、`/api/config` 都在 `_token_ok()` 后；`X-DevConsole-Token` 缺失/错误/服务自身 token 为空都会拒绝。你的 app 若有变更接口也别裸奔。
+6. **`frontend` 与端口手绑**：`frontend` 是完整绝对 URL 字符串，不在配置文件面板可编辑集，改 `ports` 后须手动同步 `frontend`（一般是 `http://127.0.0.1:<新端口>/<路径>`），否则"打开"仍指旧地址。防弹窗：服务解释器用 `python.exe`（控制台版）时，脱离 dev-console 的 `CREATE_NO_WINDOW` 保护裸跑会弹 cmd 窗——后台服务建议用 `pythonw.exe`，或别手动裸跑、统一走仪表盘启停。
+7. **POST 全部需要 token**：`/api/start`、`/api/stop`、`/api/restart`、`/api/config` 都在 `_token_ok()` 后；`X-DevConsole-Token` 缺失/错误/服务自身 token 为空都会拒绝。你的 app 若有变更接口也别裸奔。
 
 ## mono Python app 的典型写法
 

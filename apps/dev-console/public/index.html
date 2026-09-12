@@ -28,6 +28,7 @@
   button.stop { color:var(--red); }
   button.log { color:var(--accent); }
   button.cfg { color:var(--muted); }
+  button.open { color:var(--green); width:auto; flex:none; padding:8px 14px; }
   button:disabled { opacity:.45; cursor:not-allowed; }
   .cfg-body { padding:16px; overflow:auto; display:flex; flex-direction:column; gap:12px; }
   .cfg-body label { display:flex; flex-direction:column; gap:6px; font-size:12px; color:var(--muted); }
@@ -233,6 +234,7 @@ function render(list, force) {
       '<span class="name"></span></div>' +
       '<div class="meta"></div>' +
       '<div class="actions">' +
+      '<button class="open" title="新开网页">打开</button>' +
       '<button class="start">启动</button>' +
       '<button class="restart">重启</button>' +
       '<button class="stop">停止</button>' +
@@ -241,6 +243,13 @@ function render(list, force) {
     card.querySelector(".name").textContent = s.name;
     card.querySelector(".meta").textContent = meta;
     ["start", "restart", "stop"].forEach(cls => { card.querySelector("." + cls).disabled = busy; });
+    const openBtn = card.querySelector(".open");
+    if (s.frontend) {
+      openBtn.disabled = busy || !s.running;
+      openBtn.title = "打开 " + s.frontend;
+    } else {
+      openBtn.style.display = "none";
+    }
     startBtnWire(card, s);
     card.querySelector(".log").onclick = () => openLog(s);
     card.querySelector(".cfg").onclick = () => openConfig(s);
@@ -251,6 +260,8 @@ function render(list, force) {
 function startBtnWire(card, s) {
   card.querySelector(".start").onclick = () => runAction("/api/start", s.id);
   card.querySelector(".restart").onclick = () => runAction("/api/restart", s.id);
+  const openBtn = card.querySelector(".open");
+  if (openBtn) openBtn.onclick = () => { if (s.frontend) window.open(s.frontend, "_blank"); };
   card.querySelector(".stop").onclick = () => {
     if (!confirm("确定停止「" + s.name + "」？（强制结束进程）")) return;
     runAction("/api/stop", s.id);
