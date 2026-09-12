@@ -2997,3 +2997,42 @@ best-effort + 幂等 + 失败吞掉，天然可维护。
 参考锚点：阶段二方案2 实测中 `0.50~0.55` 是"放行『住朝阳』/挡掉『晚饭』"的合适区间——episodic 阈值
 建议从同一经验值起手，等真实对话攒一段再做数据驱动微调。改参数属行为变更，改完须同步本路书 + tech 的
 实测段。
+
+## 2026-09-12：修复 browser_history 工具读不到 Edge 浏览记录（database is locked）
+
+### 背景
+`gacore/tools/browser_history.py` 宣称「Edge 运行锁库时复制到临时目录再读」，但真实执行（Edge 正在
+运行）反复返回 `query_failed: database is locked`，工具完全取不到浏览记录。用于某种桌面/浏览信号源时
+总是空手而归。
+
+### 根因（三处叠加）
+1. **锁在查询阶段而非打开阶段**：`sqlite3.connect(... mode=ro)` 只建连接、不取锁；真正的读锁要到执行
+   第一条读语句才获取。原 `_open_db` 只在 `connect()` 本身抛 `OperationalError("locked")` 时才复制临时
+   文件——而 connect() 从不会因此抛错，锁错误在 `execute()` 阶段被上层当成普通 `query_failed` 吞掉，
+   复制回退逻辑形同虚设。
+2. **探测语句选了 `SELECT 1`（无表）**：不带表名的 `SELECT 1` 不启动 SQLite 读事务、不取 SHARED 锁，
+   锁根本不会被触发。
+3. **WAL 只读连接受限**：Edge 用 WAL 时 `mode=ro` 需写 `-shm` 才能回放 WAL，直接只读连真实库会失败；
+   原实现只复制 `.db` 不复制 `-wal`，即便复制成功也会丢最近提交。
+
+### 改动（仅 `apps/withlanggraph/src/gacore/tools/browser_history.py`）
+1. `_open_db` 重写为**两遍回退**：第一遍 `mode=ro` 连真实库，用 `SELECT 1 FROM sqlite_master`
+   （读 sqlite_master 会真正启动读事务、触发锁）探测；一旦抛 OperationalError → 调 `_snapshot_to_temp`
+   把 `.db`（连同 `-wal`，若存在）快照到 `tempfile.mkdtemp` 私有临时目录，第二遍 `mode=rw` 打开快照
+   （对自己的文件读-写打开，SQLite 可自行管理 WAL/-shm，拿到一致视图）。两遍都不行才抛错。
+2. 新增 `_snapshot_to_temp`：`mkdtemp(prefix="gacore_edge_history_")` + `shutil.copy2` 复制 `.db`，
+   存在 `-wal` 一并复制。
+
+### 验证
+- 真实 Edge 运行锁库场景实测：修复前返回 `query_failed/database is locked`；修复后
+  `browser_history.invoke({"limit":5})` → `total:5`，正常列出 mermaid-viewer 等当日浏览记录，
+  日志出现 `Edge DB locked, snapshot to temp`。
+- `tests/test_tools_browser_history.py` 新增 2 例：`test_open_db_snapshots_when_locked`（fake connect
+  首调抛 locked，验证 _open_db 落到快照且能读到提交）、`test_open_db_no_snapshot_when_unlocked`
+  （无锁时仅连接一次、不快照）。全文件 **18 passed**；ruff 两文件零告警。
+
+### 待办
+- [x] browser_history 锁库取数修复。
+- [ ] langTrack-tech.md 若无 browser_history 契约节（§2.6 信号源契约是手机侧）则另议；本工具属
+      `tools/` 层桌面信号源，docstring 已足够，暂不另建 tech 小节。
+- 遗留不变：I7 accuracy filter、A3 人工停留核对、A10 有用性访谈、weiCheckApp 客户端断供/保活排查。
