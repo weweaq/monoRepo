@@ -69,6 +69,17 @@
       "args": ["D:\\AAAmyPrj\\github\\myrepos\\weiCheckApp\\deploy\\serve_apk.py", "--port", "8080"],
       "match": ["serve_apk.py"],
       "notes": "局域网 APK 分发服务（仅起分发进程，不自动构建；网页可点'立即构建'触发 assembleDebug）；默认 --dir 为 app/build/outputs/apk/debug，未构建 APK 时进程会立即退出；绑定 0.0.0.0:8080 供手机访问"
+    },
+    {
+      "id": "mermaid-viewer",
+      "name": "mermaid .mmd 查看器 (viewer_server)",
+      "ports": [8123],
+      "cwd": "D:\\AAAmyPrj\\github\\myrepos\\mono\\tools\\mermaid-viewer",
+      "env": {},
+      "interpreter": "D:\\AAAmyPrj\\github\\myrepos\\mono\\.venv\\Scripts\\python.exe",
+      "args": ["viewer_server.py", "--no-browser"],
+      "match": ["viewer_server.py"],
+      "notes": "本地离线 mmd 查看器服务；评论持久化到 data/reviews.db；仅绑 127.0.0.1。--no-browser：由 dev-console 启停时不需自拉浏览器"
     }
   ]
 }
