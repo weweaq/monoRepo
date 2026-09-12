@@ -765,3 +765,36 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 - [ ] 步骤2：情景事件触发式实时补写（`sync_episodic_daily` 由纯调度改为判定当刻触发，需走 R7 review-loop）。
 - [ ] 步骤3：消除 vector sync 静默失败（缺 extra/连不上 → recall_log 记 failed 或告警）。
 - [ ] 观察「事件发生 → 向量库可见」延迟是否从"当天晚间批量"缩到"判定当刻"（对比 baseline）。
+
+### 2026-09-12 — 消除 vector sync 静默失败：失败事件记入 recall 日志（步骤3）
+
+**背景**：改写 A/B 期间发现根因之一：向量栈缺失 / pg 服务掉线时 `_sync_vector_store` 的异常被
+`except Exception: logger.warning` 吞掉，只在 info 级留一行 warning，召回整天空返回却无从统计、
+无告警、难以发现——「静默降级」是比改写更隐蔽的坑。步骤3 把这一处吞异常变为**可观测**。
+
+**已完成**：
+- `recall_log.py` 新增 `build_sync_failure(...)`：纯函数构造 vector-sync 失败事件，
+  `event:"sync_failure"` 标签 + `ts/day/step/error_type/error/extra_line`，与召回事件共用同一
+  每日 JSONL（`logs/<day>/recall.jsonl`），可 grep / `iter_records` 统计。
+- `memory_maintenance._sync_vector_store` 失败分支追加 `_record_sync_failure(...)`：
+  把 `type(exc).__name__` / str(exc) / 失败步（`sync_portrait`）/当次 extra_line 记入
+  `cfg.logs_dir`。成功时零开销（try 内不产生记录），失败不再"silently off"。
+- `_record_sync_failure` 自身 best-effort：连记录都失败（logs 不可写等）只降 warning，绝不二度
+  干扰记忆写热路径（`persist_entry` 仍返回成功，txt 为真相源不变）。
+- 单测 +4（`build_sync_failure` 形状/落盘 +2 收 recall_log；`_sync_vector_store` 失败落盘 +1、
+  记录自身失败也不中断写 +1）。
+
+**实测验证**：
+- `test_memory_maintenance.py` 20 passed；`test_recall_log.py` 8 passed（合计 28）。
+- `uv run ruff check src tests` 通过。
+- 集成验证：patch `sync_portrait` 抛 `RuntimeError("pg down")` → `persist_entry` 仍 `updated:True`，
+  且 `cfg.logs_dir` 下 `recall.jsonl` 出现 1 条 `event:"sync_failure"`（含 error_type/step/extra_line）。
+
+**偏差说明**：
+- 未接告警通道（仅落地结构日志；后续可基于 `sync_failure` 计数做阈值告警，本次不扩）。
+- 情景（episodic）实时触发（步骤2）仍未动。
+
+**待办更新**：
+- [x] 步骤3：vector sync 失败记入 `recall.jsonl`（`event:"sync_failure"`），消除静默降级盲区。
+- [ ] 基于 `sync_failure` 事件做阈值告警 / 统计（如"缺 vector extra 半天内 N 次"）= 步骤3 延展。
+- [ ] 步骤2：情景事件触发式实时补写（`sync_episodic_daily` 由纯调度改为判定当刻触发，需 review-loop）。

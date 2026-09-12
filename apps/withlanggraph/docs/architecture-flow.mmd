@@ -43,7 +43,7 @@ flowchart TD
         TR["trigger<br/>CombinedTrigger<br/>(keyword 门 OR 语义召回)"]
         TR -->|"未触发 → 返回 no-op<br/>(不打断对话)"| TRN["no-op"]
         TR -->|"已触发"| JD["judge (LLM)<br/>判定 MERGE / NEW / NOOP"]
-        JD --> AP["apply + persist_entry<br/>唯一写入口<br/>写 global_mem + facts +<br/>向量同步 pgvector<br/>(全量 sync_portrait +<br/>当次增量 sync_line)"]
+        JD --> AP["apply + persist_entry<br/>唯一写入口<br/>写 global_mem + facts +<br/>向量同步 pgvector<br/>(全量 sync_portrait +<br/>当次增量 sync_line;<br/>失败→recall.jsonl)"]
         JD -->|"NOOP"| TRN
         AP --> AU["record_audit<br/>→ memory_audit"]
     end

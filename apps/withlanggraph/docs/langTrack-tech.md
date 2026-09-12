@@ -1232,7 +1232,7 @@ python -m gacore.rerun --day 2026-09-08 --job weekly-summary
   - `CombinedTrigger`（新）：`keyword OR vector`，**keyword 优先**（命中即省掉 vector、省 LLM）。
   - `maintain_once`：trigger 的 `context`（召回行）注入 judge 的 portrait 前，让 MERGE 判定对着最相关事实做。
   - `apply()`：MERGE/NEW 调统一 `persist_entry()`；NOOP 直接返回。
-  - **`persist_entry(cfg, *, fact_line, insight_line, facts_statement, sync=True)`（统一写入口 + 向量同步收口，2026-09-09 方案2 加固 / 09-12 两步式）**：写 `global_mem.txt`/`global_mem_insight.txt`、镜像简短事实到 `global_mem_facts.txt`，再 best-effort `_sync_vector_store`（`ensure_schema` + `sync_portrait` 全量重嵌 + 当次 `facts_statement` 单行**增量** `sync_line`，幂等去重）。**这是所有记忆写路径唯二汇流点**——被动节点 `memory_maintain` 与主动工具 `start_long_term_update` 都经它落盘，因此**任何写入口都不会漏向量同步**。向量同步失败被吞（txt 仍是真相源，下次 sync 自愈），绝不带崩写动作。
+  - **`persist_entry(cfg, *, fact_line, insight_line, facts_statement, sync=True)`（统一写入口 + 向量同步收口，2026-09-09 方案2 加固 / 09-12 两步式）**：写 `global_mem.txt`/`global_mem_insight.txt`、镜像简短事实到 `global_mem_facts.txt`，再 best-effort `_sync_vector_store`（`ensure_schema` + `sync_portrait` 全量重嵌 + 当次 `facts_statement` 单行**增量** `sync_line`，幂等去重）。**这是所有记忆写路径唯二汇流点**——被动节点 `memory_maintain` 与主动工具 `start_long_term_update` 都经它落盘，因此**任何写入口都不会漏向量同步**。向量同步失败被吞（txt 仍是真相源，下次 sync 自愈），绝不带崩写动作。**失败可观测（09-12 步骤3）**：`_sync_vector_store` 异常分支调 `_record_sync_failure` → `recall_log.build_sync_failure` 记 `event:"sync_failure"`（含 step/error_type/error/extra_line）到 `logs/<day>/recall.jsonl`，消除"缺 vector extra / pg 掉线 静默空返回"盲区；`_record_sync_failure` 自身 best-effort，记录失败也不中断写。
 - `graph.py` `memory_maintain` 节点（改）：改用 `CombinedTrigger`；判定到 MERGE/NEW 交给 `apply`→`persist_entry` 落盘并同步向量库（**节点层不再单独同步**，同步统一收口在 `persist_entry`，避免重复全量重嵌）。
 
 ### 数据流（修复当日触发 + 沉淀后写库）
