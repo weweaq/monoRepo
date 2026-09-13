@@ -179,12 +179,28 @@
   }
   #side .chips button.active { border-color: var(--accent); color: var(--accent); background: #eef4ff; font-weight: 600; }
   input[type="file"] { display: none; }
+  #url-cover { position: fixed; inset: 0; background: rgba(15,23,42,.35); display: none; align-items: center; justify-content: center; z-index: 60; }
+  #url-cover.show { display: flex; animation: drawerIn .18s ease; }
+  #url-cover .box { background: #fff; border-radius: 12px; box-shadow: 0 10px 40px rgba(0,0,0,.18); width: 440px; max-width: 94vw; padding: 16px; }
+  #url-cover h3 { margin: 0 0 4px; font-size: 15px; }
+  #url-cover .sub { font-size: 12px; color: var(--muted); line-height: 1.5; margin-bottom: 12px; }
+  #url-cover .sub b { color: var(--accent); font-weight: 600; }
+  #url-cover .row { display: flex; gap: 8px; }
+  #url-cover .row select { flex: 1; min-width: 0; border: 1px solid var(--border); border-radius: 6px; padding: 7px 8px; font-size: 12px; font-family: inherit; background: #fff; }
+  #url-cover .row select:focus { outline: none; border-color: var(--accent); }
+  #url-cover .row input { flex: 1; min-width: 0; border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; font-size: 12px; font-family: inherit; }
+  #url-cover .row input:focus { outline: none; border-color: var(--accent); }
+  #url-cover .count { margin-top: 8px; font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 8px; }
+  #url-cover .count button { font-size: 11px; }
+  #url-cover .paths { margin-top: 6px; font-size: 11px; color: var(--muted); line-height: 1.6; word-break: break-all; }
+  #url-cover .paths b { color: var(--accent); font-weight: 600; }
 </style>
 </head>
 <body>
   <div id="toolbar">
     <span class="logo">Mermaid Viewer</span>
     <button class="btn primary" id="btn-open">打开 .mmd</button>
+    <button class="btn outline" id="btn-url" title="按电脑仓库根相对路径加载 .mmd（手机/局域网同样可用）">从电脑加载</button>
     <button class="btn outline" id="btn-side">建议中心 (<span id="side-count">0</span>)</button>
     <span class="spacer"></span>
     <button class="btn primary" id="btn-export">导出标记</button>
@@ -203,6 +219,7 @@
     <div id="mmd-host"></div>
     <div id="empty" class="">
       <div class="big">拖拽 .mmd 文件到窗口，或点左上角「打开 .mmd」</div>
+      <div>手机上点「从电脑加载」按仓库路径拉取，如 apps/withlanggraph/docs/architecture-flow.mmd</div>
       <div>离线运行 · 点击节点/连线可评论 · 平移缩放 / Fit 自适应</div>
     </div>
   </div>
@@ -210,6 +227,7 @@
     <div class="head">
       建议中心
       <span class="sp"></span>
+      <button class="btn ghost sm" id="btn-add-at" title="在当前位置再写一条批注" style="display:none">＋批注</button>
       <button class="btn ghost sm" id="btn-close-side" title="收起建议面板">✕ 关闭</button>
       <button class="btn danger sm" id="btn-clear-side" title="清空当前文件的全部建议">清空</button>
     </div>
@@ -228,6 +246,20 @@
     <div class="list" id="rvw-list"></div>
   </div>
   <input type="file" id="fileInput" accept=".mmd,.mermaid,.txt">
+  <div id="url-cover">
+    <div class="box">
+      <h3>从电脑加载 .mmd</h3>
+      <div class="sub">扫描电脑仓库内的 <b>.mmd</b> 文件，选中即从本地服务拉取并在手机上渲染。</div>
+      <div class="row">
+        <select id="url-select"><option>…扫描中…</option></select>
+        <input id="url-path" placeholder="或手输相对路径" autocomplete="off" spellcheck="false">
+        <button class="btn primary" id="url-go">打开</button>
+        <button class="btn" id="url-cancel">取消</button>
+      </div>
+      <div class="count"><span id="url-count">—</span><button class="btn outline sm" id="url-refresh">刷新</button></div>
+      <div class="paths">深链：<b>…viewer.html?file=apps/xx/docs/xxx.mmd</b>。</div>
+    </div>
+  </div>
   <div id="node-tooltip"></div>
   <div id="status"></div>
   <div id="toast"></div>
@@ -521,6 +553,17 @@
           // not a drag, handled below via mousedown/click delta guard)
         });
 
+        // hover tooltip for subgraph container titles + edge label text
+        Array.prototype.forEach.call(svg.querySelectorAll(".cluster .cluster-label, .cluster-label, .edgeLabel"), function (el) {
+          el.addEventListener("mousemove", function (ev) {
+            var seg = ev.target && ev.target.closest ? ev.target.closest(".cluster") : null;
+            var name = seg ? clusterSym(seg) : edgeLabelSym(el);
+            tip.textContent = name;
+            showTip(ev);
+          });
+          el.addEventListener("mouseleave", function () { tip.style.display = "none"; });
+        });
+
         // node clicks with drag guard (svg-pan-zoom pans on drag)
         var startX = 0, startY = 0, downTarget = null, downCls = false;
         svg.addEventListener("mousedown", function (ev) {
@@ -531,12 +574,54 @@
         svg.addEventListener("click", function (ev) {
           var moved = Math.hypot(ev.clientX - startX, ev.clientY - startY);
           if (moved > 6) return;          // it was a pan, not a click
-          var nodeEl = ev.target && ev.target.closest ? ev.target.closest(".node") : null;
+          var t = ev.target;
+          if (!t || !t.closest) return;
+          // priority: node > edgeLabel text > subgraph container title > edge path
+          var nodeEl = t.closest(".node");
           if (nodeEl) {
             ev.stopPropagation();
             var sym = nodeCommentSym(nodeEl);
-            openComposer(sym, sym);
+            var openAt = currentReviews.some(function (r) { return r.status !== "closed" && sameSym(r.sym, sym); });
+            if (openAt) {
+              // node already has reviews: show them in the side panel instead of
+              // popping the composer (modal would otherwise cover the list)
+              activeSym = sym;
+              openSide();
+              renderSideList();
+              status.textContent = "已显示该节点的待处理建议";
+            } else {
+              openComposer(sym, sym);
+            }
+            return;
           }
+          // edge label text (e.g. "route_after_wait: 恒 process")
+          var labEl = t.closest(".edgeLabel");
+          if (labEl) {
+            ev.stopPropagation();
+            var lsym = edgeLabelSym(labEl);
+            var lop = currentReviews.some(function (r) { return r.status !== "closed" && sameSym(r.sym, lsym); });
+            if (lop) {
+              activeSym = lsym; openSide(); renderSideList();
+              status.textContent = "已显示该连线标签的待处理建议";
+            } else {
+              openComposer(lsym, lsym);
+            }
+            return;
+          }
+          // subgraph container title (e.g. "② 主图状态机", "对话主流程")
+          var clEl = t.closest(".cluster");
+          if (clEl) {
+            ev.stopPropagation();
+            var csym = clusterSym(clEl);
+            var cop = currentReviews.some(function (r) { return r.status !== "closed" && sameSym(r.sym, csym); });
+            if (cop) {
+              activeSym = csym; openSide(); renderSideList();
+              status.textContent = "已显示该子图的待处理建议";
+            } else {
+              openComposer(csym, csym);
+            }
+          }
+          // note: edge path itself still clickable via per-path handler above
         });
       }
 
@@ -556,6 +641,23 @@
         }
         // fallback: node id
         return "节点 " + (nodeEl.id || disp) + "（" + disp + "）";
+      }
+
+      // Map a mermaid subgraph container (<g class="cluster">) to a commentable
+      // symbol "容器 <id>（<标题>）" so users can review sub-diagrams by title.
+      function clusterSym(clusterEl) {
+        var id = clusterEl.id || "subgraph";
+        var labelEl = clusterEl.querySelector && clusterEl.querySelector(".cluster-label");
+        var disp = (labelEl && labelEl.textContent) || id;
+        disp = String(disp).replace(/\s+/g, " ").trim();
+        return "容器 " + id + "（" + disp + "）";
+      }
+      // Edge label text (<g class="edgeLabel">) -> commentable "连线 <label>".
+      function edgeLabelSym(el) {
+        var textEl = el.querySelector && (el.querySelector("text") || el.querySelector("foreignObject"));
+        var txt = (textEl && textEl.textContent) || el.getAttribute("data-label") || "edge label";
+        txt = String(txt).replace(/\s+/g, " ").trim();
+        return "连线 " + txt + "（edge label）";
       }
 
       // --------------------------------------------------------------
@@ -634,6 +736,9 @@
         renderSideList();
         side.classList.toggle("open");
       });
+      document.getElementById("btn-add-at").addEventListener("click", function () {
+        if (activeSym) openComposer(activeSym, activeSym);
+      });
       document.getElementById("btn-close-side").addEventListener("click", closeSide);
       document.getElementById("f-all").addEventListener("click", function () {
         activeSym = null;
@@ -657,12 +762,13 @@
         var list = document.getElementById("rvw-list");
         var items = currentReviews;
         if (activeSym) {
-          items = currentReviews.filter(function (r) { return r.sym === activeSym; });
+          items = currentReviews.filter(function (r) { return sameSym(r.sym, activeSym); });
           sideFilter.classList.add("show");
           fSym.textContent = activeSym;
         } else {
           sideFilter.classList.remove("show");
         }
+        document.getElementById("btn-add-at").style.display = activeSym ? "" : "none";
         if (!items.length) {
           list.innerHTML = activeSym
             ? '<div class="empty-hint">这个位置还没有评论。在下方的标注框里写一条吧。</div>'
@@ -830,6 +936,21 @@
         var m = sym.match(/^节点\s+([A-Za-z0-9_\-.]+)/);
         return m ? m[1] : null;
       }
+      // the display text inside 节点 ID（显示文本） — stable across renders, unlike
+      // the SVG node id (mermaid can rewrite nested ids like flowchart-SC-8).
+      function symDisp(sym) {
+        if (!sym) return "";
+        var m = sym.match(/[（(]([^（）()]*)[）)]\s*$/);
+        return m ? m[1] : sym;
+      }
+      // Do two symbols refer to the same node? Match by id if both have one,
+      // otherwise fall back to the display text (handles id rewrites).
+      function sameSym(a, b) {
+        var ia = symNodeId(a), ib = symNodeId(b);
+        if (ia && ib) return ia === ib;
+        var da = symDisp(a), db = symDisp(b);
+        return !!da && da === db;
+      }
       // overlay a red count badge at each node that still has open reviews
       function applyBadges() {
         var svg = currentSvg || (host && host.querySelector("svg"));
@@ -856,16 +977,24 @@
           grp.setAttribute("class", "mdv-badge");
           grp.setAttribute("pointer-events", "none");
           var c = document.createElementNS(NS, "circle");
-          c.setAttribute("cx", cx); c.setAttribute("cy", cy); c.setAttribute("r", 8.5);
-          c.setAttribute("fill", "#e53935");
-          c.setAttribute("stroke", "#fff"); c.setAttribute("stroke-width", "1.2");
+          c.setAttribute("cx", cx); c.setAttribute("cy", cy); c.setAttribute("r", 11);
+          c.setAttribute("fill", "#f4511e");
+          c.setAttribute("stroke", "#fff"); c.setAttribute("stroke-width", "2");
           var t = document.createElementNS(NS, "text");
-          t.setAttribute("x", cx); t.setAttribute("y", cy + 3.5);
+          t.setAttribute("x", cx); t.setAttribute("y", cy + 4);
           t.setAttribute("text-anchor", "middle");
-          t.setAttribute("font-size", "11"); t.setAttribute("fill", "#fff");
+          t.setAttribute("font-size", "12"); t.setAttribute("fill", "#fff");
           t.setAttribute("font-family", "system-ui, sans-serif"); t.setAttribute("font-weight", "700");
+          // white halo behind the digit keeps it legible on top of dense edges
+          var halo = document.createElementNS(NS, "text");
+          halo.setAttribute("x", cx); halo.setAttribute("y", cy + 4);
+          halo.setAttribute("text-anchor", "middle");
+          halo.setAttribute("font-size", "12"); halo.setAttribute("font-family", "system-ui, sans-serif");
+          halo.setAttribute("font-weight", "700"); halo.setAttribute("stroke", "#fff");
+          halo.setAttribute("stroke-width", "3"); halo.setAttribute("paint-order", "stroke");
+          halo.textContent = count[id];
           t.textContent = count[id];
-          grp.appendChild(c); grp.appendChild(t);
+          grp.appendChild(c); grp.appendChild(halo); grp.appendChild(t);
           node.appendChild(grp);
         });
       }
@@ -926,6 +1055,71 @@
         reader.readAsText(f, "utf-8");
       }
 
+      // --------------------------------------------------------------
+      // open by repo-relative path (fetched from the local server)
+      // --------------------------------------------------------------
+      var urlCover = document.getElementById("url-cover");
+      var urlInput = document.getElementById("url-path");
+      var urlSelect = document.getElementById("url-select");
+      var urlCount = document.getElementById("url-count");
+      document.getElementById("btn-url").addEventListener("click", function () {
+        urlCover.classList.add("show");
+        urlInput.value = "";
+        loadMmds();
+        setTimeout(function () { urlSelect.focus(); }, 30);
+      });
+      function closeUrlCover() { urlCover.classList.remove("show"); }
+      document.getElementById("url-cancel").addEventListener("click", closeUrlCover);
+      urlCover.addEventListener("click", function (ev) { if (ev.target === urlCover) closeUrlCover(); });
+      document.getElementById("url-refresh").addEventListener("click", loadMmds);
+      urlInput.addEventListener("keydown", function (ev) { if (ev.key === "Enter") openUrlPath(urlInput.value); });
+
+      function loadMmds() {
+        urlCount.textContent = "扫描中…";
+        urlSelect.innerHTML = "<option>…扫描中…</option>";
+        fetch("/api/mmds").then(function (r) {
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          return r.json();
+        }).then(function (data) {
+          var list = (data && data.mmds) || [];
+          urlCount.textContent = "共 " + list.length + " 个 .mmd";
+          if (!list.length) {
+            urlSelect.innerHTML = "<option>（无 .mmd 文件）</option>";
+            return;
+          }
+          urlSelect.innerHTML = "";
+          list.forEach(function (p) {
+            var o = document.createElement("option");
+            o.value = p;
+            o.textContent = p;
+            urlSelect.appendChild(o);
+          });
+        }).catch(function (e) {
+          urlCount.textContent = "扫描失败: " + (e && e.message ? e.message : e);
+          urlSelect.innerHTML = "<option>（无法连接服务器）</option>";
+        });
+      }
+
+      document.getElementById("url-go").addEventListener("click", function () {
+        openUrlPath(urlSelect.value);
+      });
+
+      function openUrlPath(path) {
+        path = String(path || "").trim().replace(/^\/+/, "");
+        if (!path) { status.textContent = "请输入路径"; return; }
+        if (!/\.(mmd|mermaid|txt)$/i.test(path)) { status.textContent = "仅支持 .mmd / .mermaid / .txt"; return; }
+        fetch("/" + path).then(function (r) {
+          if (!r.ok) throw new Error("HTTP " + r.status);
+          return r.text();
+        }).then(function (txt) {
+          render(path, txt);
+          closeUrlCover();
+          status.textContent = "已加载: " + path;
+        }).catch(function (e) {
+          status.textContent = "加载失败: " + (e && e.message ? e.message : e) + " — 请确认为仓库根相对路径";
+        });
+      }
+
       // ---- remember last opened file ----
       // Prefer the File System Access API: it hands back a real handle we can
       // store in IndexedDB and re-open next launch (true "remember the path").
@@ -981,6 +1175,12 @@
         if (window.showOpenFilePicker && window.indexedDB) {
           fsGet().then(function (h) { if (h) fsReadHandle(h); });
         }
+      })();
+
+      // deep link: ?file=<repo-relative path> loads a .mmd straight from the server
+      (function initFileParam() {
+        var m = (location.search || "").match(/[?&]file=([^&]+)/);
+        if (m) { try { openUrlPath(decodeURIComponent(m[1])); } catch (e) {} }
       })();
 
       // --------------------------------------------------------------

@@ -19,6 +19,8 @@
   → 可导出 PNG（取 clean svg 光栅化）；可导出评审标记
 ```
 
+**从电脑加载（手机/局域网场景）**：前端打开弹层时 `GET /api/mmds` 拉取全仓 mermaid 源文件（`.mmd/.mermaid`）相对路径列表（服务端 `scan_mmds(ROOT)` 递归扫描，跳过 `.git/node_modules/vendor/data/__pycache__` 等目录；**排除 `.txt` 等非图文件**，避免干扰列表），填充到下拉框选择；选中后 `fetch('/'+path)` 拉取并 `render(path, txt)`，`fileKey` 记为相对路径（复用同一评论主子键）。另保留手输路径输入框与地址栏深链 `?file=<相对路径>`（手输/深链仍允许 `.txt`，仅扫描列表过滤）。
+
 **评论闭环**：
 ```
 用户在图上点节点/连线 → 弹出框写意见
@@ -68,6 +70,7 @@ sequenceDiagram
 |------|------|--------|------|------|
 | GET | `/api/reviews/<fileKey>` | — | `{"reviews": [...]}` | 取某文件的评论（无则空数组） |
 | POST | `/api/reviews/<fileKey>` | `{"reviews": [...]}` | `{"ok":true,"count":n}` | upsert 该文件评论（fileKey 为主键，冲突更新） |
+| GET | `/api/mmds` | — | `{"mmds": [...]}` | 扫描仓库根的 `.mmd/.mermaid` 相对路径列表（供下拉选择，排除非图文件） |
 | GET | 任意静态路径 | — | 文件内容 | docroot=仓库根，`translate_path` 防路径逃逸 |
 
 `fileKey` 由前端取打开文件名；评论为 JSON 数组，持久化为单行 JSON 存 `payload` 列。`updated_at` 默认东八（`datetime('now','+8 hours')`）。

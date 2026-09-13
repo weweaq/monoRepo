@@ -18,6 +18,7 @@ Endpoints:
     GET  /apps/mermaid-viewer/viewer.html   (static files, repo root)
     GET  /api/reviews/<name>                 -> {"reviews": [...]}
     POST /api/reviews/<name>                 body {"reviews": [...]} upserts
+    GET  /api/mmds                           -> {"mmds": [repo-relative paths]}
 """
 
 from __future__ import annotations
@@ -37,6 +38,28 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
 DB_PATH = os.path.join(DATA_DIR, "reviews.db")
 DEFAULT_PORT = 8123
+
+
+DEFAULT_SKIP = {".git", "node_modules", ".venv", "vendor", "data",
+                "__pycache__", ".ruff_cache", ".pytest_cache", "dist", "build", "htmlcov"}
+
+
+def scan_mmds(root: str, skip: set[str] | None = None) -> list[str]:
+    """Return repo-relative paths of mermaid source files (.mmd/.mermaid) under root.
+
+    Excludes .txt (non-diagram) so the phone list stays focused on real diagrams.
+    """
+    skips = skip if skip is not None else DEFAULT_SKIP
+    found: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames
+                       if d not in skips and not d.endswith(".egg-info")]
+        for fn in sorted(filenames):
+            if fn.lower().endswith((".mmd", ".mermaid")):
+                rel = os.path.relpath(
+                    os.path.join(dirpath, fn), root).replace("\\", "/")
+                found.append(rel)
+    return found
 
 
 def _connect() -> sqlite3.Connection:
@@ -72,6 +95,18 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def end_headers(self) -> None:
+        # Static assets must never be reused from cache: this offline viewer is
+        # edited in place and served straight off disk, so stale caching makes
+        # changes look like they "didn't take". API responses set no-store
+        # themselves and skip this branch.
+        if "/api/" not in self.path.split("?", 1)[0]:
+            self.send_header("Cache-Control", "no-cache")
+        super().end_headers()
+
+    def _scan_mmds(self) -> list[str]:
+        return scan_mmds(ROOT)
+
     def do_GET(self) -> None:
         key = self._parse_reviews_key()
         if key is not None:
@@ -84,6 +119,9 @@ class Handler(SimpleHTTPRequestHandler):
             finally:
                 conn.close()
             self._send_json({"reviews": json.loads(row[0]) if row else []})
+            return
+        if self.path.split("?", 1)[0].rstrip("/") == "/api/mmds":
+            self._send_json({"mmds": self._scan_mmds()})
             return
         super().do_GET()
 
