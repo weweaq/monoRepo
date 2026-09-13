@@ -48,6 +48,7 @@
   #banner { margin:0 24px; padding:10px 14px; border-radius:8px; display:none; font-size:13px; }
   #banner.err { background:#3d1518; color:#ffb3ae; border:1px solid #5c1f24; }
   #banner.ok { background:#10261a; color:#9be3b0; border:1px solid #1c3d2a; }
+  #hint { margin:16px 24px 0; padding:10px 14px; border-radius:8px; font-size:12px; color:var(--muted); background:#151b22; border:1px solid var(--border); line-height:1.6; }
   #toast { position:fixed; bottom:24px; left:50%; transform:translateX(-50%); background:#21262d; border:1px solid var(--border); padding:10px 18px; border-radius:8px; font-size:13px; opacity:0; transition:opacity .25s; pointer-events:none; }
   #toast.show { opacity:1; }
 </style>
@@ -62,6 +63,7 @@
   </div>
 </header>
 <div id="banner"></div>
+<div id="hint">后台服务均由 uv 虚拟环境的 launcher 启动，每个服务在系统里会显示为两个进程（launcher 桩 + 真实 Python 解释器），属正常现象——停止/重启时会将这一对一并结束。</div>
 <main id="grid"></main>
 <div id="toast"></div>
 <div id="logModal" class="modal">

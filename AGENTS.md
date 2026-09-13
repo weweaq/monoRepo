@@ -101,6 +101,10 @@ uv run pre-commit install                       # 启用 git 提交钩子（首�
 
 > 注意：uv 默认只安装根项目依赖，workspace 成员不会进环境——涉及成员的命令必须带 `--all-packages` 或 `--package <name>`。
 
+### 运行环境认知
+
+- **uv venv 的 python/pythonw 是 launcher 桩**：`.`venv\Scripts\python(w).exe` 本身不作解释器，而会再拉起 uv 管理的真实 CPython（如 `uv\python\cpython-3.x\python(w).exe`）。因此**每启动一个 Python 程序，系统里会看到父子两个进程**（launcher 桩 + 真解释器），端口实际由子进程监听。这是正常现象，**不是重复启动**——排查/清理/启停时应按"一对进程 = 一个服务"看待，禁止把其中的任意一个当作孤立重复进程杀掉（dev-console 的停止/重启本就会将这一对一并结束）。
+
 ### 技能指引（按需调用对应 skill）
 
 - 新建/接入一个 app（mono 规范 + dev-console 受管服务）：调用 [`buildApp`](.trae/skills/buildApp/SKILL.md)
