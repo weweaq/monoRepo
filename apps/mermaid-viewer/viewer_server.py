@@ -9,8 +9,10 @@ Usage (PowerShell):
     python apps/mermaid-viewer/viewer_server.py
     python -m mermaid-viewer  (via [project.scripts], needs uv sync)
     python apps/mermaid-viewer/viewer_server.py --port 8123 --no-browser
+    python apps/mermaid-viewer/viewer_server.py --host 0.0.0.0  (LAN/phone access)
 
-Standard library only. Everything runs on 127.0.0.1 (loopback); no internet.
+Standard library only. Default binds 127.0.0.1 (loopback) and never touches the
+internet; pass --host 0.0.0.0 only when a LAN device (e.g. phone) must reach it.
 
 Endpoints:
     GET  /apps/mermaid-viewer/viewer.html   (static files, repo root)
@@ -23,6 +25,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import socket
 import sqlite3
 import sys
 import threading
@@ -131,18 +134,41 @@ def _browser_target(port: int) -> str:
     return "http://127.0.0.1:%d/apps/mermaid-viewer/viewer.html" % port
 
 
+def _lan_ip() -> str:
+    # Determine the default-route NIC without sending any real traffic.
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+        finally:
+            s.close()
+        return ip
+    except OSError:
+        return "127.0.0.1"
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Local mermaid .mmd viewer + review store")
     ap.add_argument("--port", type=int, default=DEFAULT_PORT)
+    ap.add_argument(
+        "--host",
+        default="127.0.0.1",
+        help="bind address; use 0.0.0.0 to allow LAN/phone access. Default 127.0.0.1",
+    )
     ap.add_argument("--no-browser", action="store_true")
     args = ap.parse_args()
 
-    httpd = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     port = httpd.server_address[1]
 
     print("=" * 60)
-    print("  mermaid .mmd viewer  (localhost, offline)")
+    print("  mermaid .mmd viewer  (offline)")
     print("  打开:  %s" % _browser_target(port))
+    if args.host == "0.0.0.0":
+        print("  手机/局域网: http://%s:%d/apps/mermaid-viewer/viewer.html (同一 WiFi)"
+              % (_lan_ip(), port))
+    print("  绑定:  %s:%d" % (args.host, port))
     print("  仓库根: %s" % ROOT)
     print("  评论库: %s" % DB_PATH)
     print("  按 Ctrl+C 停止")

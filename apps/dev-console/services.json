@@ -80,9 +80,9 @@
       "cwd": "D:\\AAAmyPrj\\github\\myrepos\\mono\\apps\\mermaid-viewer",
       "env": {},
       "interpreter": "D:\\AAAmyPrj\\github\\myrepos\\mono\\.venv\\Scripts\\python.exe",
-      "args": ["viewer_server.py", "--no-browser"],
+      "args": ["viewer_server.py", "--no-browser", "--host", "0.0.0.0"],
       "match": ["viewer_server.py"],
-      "notes": "本地离线 mmd 查看器服务；评论持久化到 apps/mermaid-viewer/data/reviews.db；仅绑 127.0.0.1。--no-browser：由 dev-console 启停时不需自拉浏览器",
+      "notes": "本地离线 mmd 查看器服务；评论持久化到 apps/mermaid-viewer/data/reviews.db。--host 0.0.0.0：允许手机/局域网访问（frontend 仍是 127.0.0.1 供本机仪表盘用；手机用 http://<电脑局域网IP>:8123/...）。--no-browser：由 dev-console 启停时不需自拉浏览器",
       "frontend": "http://127.0.0.1:8123/apps/mermaid-viewer/viewer.html"
     }
   ]

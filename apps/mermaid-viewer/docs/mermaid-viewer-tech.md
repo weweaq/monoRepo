@@ -1,6 +1,6 @@
 # mermaid-viewer 技术文档
 
-本地离线 `mermaid .mmd` 查看 + 评审工具。纯标准库 + 原生 JS + 本地 vendor，不联网，仅绑 loopback。
+本地离线 `mermaid .mmd` 查看 + 评审工具。纯标准库 + 原生 JS + 本地 vendor，不联网。默认绑 loopback；需手机/局域网访问时显式 `--host 0.0.0.0`。
 
 - 应用级架构图（单一真源）：[`./architecture-flow.mmd`](./architecture-flow.mmd)
 - 包级约定：`../../AGENTS.md` → [`apps/mermaid-viewer/AGENTS.md`](../AGENTS.md)
@@ -86,7 +86,7 @@ sequenceDiagram
 
 ## 5. 安全边界
 
-- 服务仅绑 `127.0.0.1`（loopback）
+- 服务默认绑 `127.0.0.1`（loopback）；`--host 0.0.0.0` 时监听所有网卡（供手机/局域网访问，需同网信任环境）。`_lan_ip()` 用 UDP connect 探测本机默认网卡 IP，不发真实流量
 - `translate_path` 对解析后的路径做 realpath 前缀校验，防 `..` 逃逸出仓库根
 - 无写接口对文件系统开放（POST 仅写 SQLite 评论库）
-- docroot 为仓库根 → HTTP 静态服务可读取全仓文件，属已知暴露面（单机 loopback 场景可接受；不改 docroot 需评估）
+- docroot 为仓库根 → HTTP 静态服务可读取全仓文件，属已知暴露面。绑 loopback 时限于本机可接受；**一旦 `--host 0.0.0.0` 暴露到局域网，意味着同网任意设备可读全仓文件与评论库，属高风险，仅限可信 WiFi 场景临时开启，用毕切回 loopback**
