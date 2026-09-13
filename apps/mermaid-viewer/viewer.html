@@ -23,14 +23,20 @@
     border-bottom: 1px solid var(--border);
   }
   #toolbar .logo { font-weight: 600; margin-right: 6px; }
-  #toolbar .btn {
+  .btn {
     border: 1px solid var(--border); background: #fff; color: var(--ink);
     border-radius: 6px; padding: 5px 12px; cursor: pointer; font-size: 13px; line-height: 1.2;
-    user-select: none;
+    user-select: none; transition: border-color .15s ease, background .15s ease, color .15s ease;
   }
-  #toolbar .btn:hover { border-color: var(--accent); color: var(--accent); }
-  #toolbar .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
-  #toolbar .btn.outline { background: #fff; color: var(--accent); border-color: var(--accent); }
+  .btn:hover { border-color: var(--accent); color: var(--accent); }
+  .btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .btn.primary:hover { background: #285fd0; color: #fff; }
+  .btn.outline { background: #fff; color: var(--accent); border-color: var(--accent); }
+  .btn.danger { color: var(--danger); }
+  .btn.danger:hover { border-color: var(--danger); background: #fdecea; color: var(--danger); }
+  .btn.ghost { background: transparent; border-color: transparent; color: var(--muted); }
+  .btn.ghost:hover { color: var(--accent); background: rgba(47,111,237,.06); }
+  .btn.sm { padding: 3px 9px; font-size: 12px; }
   #toolbar .spacer { flex: 1; }
   #toolbar .hint { color: var(--muted); font-size: 12px; white-space: nowrap; }
   #fileName { color: var(--ink); font-size: 12px; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -78,10 +84,20 @@
   }
   #side.open { transform: translateX(0); }
   #side .head {
-    display: flex; align-items: center; gap: 8px; padding: 12px 14px;
-    border-bottom: 1px solid var(--border); font-weight: 600;
+    display: flex; align-items: center; gap: 6px; padding: 10px 12px;
+    border-bottom: 1px solid var(--border); font-weight: 600; font-size: 13px;
   }
-  #side .head .btn { margin-left: auto; }
+  #side .head .sp { flex: 1; }
+  #side .filter {
+    display: none; align-items: center; gap: 8px; padding: 6px 12px;
+    border-bottom: 1px solid var(--border); background: #f7f9fc; font-size: 12px;
+  }
+  #side .filter.show { display: flex; }
+  #side .filter .f-sym {
+    flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    font-family: ui-monospace, Consolas, monospace; color: var(--accent);
+  }
+  #side .filter .f-sym .lbl { color: var(--muted); margin-right: 4px; font-family: inherit; }
   #side .list { flex: 1; overflow: auto; padding: 8px 12px; }
   #side .list .empty-hint { color: var(--muted); font-size: 13px; padding: 12px 4px; }
   .rvw {
@@ -100,36 +116,68 @@
   .rvw .r-txt { font-size: 13px; color: var(--ink); white-space: pre-wrap; word-break: break-word; }
   .rvw .r-del { cursor: pointer; color: var(--muted); font-size: 12px; padding: 0 4px; margin-left: auto; }
   .rvw .r-del:hover { color: var(--danger); }
+  .rvw.closed { opacity: .5; }
+  .rvw.closed .r-txt { text-decoration: line-through; }
+  .r-status {
+    cursor: pointer; font-size: 11px; border: 1px solid var(--border); border-radius: 4px;
+    padding: 1px 6px; color: var(--muted); white-space: nowrap;
+  }
+  .r-status:hover { border-color: var(--accent); color: var(--accent); }
+  .r-status.open { color: #b33900; border-color: #ffb980; background: #fff7ef; }
+  .side-tools { display: flex; align-items: center; gap: 6px; }
+  #toast {
+    position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%) translateY(18px);
+    background: #1f2937; color: #fff; padding: 9px 16px; border-radius: 8px; font-size: 13px;
+    z-index: 70; opacity: 0; pointer-events: none; max-width: 80vw;
+    box-shadow: 0 4px 16px rgba(0,0,0,.25);
+    transition: opacity .2s ease, transform .2s ease;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
-  /* ---- comment composer modal ---- */
+  /* ---- comment composer drawer ---- */
   #modal-cover {
-    position: fixed; inset: 0; z-index: 40; background: rgba(20,26,35,.38);
-    display: none; align-items: center; justify-content: center; padding: 20px;
+    position: fixed; left: 14px; bottom: 14px; z-index: 40;
+    width: 340px; max-width: calc(100vw - 28px); display: none;
+    border-radius: 12px; box-shadow: 0 12px 36px rgba(0,0,0,.2);
+    border: 1px solid var(--border); background: #fff; overflow: hidden;
   }
-  #modal-cover.show { display: flex; }
-  #composer {
-    background: #fff; border-radius: 10px; width: 460px; max-width: 96vw;
-    padding: 16px; box-shadow: 0 12px 40px rgba(0,0,0,.22);
-  }
-  #composer h3 { margin: 0 0 10px; font-size: 15px; }
+  #modal-cover.show { display: block; animation: drawerIn .18s ease; }
+  @keyframes drawerIn { from { transform: translateY(8px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+  #composer .pad { padding: 14px 14px 12px; }
+  #composer h3 { margin: 0 0 2px; font-size: 15px; }
+  #composer .sub { font-size: 12px; color: var(--muted); margin-bottom: 10px; line-height: 1.45; }
   #composer .anchor {
-    font-size: 12px; color: var(--muted); background: #f2f4f7; border-radius: 6px;
+    font-size: 12px; color: var(--accent); background: #eef4ff; border-radius: 6px;
     padding: 6px 8px; margin-bottom: 10px; word-break: break-all; font-family: ui-monospace, Consolas, monospace;
   }
   #composer .field { margin-bottom: 10px; }
   #composer .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
   #composer .type-pick { display: flex; gap: 6px; }
   #composer .type-pick button {
-    flex: 1; padding: 6px 0; border: 1px solid var(--border); border-radius: 6px; background: #fff;
-    font-size: 13px; cursor: pointer; color: var(--ink);
+    flex: 1; padding: 5px 0; border: 1px solid var(--border); border-radius: 999px; background: #fff;
+    font-size: 12px; cursor: pointer; color: var(--ink); transition: border-color .12s ease, background .12s ease, color .12s ease;
   }
-  #composer .type-pick button.active { border-color: var(--accent); color: var(--accent); background: #eef4ff; font-weight: 600; }
+  #composer .type-pick button.active { border-color: var(--accent); color: #fff; background: var(--accent); font-weight: 600; }
+  #composer .txtwrap { position: relative; }
   #composer textarea {
-    width: 100%; min-height: 84px; resize: vertical; padding: 8px 10px;
-    border: 1px solid var(--border); border-radius: 6px; font-size: 13px; font-family: inherit; line-height: 1.5;
+    width: 100%; min-height: 80px; resize: vertical; padding: 8px 10px;
+    border: 1px solid var(--border); border-radius: 8px; font-size: 13px; font-family: inherit; line-height: 1.5;
   }
   #composer textarea:focus { outline: none; border-color: var(--accent); }
-  #composer .cmds { display: flex; gap: 8px; justify-content: flex-end; margin-top: 4px; }
+  #composer .txtwrap .count { position: absolute; right: 8px; bottom: 6px; font-size: 11px; color: var(--muted); pointer-events: none; }
+  #composer .dfoot { display: flex; align-items: center; gap: 8px; padding: 12px 14px; border-top: 1px solid var(--border); }
+  #composer .dfoot .hint { font-size: 11px; color: var(--muted); margin-right: auto; }
+
+  /* ---- suggestion center: search + filter chips in side panel ---- */
+  #side .ctrls { padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  #side .ctrls input { width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 5px 8px; font-size: 12px; font-family: inherit; background: #fff; }
+  #side .ctrls input:focus { outline: none; border-color: var(--accent); }
+  #side .chips { display: flex; gap: 6px; margin-top: 6px; }
+  #side .chips button {
+    flex: 1; cursor: pointer; border: 1px solid var(--border); background: #fff; border-radius: 999px;
+    padding: 2px 0; font-size: 11px; color: var(--muted);
+  }
+  #side .chips button.active { border-color: var(--accent); color: var(--accent); background: #eef4ff; font-weight: 600; }
   input[type="file"] { display: none; }
 </style>
 </head>
@@ -137,9 +185,10 @@
   <div id="toolbar">
     <span class="logo">Mermaid Viewer</span>
     <button class="btn primary" id="btn-open">打开 .mmd</button>
-    <button class="btn outline" id="btn-side">评论 (<span id="side-count">0</span>)</button>
+    <button class="btn outline" id="btn-side">建议中心 (<span id="side-count">0</span>)</button>
     <span class="spacer"></span>
     <button class="btn primary" id="btn-export">导出标记</button>
+    <button class="btn outline" id="btn-llm" title="把待处理评论汇总成可直接发 LLM 的修复提示词">LLM 修复提示</button>
     <button class="btn outline" id="btn-png">导出 PNG</button>
     <span class="spacer"></span>
     <button class="btn" id="btn-fit">Fit</button>
@@ -159,37 +208,53 @@
   </div>
   <div id="side">
     <div class="head">
-      评论
-      <button class="btn" id="btn-close-side">关闭</button>
-      <button class="btn" id="btn-clear-side" title="清空">清空</button>
+      建议中心
+      <span class="sp"></span>
+      <button class="btn ghost sm" id="btn-close-side" title="收起建议面板">✕ 关闭</button>
+      <button class="btn danger sm" id="btn-clear-side" title="清空当前文件的全部建议">清空</button>
+    </div>
+    <div class="filter" id="side-filter">
+      <span class="f-sym"><span class="lbl">标注于</span><span id="f-sym"></span></span>
+      <button class="btn outline sm" id="f-all">显示全部</button>
+    </div>
+    <div class="ctrls">
+      <input id="side-q" placeholder="搜索节点或关键词…">
+      <div class="chips" id="side-chips">
+        <button data-k="all" class="active">全部</button>
+        <button data-k="open">待处理</button>
+        <button data-k="closed">已处理</button>
+      </div>
     </div>
     <div class="list" id="rvw-list"></div>
   </div>
   <input type="file" id="fileInput" accept=".mmd,.mermaid,.txt">
   <div id="node-tooltip"></div>
   <div id="status"></div>
+  <div id="toast"></div>
 
-  <!-- comment composer -->
+  <!-- comment composer drawer -->
   <div id="modal-cover">
     <div id="composer">
-      <h3>标注</h3>
-      <div class="anchor" id="cm-anchor"></div>
-      <div class="field">
-        <label>类型</label>
-        <div class="type-pick" id="cm-types">
-          <button data-t="review" class="active">review</button>
-          <button data-t="fix">fix</button>
-          <button data-t="idea">idea</button>
-          <button data-t="question">question</button>
+      <div class="pad">
+        <h3>新批注</h3>
+        <div class="sub">写入后挂在对应符号上，可一键导出给 LLM 修复</div>
+        <div class="anchor" id="cm-anchor"></div>
+        <div class="field">
+          <div class="type-pick" id="cm-types">
+            <button data-t="review" class="active">问题</button>
+            <button data-t="fix">修复</button>
+            <button data-t="idea">想法</button>
+          </div>
+        </div>
+        <div class="txtwrap">
+          <textarea id="cm-text" maxlength="300" placeholder="这里哪里不对 / 希望怎么改..."></textarea>
+          <span class="count" id="cm-count">0 / 300</span>
         </div>
       </div>
-      <div class="field">
-        <label>意见 / 说明</label>
-        <textarea id="cm-text" placeholder="这里哪里不对 / 希望怎么改..."></textarea>
-      </div>
-      <div class="cmds">
+      <div class="dfoot">
+        <span class="hint">已处理的不含在 LLM 导出</span>
         <button class="btn" id="cm-cancel">取消</button>
-        <button class="btn primary" id="cm-save">保存</button>
+        <button class="btn primary" id="cm-save">提交批注</button>
       </div>
     </div>
   </div>
@@ -212,10 +277,12 @@
       var currentNodeMap = {};   // { displayText_lower: [symbolName,...] }
       var currentEdgeList = [];  // [{sym,label}]  raw edge strings w/ label
       var currentReviews = [];   // [{id,type,sym,date,text}]
+      var activeSym = null;      // when set, side list filters to this symbol's reviews
       var currentSvg = null;     // last rendered <svg> element (for PNG export)
       var cleanSvgString = "";   // pristine mermaid SVG (no pan/zoom), for PNG export
 
       var SYMS_KEY = "mdv_syms"; // fileKey -> reviews object
+      var LAST_KEY = "mdv_last_mmd_v1"; // {name,text,ts} remembered last opened file
 
       // --------------------------------------------------------------
       // mermaid config
@@ -337,6 +404,7 @@
                 saveStoreLocal();
                 updateSideCount();
                 renderSideList();
+                applyBadges();
               }
             }).catch(function () { /* keep local */ });
         }
@@ -354,9 +422,28 @@
         clearError();
         currentSrc = src;
         fileNameEl.textContent = name;
+        cacheLastEdited(name, src);
         parseSymbols(src);
         loadCurrent();
         renderWithMermaid(src);
+      }
+
+      // remember the last opened file so we can resume it on next launch
+      function cacheLastEdited(name, src) {
+        try {
+          if (src.length > 1000000) return; // too big to cache safely
+          localStorage.setItem(LAST_KEY, JSON.stringify({ name: name, text: src, ts: Date.now() }));
+        } catch (e) { /* storage full/blocked — non-fatal */ }
+      }
+      function restoreLastEdited() {
+        try {
+          var o = JSON.parse(localStorage.getItem(LAST_KEY) || "null");
+          if (o && typeof o.text === "string" && o.text.length <= 1000000) {
+            render(o.name || "(上次文件)", o.text);
+            return true;
+          }
+        } catch (e) {}
+        return false;
       }
 
       function renderWithMermaid(src) {
@@ -368,6 +455,7 @@
             cleanSvgString = res.svg;
             attachInteract();
             bindPanZoom();
+            applyBadges();
           }).catch(function (e) {
             showError("渲染失败: " + (e && e.message ? e.message : e));
           });
@@ -484,12 +572,27 @@
         cmAnchorRaw = raw;
         cmAnchor.textContent = anchor;
         cmText.value = "";
+        updateCmCount();
         cmTypeEl = "review";
         setTypePick();
         cover.classList.add("show");
+        // reveal this spot's existing reviews in the side panel
+        activeSym = raw;
+        openSide();
+        renderSideList();
         setTimeout(function () { cmText.focus(); }, 30);
       }
       function closeComposer() { cover.classList.remove("show"); cmText.value = ""; }
+      var cmCountEl = document.getElementById("cm-count");
+      function updateCmCount() { cmCountEl.textContent = cmText.value.length + " / 300"; }
+
+      var toastEl = document.getElementById("toast"), toastTimer = null;
+      function showToast(msg, ms) {
+        toastEl.textContent = msg;
+        toastEl.classList.add("show");
+        if (toastTimer) clearTimeout(toastTimer);
+        toastTimer = setTimeout(function () { toastEl.classList.remove("show"); }, ms || 2200);
+      }
 
       function setTypePick() {
         var bts = document.querySelectorAll("#cm-types button");
@@ -502,14 +605,16 @@
           b.addEventListener("click", function () { cmTypeEl = b.getAttribute("data-t"); setTypePick(); });
         });
       document.getElementById("cm-cancel").addEventListener("click", closeComposer);
+      document.getElementById("cm-text").addEventListener("input", updateCmCount);
       document.getElementById("cm-save").addEventListener("click", function () {
         var text = cmText.value.trim();
         if (!text) { status.textContent = "意见为空"; return; }
-        var rec = { id: nextId(), type: cmTypeEl, sym: cmAnchorRaw || fileKey(), date: new Date().toISOString(), text: text };
+        var rec = { id: nextId(), type: cmTypeEl, sym: cmAnchorRaw || fileKey(), date: new Date().toISOString(), text: text, status: "open" };
         currentReviews.push(rec);
         saveStore();
         updateSideCount();
         renderSideList();
+        applyBadges();
         closeComposer();
         openSide();
         status.textContent = "已标注 #" + rec.id;
@@ -520,18 +625,27 @@
       // side panel + list + export + clear
       // --------------------------------------------------------------
       var side = document.getElementById("side");
+      var sideFilter = document.getElementById("side-filter");
+      var fSym = document.getElementById("f-sym");
       function openSide() { side.classList.add("open"); }
       function closeSide() { side.classList.remove("open"); }
       document.getElementById("btn-side").addEventListener("click", function () {
+        activeSym = null;   // opening "all reviews" view clears any node filter
+        renderSideList();
         side.classList.toggle("open");
       });
       document.getElementById("btn-close-side").addEventListener("click", closeSide);
+      document.getElementById("f-all").addEventListener("click", function () {
+        activeSym = null;
+        renderSideList();
+      });
       document.getElementById("btn-clear-side").addEventListener("click", function () {
         if (currentReviews.length && confirm("清空当前文件的全部评论？")) {
           currentReviews = [];
           saveStore();
           updateSideCount();
           renderSideList();
+          applyBadges();
         }
       });
 
@@ -541,21 +655,41 @@
 
       function renderSideList() {
         var list = document.getElementById("rvw-list");
-        if (!currentReviews.length) {
-          list.innerHTML = '<div class="empty-hint">还没有评论。点击图上的节点或连线，即可在那一处打标。</div>';
+        var items = currentReviews;
+        if (activeSym) {
+          items = currentReviews.filter(function (r) { return r.sym === activeSym; });
+          sideFilter.classList.add("show");
+          fSym.textContent = activeSym;
+        } else {
+          sideFilter.classList.remove("show");
+        }
+        if (!items.length) {
+          list.innerHTML = activeSym
+            ? '<div class="empty-hint">这个位置还没有评论。在下方的标注框里写一条吧。</div>'
+            : '<div class="empty-hint">还没有评论。点击图上的节点或连线，即可在那一处打标。</div>';
           return;
         }
         list.innerHTML = "";
-        var sorted = currentReviews.slice().sort(function (a, b) { return a.id - b.id; });
-        sorted.forEach(function (r) {
+        items.slice().sort(function (a, b) { return a.id - b.id; }).forEach(function (r) {
           var div = document.createElement("div");
-          div.className = "rvw";
+          div.className = "rvw" + (r.status === "closed" ? " closed" : "");
           var top = document.createElement("div");
           top.className = "r-top";
           var sym = document.createElement("span");
           sym.className = "r-sym"; sym.textContent = r.sym;
           var typ = document.createElement("span");
           typ.className = "r-type " + r.type; typ.textContent = r.type;
+          var st = document.createElement("span");
+          var isClosed = r.status === "closed";
+          st.className = "r-status " + (isClosed ? "closed" : "open");
+          st.textContent = isClosed ? "已处理" : "待处理";
+          st.title = "点击切换：已处理 / 待处理（已处理不进入 LLM 导出）";
+          st.addEventListener("click", function () {
+            r.status = isClosed ? "open" : "closed";
+            saveStore();
+            renderSideList();
+            applyBadges();
+          });
           var del = document.createElement("span");
           del.className = "r-del"; del.textContent = "✕";
           del.title = "删除";
@@ -564,8 +698,9 @@
             saveStore();
             updateSideCount();
             renderSideList();
+            applyBadges();
           });
-          top.appendChild(typ); top.appendChild(sym); top.appendChild(del);
+          top.appendChild(typ); top.appendChild(sym); top.appendChild(st); top.appendChild(del);
           var txt = document.createElement("div");
           txt.className = "r-txt"; txt.textContent = r.text;
           div.appendChild(top);
@@ -687,15 +822,91 @@
       document.getElementById("btn-png").addEventListener("click", exportPNG);
 
       // --------------------------------------------------------------
+      // on-diagram review badges + LLM fix loop
+      // --------------------------------------------------------------
+      // strip "节点 ID（文本）" down to the raw symbol id used in the SVG
+      function symNodeId(sym) {
+        if (!sym) return null;
+        var m = sym.match(/^节点\s+([A-Za-z0-9_\-.]+)/);
+        return m ? m[1] : null;
+      }
+      // overlay a red count badge at each node that still has open reviews
+      function applyBadges() {
+        var svg = currentSvg || (host && host.querySelector("svg"));
+        if (!svg) return;
+        Array.prototype.forEach.call(svg.querySelectorAll(".mdv-badge"), function (el) { el.remove(); });
+        var count = {};
+        currentReviews.forEach(function (r) {
+          if (r.status === "closed") return;
+          var id = symNodeId(r.sym);
+          if (id) count[id] = (count[id] || 0) + 1;
+        });
+        var NS = "http://www.w3.org/2000/svg";
+        Object.keys(count).forEach(function (id) {
+          var g;
+          try { g = svg.querySelector('[id="' + id + '"]'); } catch (e) { g = null; }
+          if (!g) return;
+          var node = g.closest ? g.closest(".node") : (g.classList && g.classList.contains("node") ? g : null);
+          if (!node) return;
+          var b = null;
+          try { b = node.getBBox ? node.getBBox() : null; } catch (e) { b = null; }
+          var cx = b ? b.x + b.width - 8 : 8;
+          var cy = b ? b.y + 8 : 2;
+          var grp = document.createElementNS(NS, "g");
+          grp.setAttribute("class", "mdv-badge");
+          grp.setAttribute("pointer-events", "none");
+          var c = document.createElementNS(NS, "circle");
+          c.setAttribute("cx", cx); c.setAttribute("cy", cy); c.setAttribute("r", 8.5);
+          c.setAttribute("fill", "#e53935");
+          c.setAttribute("stroke", "#fff"); c.setAttribute("stroke-width", "1.2");
+          var t = document.createElementNS(NS, "text");
+          t.setAttribute("x", cx); t.setAttribute("y", cy + 3.5);
+          t.setAttribute("text-anchor", "middle");
+          t.setAttribute("font-size", "11"); t.setAttribute("fill", "#fff");
+          t.setAttribute("font-family", "system-ui, sans-serif"); t.setAttribute("font-weight", "700");
+          t.textContent = count[id];
+          grp.appendChild(c); grp.appendChild(t);
+          node.appendChild(grp);
+        });
+      }
+      // build a copy-paste prompt that hands all unresolved reviews to an LLM
+      function buildLlmPrompt() {
+        var open = currentReviews.filter(function (r) { return r.status !== "closed"; });
+        if (!open.length) return "";
+        var lines = [];
+        lines.push("请根据对 mermaid 流程图 <" + (fileKey() || "diagram") + "> 的这些评审意见，输出**修正后的完整 .mmd 源码**。");
+        lines.push("约束：只按意见点名位置改动，保留其余结构、符号名与连线方向；loc 是该意见对应的 mmd 符号定位（形如 `节点 符号ID（显示文本）`）。");
+        lines.push("");
+        open.slice().sort(function (a, b) { return a.id - b.id; }).forEach(function (r, i) {
+          lines.push((i + 1) + ". loc: " + oneLine(r.sym));
+          lines.push("   类型: " + r.type);
+          lines.push("   意见: " + oneLine(r.text));
+        });
+        lines.push("");
+        lines.push("输出要求：用 fenced code block（```mermaid ... ```）包裹可直接覆盖保存的完整源码，不加解释。");
+        return lines.join("\n");
+      }
+      document.getElementById("btn-llm").addEventListener("click", function () {
+        var p = buildLlmPrompt();
+        if (!p) {
+          showToast("没有待处理评论（已处理的不含在内）");
+          return;
+        }
+        try { if (navigator.clipboard) navigator.clipboard.writeText(p); } catch (e) { /* non-fatal */ }
+        var open = currentReviews.filter(function (r) { return r.status !== "closed"; }).length;
+        showToast("已复制 LLM 修复提示词（含 " + open + " 条待处理）");
+      });
+
+      // --------------------------------------------------------------
       // open by picker / drag-drop
       // --------------------------------------------------------------
-      document.getElementById("btn-open").addEventListener("click", function () { fileInput.click(); });
+      document.getElementById("btn-open").addEventListener("click", function () {
+        if (!pickWithFileSystem()) fileInput.click(); // fall back to native picker
+      });
       fileInput.addEventListener("change", function () {
         var f = fileInput.files && fileInput.files[0];
         if (!f) return;
-        var reader = new FileReader();
-        reader.onload = function () { render(f.name, String(reader.result)); };
-        reader.readAsText(f, "utf-8");
+        readTextFile(f, f.name);
         fileInput.value = "";
       });
       window.addEventListener("dragover", function (ev) { ev.preventDefault(); empty.classList.add("dragover"); });
@@ -705,10 +916,72 @@
         empty.classList.remove("dragover");
         var f = ev.dataTransfer && ev.dataTransfer.files && ev.dataTransfer.files[0];
         if (!f) return;
-        var reader = new FileReader();
-        reader.onload = function () { render(f.name, String(reader.result)); };
-        reader.readAsText(f, "utf-8");
+        readTextFile(f, f.name);
       });
+
+      function readTextFile(f, name) {
+        var reader = new FileReader();
+        reader.onload = function () { render(name, String(reader.result)); };
+        reader.onerror = function () { status.textContent = "读取文件失败"; };
+        reader.readAsText(f, "utf-8");
+      }
+
+      // ---- remember last opened file ----
+      // Prefer the File System Access API: it hands back a real handle we can
+      // store in IndexedDB and re-open next launch (true "remember the path").
+      var FS_DB = "mdv_fs_store", FS_STORE = "h", FS_KEY = "last_handle";
+      function fsDb() {
+        return new Promise(function (res, rej) {
+          var rq = indexedDB.open(FS_DB, 1);
+          rq.onupgradeneeded = function () { rq.result.createObjectStore(FS_STORE); };
+          rq.onsuccess = function () { res(rq.result); };
+          rq.onerror = function () { rej(rq.error); };
+        });
+      }
+      function fsPut(handle) {
+        fsDb().then(function (db) {
+          var tx = db.transaction(FS_STORE, "readwrite");
+          tx.objectStore(FS_STORE).put(handle, FS_KEY);
+        }).catch(function () { /* non-fatal */ });
+      }
+      function fsGet() {
+        return fsDb().then(function (db) {
+          return new Promise(function (res) {
+            var tx = db.transaction(FS_STORE, "readonly");
+            var r = tx.objectStore(FS_STORE).get(FS_KEY);
+            r.onsuccess = function () { res(r.result || null); };
+            r.onerror = function () { res(null); };
+          });
+        }).catch(function () { return null; });
+      }
+      function fsReadHandle(h) {
+        h.requestPermission({ mode: "read" }).then(function (perm) {
+          if (perm !== "granted") return;
+          h.getFile().then(function (f) { readTextFile(f, h.name); })
+            .catch(function () { /* file gone — keep cached copy */ });
+        }).catch(function () { /* permission denied */ });
+      }
+      function pickWithFileSystem() {
+        if (!window.showOpenFilePicker) return false;
+        window.showOpenFilePicker({
+          types: [{ description: "Mermaid 图", accept: { "text/plain": [".mmd", ".mermaid", ".txt"] } }],
+          multiple: false
+        }).then(function (handles) {
+          var h = handles[0];
+          fsPut(h);
+          fsReadHandle(h);
+        }).catch(function () { /* user cancelled */ });
+        return true;
+      }
+      // On launch: first resume the content-cache copy (works everywhere, incl.
+      // file://), then if a File System handle is remembered, prefer the live
+      // on-disk version once permission is granted.
+      (function startRestore() {
+        restoreLastEdited();
+        if (window.showOpenFilePicker && window.indexedDB) {
+          fsGet().then(function (h) { if (h) fsReadHandle(h); });
+        }
+      })();
 
       // --------------------------------------------------------------
       // zoom / fit / misc
