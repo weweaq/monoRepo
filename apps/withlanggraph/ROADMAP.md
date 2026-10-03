@@ -860,3 +860,31 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 - gacore（无 HTTP 端口）与 py-wei（`--no-dashboard`）未填 `frontend`，避免出现不可点击的按钮。
 
 **待办更新**：无。
+
+## [2026-10-03] 测试封闭性修复：切断单测对真实外部资源的依赖（10 分钟 → 2.5 分钟）
+
+**背景**：用户反馈全仓 pytest 慢（两次实测 615s / 318s，波动大），预期 3 分钟内。`--durations` + cProfile 定位：80% 耗时集中在 13 个测试，且根因不是测试冗余，而是单测偷偷触碰真实外部资源。
+
+**根因（三处）**：
+1. `test_proactive_p2.py::test_emotion_considered_logs_concern_due`（451 行）漏 mock `_headless_run`（同文件兄弟测试 319/332/347/363 行均有）→ 真实 build_graph + 27 工具发起真实 LLM 网络调用，单条 73s；416/429 两个测试只因 job guard 提前拦截才侥幸没踩。
+2. `test_scheduler.py` TestRunJob/Retry/DeliverRouting 共 11 个用例的 job 名叫 `daily-report` → `run_job` → `_build_job_prompt`（scheduler.py:318，按名字嗅探 `"daily" in job.name`）→ 真实 `build_info_pack`：bili CLI 真实网络请求（11.5s，7 个子进程）+ 真实 Edge 历史库查询（7.5s），单条 23s。
+3. `test_run_job_writes_daily_note_bullet` 成功路径 → `_sync_episodic` → 真实加载 100MB bge embedding 模型（pytest 下冷加载 47s）；`test_daily_info_pack.py::test_edge_db_locked` 只 mock 了 Edge，bili/langTrack（ETL 子进程）/ncm 全部真跑（16.5s）。
+
+**已完成**：
+- proactive 451 行测试补 `_headless_run` + `recall_topic` mock（照抄兄弟测试模式）。
+- `test_scheduler.py` 新增 autouse fixture `_no_real_side_effects`：统一拦 `build_info_pack`（返回空串）与 `_sync_episodic`（no-op）；需要真实内容的用例自行再覆盖 seam。
+- 新增接线测试 `test_daily_job_success_syncs_episodic` 钉住"日报成功后必调 episodic 同步"（此前 `_sync_episodic` 零测试覆盖）。
+- `test_daily_info_pack.py::test_edge_db_locked` 补 mock `_BILLI_FN`/`_LANGTRACK_FN`/`_NCM_ME_FN`/`_NCM_PLAYLIST_FN`（只验证单源失败整包降级的管线行为）。
+- 包级 AGENTS.md 新增「测试封闭性」节（规则/做法/信号）。
+
+**实测验证**：
+- 三个受影响文件 150 passed in 8.87s（修复前同范围 >150s）。
+- withlanggraph 全套 1107 passed, 1 skipped in **145s**（修复前约 300s+）；全仓见体检报告。
+- 慢测试 Top1 从 73s/47s 降到 12s（余下为 graph 级集成测试，fake LLM 但真实构图，属合理成本）。
+
+**偏差说明**：
+- `_sync_episodic` 的 wiring 由新增的接线测试覆盖，向量写入本体仍由 vector_store 侧保证；未复现"模型缓存命中后 8 个测试仍各 23s"的完整机理（与 pytest 冷/热加载顺序相关），但 mock 后该路径整体消失。
+- test_e2e/test_cli/test_graph_loop 等 6-12s 的测试为 fake-LLM 真实构图集成测试，暂保留，不在本次范围内。
+
+**待办更新**：
+- [ ] 观察 CI/本地例行跑时总时长是否稳定在 3 分钟内（task：例行体检 skill 已建，每天 9:00 自动核查）。

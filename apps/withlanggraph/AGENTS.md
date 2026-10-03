@@ -98,8 +98,19 @@
 3. commit 用中文描述，格式 `type(scope): 描述`
 
 4. 涉及数据链路的行为变更（采集格式/上报协议/ETL 逻辑）必须先过一遍路书，确认记录同步更新
-   
-   
+
+
+
+## 测试封闭性（2026-10-03）
+
+
+
+- **规则**：`tests/` 下的测试不得触碰真实外部资源——真实 LLM API、bili/ncm CLI 网络请求、Edge 浏览历史库、langTrack.db 与 ETL 子进程、bge embedding 模型加载。这些调用慢（单条 20s+）、依赖本机数据状态、换机即挂，真实 LLM 调用还会花钱。
+
+- **做法**：scheduler/proactive 的注入 seam（`graph_runner`、`_headless_run`、`recall_topic`）一律传 fake；`test_scheduler.py` 已有 autouse fixture 统一拦掉 `build_info_pack` 与 `_sync_episodic`；daily_info_pack 各源有模块级 seam（`_BILLI_FN` / `_BROWSER_FN` / `_LANGTRACK_FN` / `_NCM_*_FN`）供按需 monkeypatch。
+
+- **信号**：单测耗时 >2s 基本就是踩了真实资源——用 `pytest --durations=10` 排查，新增测试提交前先看一眼 durations（2026-10-03 修复前全仓 10 分钟，修后 2.5 分钟内）。
+
 
 ## 实测踩坑记录（低级错误警示，避免重犯）
 
