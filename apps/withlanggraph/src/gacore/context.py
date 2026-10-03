@@ -238,11 +238,14 @@ def build_system_prompt(state: GAState, cfg: Config) -> str:
     if rollover:
         prompt += f"\n{ROLLOVER_HEADER}\n{rollover}"
         injected_bg = True
-    # 今日生活事实卡片（compact）：纯读、零 ETL，作为今日记忆背景注入；
-    # 注入位置在 daily notes / rollover 之后、working checkpoint 之前。
+    # 结构化按天生活事实卡（compact）：纯读、零 ETL，作为"该日"背景注入。
+    # 默认按"今日"（实时场景）；scheduled/rerun 透传 target_day 时按目标日切片，
+    # 使补跑的日报拿到历史那天的真实行程而非运行时刻的今天。
     _fact_text = ""
     try:
-        _fact_card = fact_card.build(detail="compact", outlet="prompt")
+        _fact_card = fact_card.build(
+            day=state.get("target_day") or None, detail="compact", outlet="prompt"
+        )
         _fact_text = fact_card.render_compact(_fact_card)
     except Exception:  # noqa: BLE001 - 缺库/损坏一律不弄死 QQ
         _fact_text = ""

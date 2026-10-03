@@ -390,7 +390,7 @@ def run_job(
         for attempt in range(_MAX_JOB_ATTEMPTS):
             if graph_runner is None:
                 exit_reason, reply, raw_reply = _default_graph_runner(
-                    active_prompt, cfg, job.max_turns
+                    active_prompt, cfg, job.max_turns, for_day
                 )
             else:
                 exit_reason = graph_runner(active_prompt, cfg, job.max_turns)
@@ -487,7 +487,9 @@ def run_job(
     )
 
 
-def _default_graph_runner(prompt: str, cfg: Config, max_turns: int) -> tuple[str | None, str, str]:
+def _default_graph_runner(
+    prompt: str, cfg: Config, max_turns: int, for_day: str | None = None
+) -> tuple[str | None, str, str]:
     """Build a fresh graph and run the prompt as a single-turn headless agent run.
 
     Returns (exit_reason, reply_text, raw_reply_text) — the reply is extracted from the
@@ -501,7 +503,9 @@ def _default_graph_runner(prompt: str, cfg: Config, max_turns: int) -> tuple[str
 
     graph = build_graph(cfg=cfg)
     thread_id = f"sched-{uuid.uuid4().hex[:8]}"
-    state = run_once(graph, prompt, thread_id=thread_id, max_turns=max_turns)
+    state = run_once(
+        graph, prompt, thread_id=thread_id, max_turns=max_turns, target_day=for_day
+    )
     exit_reason = state.get("exit_reason")
     reply = ""
     messages = state.get("messages") or []

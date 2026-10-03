@@ -45,10 +45,20 @@ class GAState(AgentState[Any], total=False):
     active_card: str | None  # active character-card id for this conversation; declared so the graph channel does not drop it
     rollover_context: str | None  # one-shot cross-day memory injection (from onboard_pack.json); cleared after first turn
     output_mode: str | None  # per-turn output formatting mode ("proposal" = multi-option reply); cleared by cleanup_images after the turn
+    target_day: str | None  # scheduled/rerun: historical target day for fact-card time-slicing; None = real-time today
 
 
-def new_state(user_input: str, cfg: Config, active_card: str | None = None) -> GAState:
-    """Seed a fresh GAState for a new conversation with the user's first message."""
+def new_state(
+    user_input: str,
+    cfg: Config,
+    active_card: str | None = None,
+    target_day: str | None = None,
+) -> GAState:
+    """Seed a fresh GAState for a new conversation with the user's first message.
+
+    target_day: historical day (YYYY-MM-DD) for scheduled/rerun runs so the per-turn
+    context time-slices langTrack facts to that day; None = real-time today.
+    """
     return GAState(
         messages=[HumanMessage(content=user_input)],
         working={},
@@ -59,5 +69,6 @@ def new_state(user_input: str, cfg: Config, active_card: str | None = None) -> G
         time_guard_retries=0,
         exit_reason=None,
         active_card=active_card,
+        target_day=target_day,
         pending_images=[],
     )
