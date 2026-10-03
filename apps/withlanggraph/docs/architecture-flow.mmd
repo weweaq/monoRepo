@@ -66,8 +66,25 @@ flowchart TD
         OU["读方出口<br/>fact_card·report·dashboard·qq_push"]
     end
 
+    subgraph DAILY["⑥ 日报链路 v3 (daily_info_pack · feedback · review_server)"]
+        direction LR
+        subgraph DP["user message 拼装 _build_job_prompt (块顺序=优先级)"]
+            direction TB
+            COR[("corrections/{date}.json<br/>fact 订正·superseded 去重<br/>record_correction")]
+            PRE[("preferences.json<br/>pref 偏好")]
+            CB["〔人工订正〕cap 600<br/>〔用户偏好〕cap 400<br/>独立于 PACK_BUDGET"]
+            COR --> CB
+            PRE --> CB
+        end
+        SIP["daily_info_pack.SOURCES 注册表<br/>9 源 key/cap/priority/builder<br/>classify_body 四态→header 状态<br/>_cap_lines 行级截断<br/>_assemble_blocks 整块丢弃熔断"]
+        HP[("data/logs/info_pack_health.jsonl<br/>status/chars/full_chars/detail_chars<br/>write_pack_health")]
+        DT[("data/logs/pack_detail/{date}/{key}.md<br/>三节: 完整取数详情/渲染文本/实际进包<br/>write_pack_detail · 保留90天<br/>+ _FACT_CARD.md (write_fact_card_detail)")]
+        RVW["review_server :8010<br/>/review 锚点批注+diff 视图<br/>/health 矩阵 /health/source 三节归因<br/>POST /api/revise(默认)·/api/rerun(需确认)"]
+        FC2["fact_card compact<br/>langTrack 唯一渲染出口<br/>9 sections (含 sleep p45/time_app p55)<br/>预算900 · compact_omitted 透传"]
+    end
+
     subgraph OUT["④ 退出/投递"]
-        FB["反馈闭环 feedback.py<br/>触发=QQ 消息经 feedback_route()<br/>按指令词分派:<br/>订正/补充→edit · 确认/生效→confirm<br/>确认重发/重发→redeliver"]
+        FB["反馈闭环 feedback.py · 三级修复阶梯<br/>触发=QQ 消息经 feedback_route() 或 评审页<br/>①apply_feedback 确定性补丁<br/>②revise_report_llm 最小修订(默认):<br/>零工具单轮+diff 门禁非目标节逐字不变<br/>③rerun --day 整体重生成(需确认)<br/>_deliver_email 主题 {date}（重生成 vN）"]
         LG["jsonl_logger<br/>+ llm_request_log"]
     end
 
@@ -94,6 +111,17 @@ flowchart TD
     CU -. 日报正文 .-> FB
 
     IG --> RW --> ET --> OU
+    OU --> FC2
+    FC2 -->|"outlet=prompt<br/>system prompt"| PR
+    SC -. "daily job" .-> CB
+    CB --> SIP
+    SIP -->|"build_info_pack"| PR
+    SIP -. "SourceStat/三节正文" .-> HP
+    SIP -. "best-effort 落盘" .-> DT
+    HP --> RVW
+    DT --> RVW
+    FB --> RVW
+    RVW -. "redeliver_day / run_job(for_day)" .-> FB
 
     %% ============================================================
     %% 设计规范 (参照 diagram-design 编辑级原则)
@@ -138,3 +166,7 @@ flowchart TD
     class IG,RW,ET,OU lang
     class LG out
     class FB bnd
+    %% ⑥ 日报链路 v3（2026-10-04 收敛：全部节点可回溯源码）
+    class SIP,CB,FC2 main
+    class COR,PRE,HP,DT state
+    class RVW bnd

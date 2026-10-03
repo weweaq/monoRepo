@@ -465,6 +465,8 @@ usage、session、notification、location、audio_env、audio_clip、accel(false
 
 > **按天切片（2026-09-22）**：`fact_card.build(day=...)` 原生支持按日聚合，且历史日会被正确视为"该日已完整"（`day_window_closed`）。`context.build_system_prompt` 注入时经 `state["target_day"]` 取数：实时场景（QQ/cli/scheduler 当日）默认 `day=None`→今日；日报**补跑**（`gacore.rerun --day`）由 scheduler 把 `for_day` 经 `GAState.target_day` 贯穿到注入，使该日事实卡按目标日切片，与信息包/轨迹图同源同一天。
 
+> **v3 唯一渲染出口（2026-10-03，A′）**：信息包侧 `_build_langtrack` 已删除——langTrack 在 LLM 输入中只剩 fact_card compact 这一个聚合渲染出口。compact 新增 `_build_sleep_section`（priority 45，睡眠信号/作息窗口）与 `_build_time_app_section`（priority 55，时段×应用 top4），section builder 7→9，`_MAX_COMPACT_CHARS` 600→900（现用量 ~150 字，余量充足）。因预算被省略的 section 记录在 `card["compact_omitted"]`，经 `daily_info_pack.write_fact_card_detail` 透传到 `data/logs/pack_detail/{day}/_FACT_CARD.md` 供健康页展示。
+
 ```mermaid
 flowchart LR
     DB[("langTrack.db 只读")]
@@ -1476,6 +1478,28 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 
 > 单一真源：**全应用架构图只维护一份**，位于 `docs/architecture-flow.mmd`（codemap 走查生成，每条边标真实判据，节点可回溯源码）。
 > tech 文档引用这份架构图用链接、不复制维护，避免双份失真（对齐 R5）；各小节自己的机制/接口流程图仍正常内嵌。
+
+## 9.24 日报链路 v3：注册表信息包 + 三级修复阶梯 + 评审页（2026-10-03/04）
+
+> 设计稿 [`daily-report-redesign.md`](./daily-report-redesign.md)（Q1~Q6 定稿）；本节为实施后的技术事实，替代 §9.20 中与下列描述冲突的旧行为（§9.20 保留作 v2.1 历史记录）。
+
+### 信息包（`daily_info_pack.py`，S1/S2）
+
+- **SourceSpec 注册表**：`SOURCES` 元组（key/cap/priority/builder）单点声明 9 源（`_LANGTRACK` 已按 A′ 移除）——新增源=加一条，监控/健康页/预算熔断/状态元信息自动生效。builder 契约三元组 `(title, pack_body, detail_body)`：`detail_body` 为当日取数全部结果（不挑选不压缩），供逐层归因。
+- **装配**：`classify_body` 四态（ok/empty/failed/missing_data）→ header 带 `〔KEY｜状态:…〕`；`_cap_lines` 行级截断（尾注提示可补查）；`_assemble_blocks` 超预算**整块丢弃**低优先级块（不再切半行）。`build_info_pack_report` → `(pack, stats)`，`build_info_pack` 为薄包装。
+- **观测落盘**（scheduler `_build_job_prompt` daily 分支钩子，trigger=scheduled/rerun）：`data/logs/info_pack_health.jsonl`（每源 {key,status,chars,full_chars,detail_chars,note} + total_chars/budget/correction_chars）；`data/logs/pack_detail/{date}/{key}.md` 三节（完整取数详情/渲染文本/实际进包），保留 90 天；`_FACT_CARD.md` 事实卡支线（context 注入段覆盖写，含 `compact_omitted`）。**逐层归因**：源头(L3)→取数(L2b)→挑选(L1b)→进包(L1a)→L0 拼装（scheduled 存档 + `logs/{date}/llm_requests.jsonl`，均为现成出口不复制）→消费。
+
+### 反馈闭环（`feedback.py` + `frontends/qq.py` + `review_server.py`，S3/S4/接线批）
+
+- **三级修复阶梯**：① 确定性补丁（`apply_feedback`，纯代码）；② **LLM 最小修订（默认）** `revise_report_llm`——输入仅已投递全文+订正条目，`get_llm([], os.environ, bind_tools=False)` 零工具单轮，**diff 门禁**按 `# ` 标题分节硬校验非目标节逐字不变，失败 stricter 重试 1 次，再败降级为节末追加 `> （人工订正）…`；③ 整体重生成 `rerun --day`（需显式确认）。
+- **corrections 存储**：`record_correction(cfg,date,anchor,kind,text)`——fact → `data/feedback/corrections/{date}.json`（同锚点 superseded 去重），pref → `data/feedback/preferences.json`；`list_active_corrections`/`list_active_preferences` 供 ③ 注入与偏好块。QQ edit 提交即落审计；①失败自动升级 ②（`escalate_revise`，成功覆盖 delivered 存档并标记 applied）。
+- **scheduler 注入（③路径）**：`_build_job_prompt` 包首拼〔人工订正·{date}〕(cap 600) 与〔用户偏好〕(cap 400)，独立于 PACK_BUDGET，块顺序=优先级。
+- **C5 版本号**：`_deliver_email` 对历史天每次真实发送递增 `next_report_version`，主题 `{date}（重生成 vN）`（v≥2），正文头部加「本版为 vN 重生成，依据 M 条人工订正」；当天例行投递无标记。
+- **评审页** `gacore/review_server.py`（:8010，`REVIEW_TOKEN` 保护 POST）：`GET /review/{date}`（锚点批注，修订默认/重生成需确认，分节 diff 视图）、`GET /health`（14 天×源状态矩阵）、`GET /health/source/{date}/{key}`（三节详情 + 三级字符对比 + L0 外链）、`POST /api/revise|rerun|corrections`、`GET /api/rerun/{date}/status`。dev-console services.json 注册 `review` 受管服务。
+
+### prompt（C7，`config/schedule.json` + `_instruction_head`）
+
+五条线各挂素材来源（今日状态←事实卡手机/睡眠+CHAT；兴趣连线←BILI+EDGE+NCM+MEDIA；微变化←近2日笔记+前日日报+事实卡细维度；情绪/动力←CHAT 优先+GIT/FILES；战略动向←GIT+长期画像）；`_instruction_head` 加消费覆盖规则（状态:全量源至少被正文消费一次，empty/failed 源在归档节点名跳过原因）；`start_long_term_update` 给触发清单。
 
 📄 **全应用架构 / 核心对话流程图**：[`architecture-flow.mmd`](./architecture-flow.mmd)
 

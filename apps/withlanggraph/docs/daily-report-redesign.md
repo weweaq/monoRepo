@@ -1,6 +1,7 @@
-# 日报链路重设计 v3（设计稿 v0.7，评审中）
+# 日报链路重设计 v3（设计稿 v0.7，✅ 已实施）
 
-> 评审进展：Q2~Q6 已定稿（2026-10-03，Q2=A 独立 review_server、Q3=A per-day JSON、Q4=A 偏好即时生效、Q5=A 双入口同存储、Q6=A 订正不写回 events）。**Q1 凭 C2 实测证据改为推荐 A′（删除信息包 langTrack 块、细维度并入 fact_card compact），待确认。C4/C6 v0.4：三级修复阶梯，LLM 最小修订为默认路径，整体重生成需显式确认。C1 v0.5→v0.7：从 L3 原始数据到 LLM 最终输入的每一层变换都可观测——详情文件三节（完整取数详情/渲染文本/实际进包）+ 逐层归因表；L0 复用现成的 scheduled 存档与 llm_requests.jsonl（不复制）；事实卡 compact_omitted 透传展示。**
+> **实施状态（2026-10-04）：S0~S6 全部落地**，提交序列与实测记录见 `ROADMAP.md` [2026-10-04] 条目；技术事实固化于 `langTrack-tech.md` §9.24；架构图已收敛（真源图 = 本稿 §0 去 plan 虚线）。
+> 评审进展：Q2~Q6 已定稿（2026-10-03，Q2=A 独立 review_server、Q3=A per-day JSON、Q4=A 偏好即时生效、Q5=A 双入口同存储、Q6=A 订正不写回 events）。**Q1 凭 C2 实测证据改为推荐 A′（删除信息包 langTrack 块、细维度并入 fact_card compact），已确认。C4/C6 v0.4：三级修复阶梯，LLM 最小修订为默认路径，整体重生成需显式确认。C1 v0.5→v0.7：从 L3 原始数据到 LLM 最终输入的每一层变换都可观测——详情文件三节（完整取数详情/渲染文本/实际进包）+ 逐层归因表；L0 复用现成的 scheduled 存档与 llm_requests.jsonl（不复制）；事实卡 compact_omitted 透传展示。**
 > C1 按评审意见改为"注册表内聚接口 + dashboard 可视化"：新增源零改动获得监控。
 > 每个改动项固定五段：**现状（代码事实）→ 改成什么样 → 怎么改 → 为什么 → 怎么观测**。
 > 谱系外的两个数据前提（不属本设计，但决定其上限）：手机上报 9-22 起停止（langTrack-roadmap 待办）、bili CLI 未登录（ROADMAP 待办）。

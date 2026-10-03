@@ -889,3 +889,31 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 
 **待办更新**：
 - [ ] 观察 CI/本地例行跑时总时长是否稳定在 3 分钟内（task：例行体检 skill 已建，每天 9:00 自动核查）。
+
+## [2026-10-04] 日报链路重设计 v3 实施（S0~S6 全量落地）
+
+**背景**：用户对日报三点不满——内容信息利用率低、LLM 输入双通路冗余、缺人工订正入口。设计稿 `docs/daily-report-redesign.md`（v0.7，Q1~Q6 定稿）分四层改造，本条为 S0~S6 全部步骤的实施记录。测试侧慢测试（真实 LLM/Edge/bili）已由用户另行修复。
+
+**已完成**（提交序列）：
+- S0（用户完成，已验证）：手机上报恢复（10-03 当日 1077 事件，最新 23:35）；bili CLI 已登录出真实数据。
+- S3 `1476d35`：feedback.py 三级修复阶梯核心——`record_correction`（fact→`data/feedback/corrections/{date}.json` 同锚点 superseded；pref→preferences.json）、`list_active_corrections`、`revise_report_llm`（零工具单轮 `get_llm([], os.environ, bind_tools=False)` + diff 门禁非目标节逐字不变 + stricter 重试 1 次 + 降级节末追加）、`next/current_report_version`（versions.json）、`revise_from_pending`；测试 20 项。
+- 接线① `0736e55`：`escalate_revise`（①→②升级：修订成功覆盖 delivered 存档并标记 applied）；qq.py edit 提交即落 corrections（best-effort），confirm 两路径补丁失败自动升级 ② 并 redeliver_day；测试 +3。
+- S1+S2 `838ac4c`：daily_info_pack.py 注册表化——`SourceSpec/SOURCES`（9 源）替代平行清单，builder 契约三元组 `(title, pack_body, detail_body)`（detail=全部取数结果）；`classify_body` 四态、`_cap_lines` 行级截断、`_assemble_blocks` 整块丢弃熔断、header 带 `〔KEY｜状态:…〕`；落盘 `write_pack_health`（data/logs/info_pack_health.jsonl）+ `write_pack_detail`（pack_detail/{date}/{key}.md 三节，90 天保留）+ `write_fact_card_detail`（_FACT_CARD.md，context.py 注入段钩子）。A′：删 `_build_langtrack`，fact_card 新增 `_build_sleep_section`(p45)/`_build_time_app_section`(p55)，sections 7→9，compact 预算 600→900——langTrack 在 LLM 输入只剩 fact_card 单一渲染出口。scheduler `_build_job_prompt` 落盘钩子（last_pack_stats seam 保既有测试零副作用）。
+- S4 `479e4b8`：`gacore/review_server.py`（:8010）——/review 锚点批注+diff 视图、/health 14 天×源矩阵、/health/source 三节详情+L0 外链、POST /api/corrections|revise|rerun（修订默认/重生成需确认/同日 409）、X-Review-Token 鉴权；dev-console services.json 注册 review 服务；.env.example 补 REVIEW_TOKEN。
+- 接线② `fbc7344`：`_build_job_prompt` 包首注入〔人工订正〕(600)/〔用户偏好〕(400)（按 for_day 取，独立于 PACK_BUDGET，correction_chars 进 jsonl）；`_deliver_email` C5 版本号（历史天每次发送递增，主题 `{date}（重生成 vN）`，正文头部「本版为 vN 重生成，依据 M 条人工订正」）；schedule.json C7（素材清单按 A′ 修正、五条线挂来源、start_long_term_update 触发清单）+ `_instruction_head` 消费覆盖规则。
+- 文档：langTrack-tech.md §5.4 补 A′ 说明 + 新增 §9.24（v3 技术事实）；architecture-flow.mmd 新增 ⑥ 日报链路子图（收敛：节点全部可回溯源码）。
+
+**实测验证**：
+- 新增测试：test_feedback_revise 20 + test_source_registry/test_info_pack_report/test_daily_info_pack/test_langTrack_fact_card 改写 219 + test_review_server 29 + scheduler 注入/版本 4 项。
+- 全 app 回归 1184 passed；合流后关键套件 295 passed；ruff 全仓通过。
+- design doc §0 目标态图与真源图已收敛（S6 校验：plan 虚线节点全部落地可回溯）。
+
+**偏差说明**：
+- `last_pack_stats`/`_LAST_PACK_STATS` 暂存 seam 为实施新增（scheduler 测试 monkeypatch build_info_pack 无法带出 stats）；seam 被替换时跳过落盘。
+- `_deliver_email` 版本号集中单点：rerun 与 QQ「确认重发」都递增；当天例行投递不进版本序列（v1 无标记）。
+- 上线前需在真实 `.env` 配 `REVIEW_TOKEN`（未配置时 review_server 所有 POST 401）。
+
+**待办更新**：
+- [ ] dev-console 重启加载 review 服务；真实 `.env` 配 REVIEW_TOKEN；浏览器实测批注→修订→vN 邮件闭环。
+- [ ] 连续 3 天观察 info_pack_health.jsonl：ok 源消费覆盖率 100%（C7 验收）。
+- [ ] 观察 langTrack 日报不再出现双份聚合数字（A′ 验收）。
