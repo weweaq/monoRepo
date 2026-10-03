@@ -17,6 +17,18 @@
       "frontend": "http://127.0.0.1:8000/dashboard"
     },
     {
+      "id": "review",
+      "name": "日报评审 (review_server)",
+      "ports": [8010],
+      "cwd": "D:\\AAAmyPrj\\github\\myrepos\\mono\\apps\\withlanggraph",
+      "env": { "PYTHONPATH": "D:\\AAAmyPrj\\github\\myrepos\\mono\\apps\\withlanggraph\\src" },
+      "interpreter": "D:\\AAAmyPrj\\github\\myrepos\\mono\\.venv\\Scripts\\pythonw.exe",
+      "args": ["-m", "gacore.review_server", "--host", "0.0.0.0", "--port", "8010"],
+      "match": ["gacore.review_server"],
+      "notes": "日报评审+源体检页：/review 锚点批注与修订重生成、/health 信息包源体检；POST 需 REVIEW_TOKEN（.env 配置）",
+      "frontend": "http://127.0.0.1:8010/review"
+    },
+    {
       "id": "gacore",
       "name": "gacore (QQ Bot + Scheduler)",
       "ports": [],
