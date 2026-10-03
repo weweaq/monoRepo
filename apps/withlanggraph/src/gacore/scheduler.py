@@ -331,7 +331,12 @@ def _build_job_prompt(job: Job, cfg: Config, for_day: str | None = None) -> str:
     prompt = job.prompt
     if "daily" in job.name.lower():
         try:
-            from gacore.daily_info_pack import build_info_pack
+            from gacore.daily_info_pack import (
+                build_info_pack,
+                last_pack_stats,
+                write_pack_detail,
+                write_pack_health,
+            )
 
             today = for_day or datetime.now(UTC).astimezone().date().isoformat()
             info_pack = build_info_pack(today, cfg)
@@ -343,6 +348,33 @@ def _build_job_prompt(job: Job, cfg: Config, for_day: str | None = None) -> str:
                     date=today,
                     info_pack_chars=len(info_pack),
                 )
+                # ---- C1 v0.7 体检落盘钩子（best-effort：落盘失败不影响 job）----
+                # stats 由 build_info_pack 薄包装暂存（last_pack_stats）；测试替换该 seam
+                # 时取不到统计 → 跳过落盘，scheduler 测试的 fake pack 不会写出文件。
+                pack_stats = last_pack_stats()
+                if pack_stats:
+                    trigger = "rerun" if for_day else "scheduled"
+                    try:
+                        write_pack_health(cfg, today, job.name, trigger, pack_stats, len(info_pack))
+                        for _st in pack_stats:
+                            write_pack_detail(
+                                cfg,
+                                today,
+                                _st.get("key", ""),
+                                _st.get("title", ""),
+                                _st.get("status", ""),
+                                _st.get("detail_body", ""),
+                                _st.get("pack_body", ""),
+                                _st.get("packed_body", ""),
+                            )
+                    except Exception as dump_exc:  # noqa: BLE001 — 落盘失败不阻断 job
+                        logger.warning(
+                            "daily info pack health dump failed",
+                            job=job.name,
+                            date=today,
+                            error_type=type(dump_exc).__name__,
+                            stack_trace=str(dump_exc),
+                        )
         except Exception as e:  # noqa: BLE001 — never let the pack break the job
             logger.warning(
                 "daily info pack build failed; falling back to plain prompt",

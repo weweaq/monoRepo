@@ -6,7 +6,8 @@
   不加表、不改 ETL、不在注入路径触发 ETL（禁止 subprocess / etl.run）。
 - ``build()`` 返回完整 ``FactCard``，并通过可注册的 ``_SECTION_BUILDERS`` 生成一次
   半结构化 compact；每个 section 只把已有事实格式化成一行，统一预算器按优先级装入
-  600 字，不做行为推断或自然语言总结。
+  900 字，不做行为推断或自然语言总结。睡眠 / 时段×应用两个 section 来自 daily_stats
+  的 P0 语义字段（C2 A′：langTrack 在 LLM 输入中的唯一渲染出口）。
 - ``render_compact(card)`` 只读返回已存文本，禁止 dashboard/context 再拼一份。
 - 失败降级不挡对话：无库 / 缺表 / 异常 → ``available=False``、``has_facts=False``、
   ``persona={}``、``compact=""``。
@@ -38,7 +39,7 @@ from gacore.langTrack.persona import build as build_persona
 
 _TZ = datetime.timezone(datetime.timedelta(hours=8))
 _DAY_MS: Final = 86_400_000
-_MAX_COMPACT_CHARS: Final = 600
+_MAX_COMPACT_CHARS: Final = 900  # C2 A′：600→900，为新 sleep / time_app section 留预算（现用量约 150 字）
 _MAX_TIMELINE_CHARS: Final = 260
 _CARD_PREFIX: Final = "=== 生活事实（"
 
@@ -978,6 +979,75 @@ def _build_phone_section(card: FactCard) -> CompactSection | None:
     return CompactSection(id="phone", text="手机累计：" + " · ".join(parts), priority=40)
 
 
+def _build_sleep_section(card: FactCard) -> CompactSection | None:
+    """睡眠：熬夜信号 + 作息窗口（daily_stats P0 语义字段；C2 A′ 后唯一渲染出口）。
+
+    compact 模式不扫 events（sleep_signal='未计'），此时只报作息窗口；两者皆缺 → None。
+    """
+    signal = str(card.get("sleep_signal") or "")
+    if signal in ("", "未计", "当日无 daily_stats"):
+        signal = ""
+    start = card.get("sleep_start_hhmm")
+    end = card.get("sleep_end_hhmm")
+    duration = card.get("sleep_duration_min")
+    parts: list[str] = []
+    if signal:
+        parts.append(signal)
+    if start or end:
+        window = "作息"
+        if start:
+            window += f" 睡 {_hhmm_text(start)}"
+        if end:
+            window += f" 起 {_hhmm_text(end)}"
+        if duration:
+            window += f"（{duration}min）"
+        parts.append(window)
+    if not parts:
+        return None
+    return CompactSection(id="sleep", text="睡眠：" + " · ".join(parts), priority=45)
+
+
+def _hhmm_text(v) -> str:
+    """sleep_*_hhmm 归一化：真实库为 'HH:MM' TEXT；旧库/合成库可能存整数（HHMM 数值或分钟数）。"""
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        return v.strip()
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return str(v)
+    if 0 <= n < 2400 and n % 100 < 60 and n >= 100:
+        return f"{n // 100:02d}:{n % 100:02d}"  # HHMM 数值形态
+    if 0 <= n < 1440:
+        return f"{n // 60:02d}:{n % 60:02d}"  # 分钟数形态
+    return str(v)
+
+
+def _build_time_app_section(card: FactCard) -> CompactSection | None:
+    """时段×应用 top4（daily_stats.time_app_json；紧凑格式化在本模块实现，禁止 import daily_info_pack）。"""
+    items = card.get("time_app") or []
+    if not items:
+        return None
+    labels = [lab for lab in (_time_app_label(it) for it in items[:4]) if lab]
+    if not labels:
+        return None
+    return CompactSection(id="time_app", text="时段×应用：" + "、".join(labels), priority=55)
+
+
+def _time_app_label(item) -> str:
+    """时段×应用条目的紧凑标签，兼容 dict / 标量（字段名与 daily_info_pack 旧口径一致）。"""
+    if not isinstance(item, dict):
+        return str(item)
+    seg = item.get("segment") or item.get("period") or item.get("time_slot") or ""
+    name = item.get("app") or item.get("name") or item.get("package") or item.get("label") or ""
+    value = item.get("value") if "value" in item else item.get("minutes") if "minutes" in item else ""
+    core = f"{name}({value})" if value not in ("", None) else str(name)
+    if not core:
+        return ""
+    return f"{seg}:{core}" if seg else core
+
+
 def _build_notification_section(card: FactCard) -> CompactSection | None:
     """通知累计：总数/点击数/Top 来源；缺字段局部省略。
 
@@ -1018,13 +1088,15 @@ _SECTION_BUILDERS = (
     _build_current_section,
     _build_stay_section,
     _build_phone_section,
+    _build_sleep_section,
     _build_notification_section,
+    _build_time_app_section,
     _build_tag_section,
 )
 
 
 def _pack_compact(card: FactCard) -> None:
-    """运行全部 section builders 并做 600 字预算；记录 included / omitted。
+    """运行全部 section builders 并做 900 字预算；记录 included / omitted。
 
     稳定性：按 priority 排序；预算器只整段纳入/整段省略，禁止截半文本。
     门禁：has_facts=False 时不运行 builders（水位/tag 不能单独成卡）。

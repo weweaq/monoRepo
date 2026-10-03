@@ -1,9 +1,10 @@
-"""daily_info_pack 空/满双向单测。
+"""daily_info_pack 空/满双向单测（三元组契约版）。
 
-覆盖 build_info_pack 的每个确定性信息源（长期画像 / QQ 对话 / langTrack / bili /
-Edge / git / 文件活动 / ncm / 前日日报），各构造空（失败/无数据→降级标注）与满
-（大数据→被裁剪/计数正确）两种形态；并验证整包 ≤8000 字硬控与"任何源抛异常也
-不中断整包"的兜底。
+覆盖 build_info_pack_report 的每个确定性信息源（长期画像 / QQ 对话 / B站 / Edge / git /
+文件活动 / ncm / 前日日报），各构造空（失败/无数据→降级标注）与满（大数据→被裁剪/计数
+正确）两种形态，并钉住 C1 v0.7 的 builder 三元组契约：pack_body=挑选压缩后进包文本、
+detail_body=当日取数全部结果。langTrack 源已按 C2 A′ 移除（细维度并入 fact_card compact）。
+另验证整包 ≤8000 字硬控、超预算整块丢弃与"任何源抛异常也不中断整包"的兜底。
 
 运行：PYTHONPATH=src .venv/Scripts/python.exe -m pytest tests/test_daily_info_pack.py -q
 """
@@ -30,66 +31,36 @@ def _cfg(tmp_path: Path) -> Config:
 
 
 # --------------------------------------------------------------------------- #
-# 长期画像：空 / 满                                                           #
+# 长期画像：空 / 满（detail=画像全文，pack=compact 40 行）                     #
 # --------------------------------------------------------------------------- #
 def test_long_term_empty(tmp_path):
-    _header, body = dip._build_long_term_picture("2026-09-02", _cfg(tmp_path))
-    assert "无长期画像文件" in body or "memory/global_mem_insight" in body
+    title, pack_body, detail_body = dip._build_long_term_picture("2026-09-02", _cfg(tmp_path))
+    assert title == "〔长期画像·compact〕"
+    assert "无长期画像文件" in pack_body or "memory/global_mem_insight" in pack_body
+    assert detail_body == ""  # 无文件 → 无取数结果
 
 
 def test_long_term_full(tmp_path):
     cfg = _cfg(tmp_path)
     cfg.memory_dir.mkdir(parents=True, exist_ok=True)
-    (cfg.memory_dir / "global_mem_insight.txt").write_text("\n".join(f"line{i}" for i in range(60)), encoding="utf-8")
-    _header, body = dip._build_long_term_picture("2026-09-02", cfg)
-    assert "line0" in body
-    assert len(body.splitlines()) <= dip._LONG_TERM_LINES + 1  # 40 行上限（+摘要标记行）
+    full_text = "\n".join(f"line{i}" for i in range(60))
+    (cfg.memory_dir / "global_mem_insight.txt").write_text(full_text, encoding="utf-8")
+    title, pack_body, detail_body = dip._build_long_term_picture("2026-09-02", cfg)
+    assert "line0" in pack_body
+    assert len(pack_body.splitlines()) <= dip._LONG_TERM_LINES + 1  # 40 行上限（+摘要标记行）
+    assert detail_body == full_text  # detail 不做摘要压缩：全文
 
 
 # --------------------------------------------------------------------------- #
-# langTrack：空（无数据/失败）/ 满                                            #
-# --------------------------------------------------------------------------- #
-def test_langtrack_empty(tmp_path, monkeypatch):
-    monkeypatch.setattr(dip, "_LANGTRACK_FN", lambda **k: {"available": False})
-    _header, body = dip._build_langtrack("2026-09-02", _cfg(tmp_path))
-    assert "无 langTrack" in body or "失败" in body
-
-
-def test_langtrack_error(tmp_path, monkeypatch):
-    monkeypatch.setattr(dip, "_LANGTRACK_FN", lambda **k: {"error": "boom"})
-    _header, body = dip._build_langtrack("2026-09-02", _cfg(tmp_path))
-    assert "失败" in body
-
-
-def test_langtrack_full(tmp_path, monkeypatch):
-    fake = {
-        "available": True,
-        "screen_hours": 5.5,
-        "unlock_count": 42,
-        "notification_clicked": 7,
-        "sleep_signal": "restful",
-        "sleep_start_hhmm": "00:30",
-        "sleep_end_hhmm": "08:00",
-        "sleep_duration_min": 450,
-        "top_apps": [{"app": "bilibili", "value": "90m"}, {"app": "code-editor"}],
-        "time_app": [{"segment": "morning", "app": "code-editor"}],
-    }
-    monkeypatch.setattr(dip, "_LANGTRACK_FN", lambda **k: fake)
-    _header, body = dip._build_langtrack("2026-09-02", _cfg(tmp_path))
-    assert "42" in body
-    assert "00:30" in body
-    assert "bilibili" in body
-
-
-# --------------------------------------------------------------------------- #
-# B站：空（失败/无当日）/ 满（>20 条截断）                                    #
+# B站：空（失败/无当日）/ 满（>20 条截断；detail=全部当日条目）                #
 # --------------------------------------------------------------------------- #
 def test_bili_error(tmp_path, monkeypatch):
     monkeypatch.setattr(
         dip, "_BILLI_FN", lambda **k: {"error": "not_authenticated", "message": "登录过期"}
     )
-    _header, body = dip._build_bili("2026-09-02", _cfg(tmp_path))
-    assert "失败" in body
+    title, pack_body, detail_body = dip._build_bili("2026-09-02", _cfg(tmp_path))
+    assert "失败" in pack_body
+    assert detail_body == ""
 
 
 def test_bili_no_today(tmp_path, monkeypatch):
@@ -97,8 +68,9 @@ def test_bili_no_today(tmp_path, monkeypatch):
         {"bvid": "BV1", "title": "旧视频", "author": "UP", "viewed_at": "2026-09-01T10:00:00"}
     ]
     monkeypatch.setattr(dip, "_BILLI_FN", lambda **k: {"entries": entries, "total": 1})
-    _header, body = dip._build_bili("2026-09-02", _cfg(tmp_path))
-    assert "今日无 B 站观看记录" in body
+    title, pack_body, detail_body = dip._build_bili("2026-09-02", _cfg(tmp_path))
+    assert "今日无 B 站观看记录" in pack_body
+    assert detail_body == ""
 
 
 def test_bili_full_top20(tmp_path, monkeypatch):
@@ -107,25 +79,29 @@ def test_bili_full_top20(tmp_path, monkeypatch):
         for i in range(30)
     ]
     monkeypatch.setattr(dip, "_BILLI_FN", lambda **k: {"entries": entries, "total": 30})
-    _header, body = dip._build_bili("2026-09-02", _cfg(tmp_path))
-    lines = [ln for ln in body.splitlines() if ln.startswith("- ")]
-    assert len(lines) == dip._BILI_TOP  # 只列前 20
-    assert "仅列前" in body  # 超额标注
+    title, pack_body, detail_body = dip._build_bili("2026-09-02", _cfg(tmp_path))
+    lines = [ln for ln in pack_body.splitlines() if ln.startswith("- ")]
+    assert len(lines) == dip._BILI_TOP  # pack 只列前 20
+    assert "仅列前" in pack_body  # 超额标注
+    detail_lines = [ln for ln in detail_body.splitlines() if ln.startswith("- ")]
+    assert len(detail_lines) == 30  # detail 不做 top-N 挑选：全部 30 条
 
 
 # --------------------------------------------------------------------------- #
-# Edge：空（db_not_found）/ 满（域名归并 top10）                              #
+# Edge：空（db_not_found）/ 满（域名归并 top10；detail=全部页面逐条）          #
 # --------------------------------------------------------------------------- #
 def test_edge_db_not_found(tmp_path, monkeypatch):
     monkeypatch.setattr(dip, "_BROWSER_FN", lambda **k: {"error": "db_not_found"})
-    _header, body = dip._build_edge("2026-09-02", _cfg(tmp_path))
-    assert "不可用" in body or "失败" in body
+    title, pack_body, detail_body = dip._build_edge("2026-09-02", _cfg(tmp_path))
+    assert "不可用" in pack_body or "失败" in pack_body
+    assert detail_body == ""
 
 
 def test_edge_empty_entries(tmp_path, monkeypatch):
     monkeypatch.setattr(dip, "_BROWSER_FN", lambda **k: {"entries": []})
-    _header, body = dip._build_edge("2026-09-02", _cfg(tmp_path))
-    assert "无 Edge 浏览记录" in body
+    title, pack_body, detail_body = dip._build_edge("2026-09-02", _cfg(tmp_path))
+    assert "无 Edge 浏览记录" in pack_body
+    assert detail_body == ""
 
 
 def test_edge_full_domain_aggregation(tmp_path, monkeypatch):
@@ -138,10 +114,13 @@ def test_edge_full_domain_aggregation(tmp_path, monkeypatch):
         for i in range(n):
             entries.append({"url": f"https://{host}/p{i}", "title": f"{host}-{i}"})
     monkeypatch.setattr(dip, "_BROWSER_FN", lambda **k: {"entries": entries})
-    _header, body = dip._build_edge("2026-09-02", _cfg(tmp_path))
-    lines = [ln for ln in body.splitlines() if ln.startswith("- ")]
+    title, pack_body, detail_body = dip._build_edge("2026-09-02", _cfg(tmp_path))
+    lines = [ln for ln in pack_body.splitlines() if ln.startswith("- ")]
     assert len(lines) == dip._EDGE_TOP  # 归并后只列 top10
-    assert "a.com：5 次" in body  # 归并计数正确
+    assert "a.com：5 次" in pack_body  # 归并计数正确
+    # detail=全部页面逐条（共 19 条），不做归并挑选
+    assert len([ln for ln in detail_body.splitlines() if ln.startswith("- ")]) == sum(n for _, n in mapping)
+    assert "https://a.com/p0" in detail_body
 
 
 def test_edge_db_locked_degraded(tmp_path, monkeypatch):
@@ -150,10 +129,11 @@ def test_edge_db_locked_degraded(tmp_path, monkeypatch):
         dip, "_BROWSER_FN",
         lambda **k: {"error": "db_open_failed", "message": "database is locked"},
     )
-    header, body = dip._build_edge("2026-09-02", _cfg(tmp_path))
+    header, pack_body, detail_body = dip._build_edge("2026-09-02", _cfg(tmp_path))
     assert "〔浏览·Edge 域名〕" in header
-    assert "该源失败" in body
-    assert "database is locked" in body
+    assert "该源失败" in pack_body
+    assert "database is locked" in pack_body
+    assert detail_body == ""
 
 
 def test_edge_db_locked_whole_pack_not_interrupted(tmp_path, monkeypatch):
@@ -164,41 +144,43 @@ def test_edge_db_locked_whole_pack_not_interrupted(tmp_path, monkeypatch):
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(dip, "_BROWSER_FN", _locked)
-    # 其余真实外部源（bili/ncm=CLI 网络请求、langTrack=ETL 子进程+真实库）一并 mock，
+    # 其余真实外部源（bili/ncm=CLI 网络请求）一并 mock，
     # 本测试只验证"单源失败整包降级"的管线行为，不依赖真实机器状态。
     monkeypatch.setattr(dip, "_BILLI_FN", lambda **k: {"error": "mock", "message": "mock"})
-    monkeypatch.setattr(dip, "_LANGTRACK_FN", lambda day: {"error": "mock", "message": "mock"})
     monkeypatch.setattr(dip, "_NCM_ME_FN", lambda: {"error": "mock"})
     monkeypatch.setattr(dip, "_NCM_PLAYLIST_FN", lambda **k: {"error": "mock"})
     pack = dip.build_info_pack("2026-09-02", _cfg(tmp_path))
     assert isinstance(pack, str)
-    assert "〔浏览·Edge 域名〕" in pack
+    # C3：header 带状态元信息（来自 classify_body 的 failed 判定 + 失败原因）
+    assert "〔浏览·Edge 域名｜状态:失败:database is locked〕" in pack
     assert "该源失败" in pack
     assert len(pack) <= dip.PACK_BUDGET
 
 
 # --------------------------------------------------------------------------- #
-# git：空 / 满                                                                #
+# git：空 / 满（detail=完整 log 行，pack=hash/subject 截断版）                 #
 # --------------------------------------------------------------------------- #
 def test_git_empty(tmp_path, monkeypatch):
     monkeypatch.setattr(dip, "_run_git", lambda root, date: (0, ""))
-    _header, body = dip._build_git("2026-09-02", _cfg(tmp_path))
-    assert "今日无 git 提交" in body
+    title, pack_body, detail_body = dip._build_git("2026-09-02", _cfg(tmp_path))
+    assert "今日无 git 提交" in pack_body
+    assert detail_body == ""
 
 
 def test_git_failed_rc(tmp_path, monkeypatch):
     monkeypatch.setattr(dip, "_run_git", lambda root, date: (128, ""))
-    _header, body = dip._build_git("2026-09-02", _cfg(tmp_path))
-    assert "失败" in body
+    title, pack_body, detail_body = dip._build_git("2026-09-02", _cfg(tmp_path))
+    assert "失败" in pack_body
 
 
 def test_git_full(tmp_path, monkeypatch):
     out = "abc1234567|feat: 重构日报信息包|aos\n"
     out += "def8901234|fix: 修 bug|aos\n"
     monkeypatch.setattr(dip, "_run_git", lambda root, date: (0, out))
-    _header, body = dip._build_git("2026-09-02", _cfg(tmp_path))
-    assert "abc12345" in body  # hash 截断到 8 位
-    assert "feat: 重构日报信息包" in body
+    title, pack_body, detail_body = dip._build_git("2026-09-02", _cfg(tmp_path))
+    assert "abc12345" in pack_body  # hash 截断到 8 位
+    assert "feat: 重构日报信息包" in pack_body
+    assert detail_body.count("abc1234567") == 1  # detail 保留完整 hash（不截断）
 
 
 def test_git_multirepo_groups(tmp_path, monkeypatch):
@@ -221,19 +203,20 @@ def test_git_multirepo_groups(tmp_path, monkeypatch):
         return (0, "bbb2222222|commit wei|aos\n")
 
     monkeypatch.setattr(dip, "_run_git", fake_run)
-    _header, body = dip._build_git("2026-09-02", cfg)
-    assert "aaa11111" in body and "commit main" in body
-    assert "bbb22222" in body and "commit wei" in body
-    assert "main" in body        # 分组标签 = 目录名（无 .git 时的 fallback）
-    assert "weiCheckApp" in body
+    title, pack_body, detail_body = dip._build_git("2026-09-02", cfg)
+    assert "aaa11111" in pack_body and "commit main" in pack_body
+    assert "bbb22222" in pack_body and "commit wei" in pack_body
+    assert "main" in pack_body        # 分组标签 = 目录名（无 .git 时的 fallback）
+    assert "weiCheckApp" in pack_body
 
 
 # --------------------------------------------------------------------------- #
-# 文件活动：空 / 满（目录聚合 top15）                                         #
+# 文件活动：空 / 满（目录聚合 top15；detail=全量目录）                         #
 # --------------------------------------------------------------------------- #
 def test_files_empty(tmp_path):
-    _header, body = dip._build_files("2026-09-02", _cfg(tmp_path))
-    assert "无文件改动" in body
+    title, pack_body, detail_body = dip._build_files("2026-09-02", _cfg(tmp_path))
+    assert "无文件改动" in pack_body
+    assert detail_body == ""
 
 
 def test_files_full(tmp_path):
@@ -249,20 +232,22 @@ def test_files_full(tmp_path):
             p = d / f"f{i}.py"
             p.write_text("x", encoding="utf-8")
             os.utime(p, (now, now))
-    _header, body = dip._build_files("2026-09-02", cfg)
-    assert "src" in body
-    assert "tests" in body
-    assert "3 个文件" in body
+    title, pack_body, detail_body = dip._build_files("2026-09-02", cfg)
+    assert "src" in pack_body
+    assert "tests" in pack_body
+    assert "3 个文件" in pack_body
+    assert "docs：3 个文件" in detail_body  # detail 不做 top-N 挑选：全量目录
 
 
 # --------------------------------------------------------------------------- #
-# ncm：空（失败跳过）/ 满                                                     #
+# ncm：空（失败跳过）/ 满（pack=top10；detail=全部歌单）                       #
 # --------------------------------------------------------------------------- #
 def test_ncm_error_skipped(tmp_path, monkeypatch):
     monkeypatch.setattr(dip, "_NCM_ME_FN", lambda: {"error": "login"})
     monkeypatch.setattr(dip, "_NCM_PLAYLIST_FN", lambda *a, **k: {"error": "login"})
-    _header, body = dip._build_ncm("2026-09-02", _cfg(tmp_path))
-    assert "失败" in body
+    title, pack_body, detail_body = dip._build_ncm("2026-09-02", _cfg(tmp_path))
+    assert "失败" in pack_body
+    assert detail_body == ""
 
 
 def test_ncm_full(tmp_path, monkeypatch):
@@ -272,18 +257,20 @@ def test_ncm_full(tmp_path, monkeypatch):
         for i in range(12)
     ]
     monkeypatch.setattr(dip, "_NCM_PLAYLIST_FN", lambda *a, **k: {"playlists": pls})
-    header, body = dip._build_ncm("2026-09-02", _cfg(tmp_path))
+    header, pack_body, detail_body = dip._build_ncm("2026-09-02", _cfg(tmp_path))
     assert "某用户" in header  # nickname 进 header
-    lines = [ln for ln in body.splitlines() if ln.startswith("- ")]
-    assert len(lines) == dip._NCM_TOP  # 只列前 10
+    lines = [ln for ln in pack_body.splitlines() if ln.startswith("- ")]
+    assert len(lines) == dip._NCM_TOP  # pack 只列前 10
+    assert len([ln for ln in detail_body.splitlines() if ln.startswith("- ")]) == 12  # detail 全量
 
 
 # --------------------------------------------------------------------------- #
-# QQ 对话：空（无文件/无当日）/ 满（超 _CHAT_TOP 截断）                        #
+# QQ 对话：空（无文件/无当日）/ 满（超 _CHAT_TOP 截断；detail=全部摘录）        #
 # --------------------------------------------------------------------------- #
 def test_chat_no_file(tmp_path):
-    _header, body = dip._build_chat("2026-09-02", _cfg(tmp_path))
-    assert "qq_chat_log.jsonl 不存在" in body
+    title, pack_body, detail_body = dip._build_chat("2026-09-02", _cfg(tmp_path))
+    assert "qq_chat_log.jsonl 不存在" in pack_body
+    assert detail_body == ""
 
 
 def test_chat_no_user_messages(tmp_path):
@@ -296,8 +283,9 @@ def test_chat_no_user_messages(tmp_path):
         '{"ts":"2026-09-02T10:01:00+08:00","direction":"user","text":"/help"}\n',
         encoding="utf-8",
     )
-    _header, body = dip._build_chat("2026-09-02", cfg)
-    assert "命令类消息" in body or "无 QQ 对话记录" in body
+    title, pack_body, detail_body = dip._build_chat("2026-09-02", cfg)
+    assert "命令类消息" in pack_body or "无 QQ 对话记录" in pack_body
+    assert detail_body == ""
 
 
 def test_chat_full_user_messages(tmp_path):
@@ -310,11 +298,15 @@ def test_chat_full_user_messages(tmp_path):
             f'{{"ts":"2026-09-02T1{i % 10}:{i:02d}:00+08:00","direction":"user","text":"消息内容 {i} 号"}}'
         )
     log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    _header, body = dip._build_chat("2026-09-02", cfg)
-    bullet_lines = [ln for ln in body.splitlines() if ln.startswith("- ")]
-    assert len(bullet_lines) == dip._CHAT_TOP  # 只列前 15
-    assert "共 20 条" in body
-    assert "仅列前 15" in body
+    title, pack_body, detail_body = dip._build_chat("2026-09-02", cfg)
+    bullet_lines = [ln for ln in pack_body.splitlines() if ln.startswith("- ")]
+    assert len(bullet_lines) == dip._CHAT_TOP  # pack 只列前 15
+    assert "共 20 条" in pack_body
+    assert "仅列前 15" in pack_body
+    # detail=当日全部摘录，不截条数也不截每条字数
+    detail_lines = [ln for ln in detail_body.splitlines() if ln.startswith("- ")]
+    assert len(detail_lines) == 20
+    assert "消息内容 19 号" in detail_body
 
 
 def test_chat_date_filtering(tmp_path):
@@ -327,40 +319,45 @@ def test_chat_date_filtering(tmp_path):
         '{"ts":"2026-09-03T10:00:00+08:00","direction":"user","text":"明天的消息"}\n',
         encoding="utf-8",
     )
-    _header, body = dip._build_chat("2026-09-02", cfg)
-    assert "今天的消息" in body
-    assert "昨天的消息" not in body
-    assert "明天的消息" not in body
+    title, pack_body, detail_body = dip._build_chat("2026-09-02", cfg)
+    assert "今天的消息" in detail_body
+    assert "昨天的消息" not in detail_body
+    assert "明天的消息" not in detail_body
 
 
 # --------------------------------------------------------------------------- #
-# 前日日报：空 / 满                                                           #
+# 前日日报：空 / 满（pack=260 字摘要；detail=1000 字更长摘要）                 #
 # --------------------------------------------------------------------------- #
 def test_memory_empty(tmp_path):
-    _header, body = dip._build_memory("2026-09-02", _cfg(tmp_path))
-    assert "无历史日报" in body
+    title, pack_body, detail_body = dip._build_memory("2026-09-02", _cfg(tmp_path))
+    assert "无历史日报" in pack_body
+    assert detail_body == ""
 
 
 def test_memory_full(tmp_path):
     cfg = _cfg(tmp_path)
     scheduled = cfg.logs_dir / "scheduled"
     scheduled.mkdir(parents=True, exist_ok=True)
+    long_reply = "# 今日状态\n" + "\n".join(f"- 正文第{i}段落，内容足够长用于区分两级摘要" for i in range(60))
     (scheduled / "daily-report_20260901_235900.md").write_text(
         "# Scheduled Job: daily-report\n"
         "- time: 2026-09-01T23:59:00+08:00\n"
         "\n"
         "## Reply\n"
         "\n"
-        "# 今日状态\n- 白天是代码手\n",
+        f"{long_reply}\n",
         encoding="utf-8",
     )
-    _header, body = dip._build_memory("2026-09-02", cfg)
-    assert "前一次日报" in body
-    assert "2026-09-01T23:59" in body
+    title, pack_body, detail_body = dip._build_memory("2026-09-02", cfg)
+    assert "前一次日报" in pack_body
+    assert "2026-09-01T23:59" in pack_body
+    assert len(detail_body) > len(pack_body)  # detail 取更长摘要
+    assert "正文第40段落" in detail_body        # detail 覆盖更靠后的正文
+    assert "正文第59段落" not in detail_body    # detail 只到 _MEMORY_DETAIL_CHARS 为止
 
 
 # --------------------------------------------------------------------------- #
-# 整包：预算硬控 / 永不抛                                                      #
+# 整包：预算硬控 / 永不抛 / 熔断整块丢弃                                       #
 # --------------------------------------------------------------------------- #
 def test_pack_budget_contract():
     """预算契约：2026-09-04 用户拍板 2000 → 8000（8 路被动信号 + 第 9 路对话源的总量级）。"""
@@ -368,11 +365,7 @@ def test_pack_budget_contract():
 
 
 def _flood_all_sources(monkeypatch):
-    """把所有确定性源注满，逼近预算上限。"""
-    monkeypatch.setattr(
-        dip, "_LANGTRACK_FN",
-        lambda **k: {"available": True, "unlock_count": 10, "top_apps": [{"app": "x"}] * 5},
-    )
+    """把所有确定性源注满，逼近预算上限（外部 CLI/子进程一律 mock，保持封闭）。"""
     entries30 = [
         {"bvid": f"BV{i}", "title": f"视频{i}号", "author": "UP", "viewed_at": f"2026-09-02T0{i % 10}:0{i % 60:02d}:00"}
         for i in range(30)
@@ -386,7 +379,6 @@ def _flood_all_sources(monkeypatch):
         dip, "_run_git",
         lambda root, date: (0, "\n".join(f"aaaa{i:04d}x|commit 消息 {i} 号|aos" for i in range(20))),
     )
-    # 真实文件树：建 40 个当天文件制造文件活动噪音
     monkeypatch.setattr(dip, "_NCM_ME_FN", lambda: {"nickname": "某用户" * 3})
     monkeypatch.setattr(
         dip, "_NCM_PLAYLIST_FN",
@@ -394,39 +386,52 @@ def _flood_all_sources(monkeypatch):
     )
 
 
-def test_build_info_pack_within_budget(tmp_path, monkeypatch, caplog):
-    _flood_all_sources(monkeypatch)
-    # 预算缩回 2000 触发熔断路径：真实预算 8000 下洪泛数据（~3200 字）够不到熔断点，
-    # 本测试验证的是"预算耗尽 → 截断 + 尾部板块挤出"机制本身，与常量取值解耦。
-    monkeypatch.setattr(dip, "PACK_BUDGET", 2000)
-    # 长期画像 80 行（保底撑爆预算，确保熔断/裁剪路径被真正走到）
-    cfg = _cfg(tmp_path)
+def _flood_cfg_files(cfg: Config) -> None:
+    """给洪泛场景补上文件型源：长期画像（撑爆预算）与前日日报。"""
     cfg.memory_dir.mkdir(parents=True, exist_ok=True)
     (cfg.memory_dir / "global_mem_insight.txt").write_text(
         "\n".join(f"画像细节 line{i} 很长的描述内容来撑字数" for i in range(80)),
         encoding="utf-8",
     )
-    # 前日日报
     scheduled = cfg.logs_dir / "scheduled"
     scheduled.mkdir(parents=True, exist_ok=True)
     (scheduled / "daily-report_20260901_235900.md").write_text(
         "# Scheduled Job: daily-report\n- time: 2026-09-01T23:59:00+08:00\n\n## Reply\n\n# 今日状态\n- 正文\n",
         encoding="utf-8",
     )
+
+
+def test_build_info_pack_drops_tail_blocks_within_budget(tmp_path, monkeypatch):
+    """预算耗尽 → 从装不下的块起整块丢弃（其后全弃），无半行断章（C3）。"""
+    _flood_all_sources(monkeypatch)
+    # 预算缩到 1800：头部+长期画像装得下，B站起装不下 → 整块丢弃
+    monkeypatch.setattr(dip, "PACK_BUDGET", 1800)
+    cfg = _cfg(tmp_path)
+    _flood_cfg_files(cfg)
     pack = dip.build_info_pack("2026-09-02", cfg)
     assert isinstance(pack, str)
-    assert 0 < len(pack) <= dip.PACK_BUDGET  # 硬控 ≤2000
+    assert 0 < len(pack) <= dip.PACK_BUDGET
     assert "〔当日信息包·2026-09-02〕" in pack
-    # 切面断言：预算耗尽 → 熔断产生裁剪、尾部板块被挤出
-    assert pack.rstrip().endswith("…")  # 存在 clipped 行，以省略号结尾
-    assert "〔记忆·前日日报〕" not in pack  # 熔断后尾部板块缺失：前日日报（最后一块必被挤出）
+    assert "〔长期画像·compact" in pack          # 头部 + 长期画像装得下
+    assert "〔浏览·B站观看 top" not in pack      # 装不下 → 整块丢弃
+    assert "〔记忆·前日日报" not in pack          # 熔断后尾部板块全弃
+    assert not pack.rstrip().endswith("…")        # 整块丢弃不产生半行
+
+
+def test_build_info_pack_head_clip_when_first_block_exceeds_budget(tmp_path, monkeypatch):
+    """首块（消费指令头）自身超预算 → 按字符裁剪兜底，整包不为空。"""
+    _flood_all_sources(monkeypatch)
+    monkeypatch.setattr(dip, "PACK_BUDGET", 100)
+    pack = dip.build_info_pack("2026-09-02", _cfg(tmp_path))
+    assert 0 < len(pack) <= 100
+    assert pack.endswith("…")
 
 
 def test_build_info_pack_never_raises(tmp_path, monkeypatch):
     """所有确定性源都抛异常：整包必须降级而不是抛给 run_job。"""
     def _boom(*args, **kwargs):
         raise RuntimeError("boom")
-    for name in ("_LANGTRACK_FN", "_BILLI_FN", "_BROWSER_FN", "_NCM_ME_FN", "_NCM_PLAYLIST_FN"):
+    for name in ("_BILLI_FN", "_BROWSER_FN", "_NCM_ME_FN", "_NCM_PLAYLIST_FN"):
         monkeypatch.setattr(dip, name, _boom)
     def _boom_run(root, date):
         raise RuntimeError("git boom")
@@ -438,8 +443,21 @@ def test_build_info_pack_never_raises(tmp_path, monkeypatch):
     assert len(pack) <= dip.PACK_BUDGET
 
 
+def test_build_info_pack_report_stash_and_real_headers(tmp_path, monkeypatch):
+    """真实注册表跑通：build_info_pack 薄包装 + last_pack_stats 暂存（scheduler 落盘 seam）。"""
+    _flood_all_sources(monkeypatch)
+    cfg = _cfg(tmp_path)
+    pack = dip.build_info_pack("2026-09-02", cfg)
+    stats = dip.last_pack_stats()
+    assert [s["key"] for s in stats] == [s.key for s in dip.SOURCES]
+    assert all(isinstance(s.get("packed_body"), str) for s in stats)
+    # langTrack 源不再出现在信息包（C2 A′）
+    assert "_LANGTRACK" not in {s["key"] for s in stats}
+    assert "手机使用" not in pack
+
+
 # --------------------------------------------------------------------------- #
-# 听歌与视频伴音：空库 / 网易云与 B站 分流                                     #
+# 听歌与视频伴音：空库 / 网易云与 B站 分流（detail=全量榜单）                   #
 # --------------------------------------------------------------------------- #
 def _media_ts(dstr: str, hh: int, mm: int) -> int:
     import datetime as _dt
@@ -448,8 +466,9 @@ def _media_ts(dstr: str, hh: int, mm: int) -> int:
 
 
 def test_media_empty_db(tmp_path):
-    _header, body = dip._build_media("2026-09-02", _cfg(tmp_path))
-    assert "无 langTrack 音乐数据" in body
+    title, pack_body, detail_body = dip._build_media("2026-09-02", _cfg(tmp_path))
+    assert "无 langTrack 音乐数据" in pack_body
+    assert detail_body == ""
 
 
 def test_media_split_music_vs_video(tmp_path):
@@ -477,8 +496,10 @@ def test_media_split_music_vs_video(tmp_path):
     conn.commit()
     conn.close()
 
-    _header, body = dip._build_media("2026-09-02", cfg)
-    assert "听歌 Top" in body and "真歌A" in body and "真歌B" in body
-    assert "视频伴音" in body and "B站解说标题" in body
+    title, pack_body, detail_body = dip._build_media("2026-09-02", cfg)
+    assert "听歌 Top" in pack_body and "真歌A" in pack_body and "真歌B" in pack_body
+    assert "视频伴音" in pack_body and "B站解说标题" in pack_body
+    # detail=全部榜单条目（不截 top5）
+    assert "听歌全量" in detail_body and "视频伴音全量" in detail_body
     # 真实值核对：row_factory=Row 未设会导致 _listen_music 静默返回空 → 断言能兜住
-    assert "今日无听歌记录" not in body
+    assert "今日无听歌记录" not in pack_body

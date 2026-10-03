@@ -7,7 +7,8 @@
 - 数据水位：etl_state.last_event_ts 优先，fallback=stays/trips 最大 end_ts；不扫 events
 - current_known：覆盖 cutoff 闭区间命中的最后一段 stay
 - stays/trips 时间窗相交裁剪；trip 匹配前后最近 stay
-- compact：600 字预算、section 优先级整段省略、轨迹 260 字内折叠
+- compact：900 字预算、section 优先级整段省略、轨迹 260 字内折叠
+- 睡眠 / 时段×应用 section（C2 A′：daily_stats P0 语义字段的唯一渲染出口）
 - 降级：无库 / 缺表 / 异常 / 多设备歧义 / 未来日 → available=False
 - 维测日志：built / degraded，日志失败不抛
 """
@@ -116,8 +117,9 @@ def _make_db(device_id: str = "dev1", day: str = "2026-08-18", with_device_col: 
     if with_device_col:
         cur.execute(
             "INSERT INTO daily_stats VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            # sleep_*_hhmm 真实库为 'HH:MM' TEXT（合成库沿用，供 sleep section 用例）
             (device_id, day, 25_200_000, ranking, 47, 6, notif_apps, 3, 2, 12, 46, 50, 0,
-             2340, 390, 480, "[]"),
+             "23:40", "06:30", 480, "[]"),
         )
     else:
         cur.execute(
@@ -539,6 +541,83 @@ def test_compact_phone_section_example_format():
     assert "手机累计：屏幕 7.0h · 解锁 12 · 切换 46 · 飞书 1.0h / 微信 0.5h" in text
 
 
+# ---------------------------------------------------------------------------
+# 睡眠 / 时段×应用 section（C2 A′：daily_info_pack 通路删除后的唯一渲染出口）
+# ---------------------------------------------------------------------------
+
+
+def test_sleep_section_window_from_daily_stats():
+    """compact 模式不扫 events（signal='未计'），睡眠段只报作息窗口，且不得把'未计'当事实输出。"""
+    conn = _make_db()
+    card = fc.build(conn=conn, day="2026-08-18", device_id="dev1", detail="compact")
+    text = fc.render_compact(card)
+    assert "睡眠：作息 睡 23:40 起 06:30（480min）" in text
+    assert "未计" not in text
+
+
+def test_sleep_section_signal_in_full_mode():
+    """full 模式扫 events：信号 + 作息窗口同行拼装（对齐设计稿示例格式）。"""
+    conn = _make_db()
+    card = fc.build(conn=conn, day="2026-08-18", device_id="dev1", detail="full")
+    text = fc.render_compact(card)
+    assert "睡眠：凌晨 00-05 点仍有环境音频样本，疑似熬夜 · 作息 睡 23:40 起 06:30（480min）" in text
+
+
+def test_sleep_section_absent_without_daily_stats():
+    """无 daily_stats：sleep_signal='当日无 daily_stats'、窗口字段为空 → 整段省略，不冒充事实。"""
+    conn = _make_db()
+    conn.execute("DELETE FROM daily_stats")
+    conn.commit()
+    card = fc.build(conn=conn, day="2026-08-18", device_id="dev1", detail="compact")
+    assert "睡眠：" not in card["compact"]
+    assert "sleep" not in card["compact_lines"]
+
+
+def test_time_app_section_top4():
+    """时段×应用 top4：顿号连接、超出 4 条截断（本模块紧凑格式化，不依赖 daily_info_pack）。"""
+    conn = _make_db()
+    items = [
+        {"segment": "早上", "app": "代码", "value": "1.5h"},
+        {"segment": "下午", "app": "飞书", "minutes": 90},
+        {"segment": "晚上", "app": "哔哩哔哩", "value": "1.0h"},
+        {"app": "微信"},  # 无 segment：只出应用名
+        {"segment": "深夜", "app": "抖音", "value": "0.5h"},  # 第 5 条应被截掉
+    ]
+    conn.execute(
+        "UPDATE daily_stats SET time_app_json=? WHERE device_id=? AND day=?",
+        (json.dumps(items), "dev1", "2026-08-18"),
+    )
+    conn.commit()
+    card = fc.build(conn=conn, day="2026-08-18", device_id="dev1", detail="compact")
+    text = fc.render_compact(card)
+    assert "时段×应用：早上:代码(1.5h)、下午:飞书(90)、晚上:哔哩哔哩(1.0h)、微信" in text
+    assert "抖音" not in text
+    assert "time_app" in card["compact_lines"]
+
+
+def test_time_app_section_absent_when_empty():
+    """无 time_app 数据 → 整段省略（缺数据返回 None，不输出空标签行）。"""
+    conn = _make_db()
+    card = fc.build(conn=conn, day="2026-08-18", device_id="dev1", detail="compact")
+    assert "时段×应用" not in card["compact"]
+    assert card.get("time_app") == []
+
+
+def test_budget_omission_records_sleep_and_time_app(monkeypatch):
+    """预算收紧 → sleep / time_app 与其他低优先级 section 一样记入 compact_omitted（v0.7 透传展示）。"""
+    conn = _make_db()
+    conn.execute(
+        "UPDATE daily_stats SET time_app_json=? WHERE device_id=? AND day=?",
+        (json.dumps([{"segment": "早上", "app": "代码", "value": "1.5h"}]), "dev1", "2026-08-18"),
+    )
+    conn.commit()
+    monkeypatch.setattr(fc, "_MAX_COMPACT_CHARS", 120)
+    card = fc.build(conn=conn, day="2026-08-18", device_id="dev1", detail="compact")
+    assert card["compact_omitted"].get("sleep") == "budget"
+    assert card["compact_omitted"].get("time_app") == "budget"
+    assert "睡眠：" not in card["compact"] and "时段×应用" not in card["compact"]
+
+
 def test_compact_timeline_example_format():
     """对照 §2.4 示例：轨迹行 + 移动段数。"""
     conn = _make_db()
@@ -571,8 +650,9 @@ def test_compact_omits_current_and_tag_lines():
     assert "系统标记" not in text
 
 
-def test_compact_max_600_chars_without_mid_field_cut():
-    """compact 总长度 ≤600，且每段为整行（无截半）。"""
+def test_compact_max_900_chars_without_mid_field_cut():
+    """compact 总长度 ≤900（C2 A′：600→900），且每段为整行（无截半）。"""
+    assert fc._MAX_COMPACT_CHARS == 900
     conn = _make_db()
     conn.execute("UPDATE etl_state SET last_event_ts=?", (_ts(2026, 8, 18, 23, 59),))
     conn.commit()
@@ -585,7 +665,7 @@ def test_compact_max_600_chars_without_mid_field_cut():
         )
     conn.commit()
     card = fc.build(conn=conn, day="2026-08-18", device_id="dev1", detail="compact")
-    assert card["compact_chars"] <= 600
+    assert card["compact_chars"] <= 900
     assert "…" in card["compact"]  # 轨迹折叠生效
 
 

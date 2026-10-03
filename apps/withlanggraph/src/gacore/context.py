@@ -249,6 +249,13 @@ def build_system_prompt(state: GAState, cfg: Config) -> str:
         _fact_text = fact_card.render_compact(_fact_card)
     except Exception:  # noqa: BLE001 - 缺库/损坏一律不弄死 QQ
         _fact_text = ""
+    # C1 v0.7 事实卡支线落盘：compact 全文 + compact_omitted（预算省略的 section）+ 水位，
+    # 覆盖写 pack_detail/{day}/_FACT_CARD.md。best-effort——build 抛异常时 _fact_card 未绑定，
+    # 连同落盘失败一并静默，绝不影响 QQ 注入主路径。
+    with contextlib.suppress(Exception):
+        from gacore.daily_info_pack import write_fact_card_detail
+
+        write_fact_card_detail(cfg, _fact_card)
     if _fact_text:
         prompt += f"\n{_fact_text}"
         injected_bg = True
