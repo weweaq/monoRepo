@@ -417,6 +417,8 @@ agent 工具 `langTrack_stats(day)` 的返回结构（gacore 主 agent 日报自
 
 调用前置：`_ensure_etl()` 先跑一遍 ETL 保证读到最新（tools:80-106，失败不阻塞）。
 
+> **历史日兜底（2026-09-29）**：`available=False` 且非多设备歧义时，若 `events` 表当日确有原始事件（`_has_day_events`，按设备/日窗口查 ts），说明是"该日未来得及汇总"而非真无数据——此时触发一次 ETL 重建并重读，避免把历史日误判成"手机无数据"（news 2026-09-28 日报补跑假阴性根因之一）。真空日（当日无事件）不触发，仍如实返回 `available=False`。
+
 ### 5.2 persona.build() 返回结构（`persona.py:147-551`）
 
 纯读聚合，不动 ETL 不加表（C1 外挂式）；`conn`/`db_path` 二选一，`device_id=None` 时全量读（旧库无 device_id 列自动退化）：
@@ -460,6 +462,8 @@ usage、session、notification、location、audio_env、audio_clip、accel(false
 ### 5.4 FactCard（`fact_card.py`，2026-08-31 新增）
 
 统一「今日生活事实」的**单一数据源**：`build()` 纯读聚合（零 ETL、零写库），把 daily_stats / stays / trips / places / anomalies / audio_env / contract_coverage 拼成一张事实卡；`render_compact()` 只读渲染压缩文本（双出口：`outlet="prompt"` 注入 system prompt，`outlet="dashboard"` 供审查页）。`langTrack_stats`、dashboard 均消费它，不再各写一份 SQL。
+
+> **按天切片（2026-09-22）**：`fact_card.build(day=...)` 原生支持按日聚合，且历史日会被正确视为"该日已完整"（`day_window_closed`）。`context.build_system_prompt` 注入时经 `state["target_day"]` 取数：实时场景（QQ/cli/scheduler 当日）默认 `day=None`→今日；日报**补跑**（`gacore.rerun --day`）由 scheduler 把 `for_day` 经 `GAState.target_day` 贯穿到注入，使该日事实卡按目标日切片，与信息包/轨迹图同源同一天。
 
 ```mermaid
 flowchart LR

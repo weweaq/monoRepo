@@ -3036,3 +3036,79 @@ best-effort + 幂等 + 失败吞掉，天然可维护。
 - [ ] langTrack-tech.md 若无 browser_history 契约节（§2.6 信号源契约是手机侧）则另议；本工具属
       `tools/` 层桌面信号源，docstring 已足够，暂不另建 tech 小节。
 - 遗留不变：I7 accuracy filter、A3 人工停留核对、A10 有用性访谈、weiCheckApp 客户端断供/保活排查。
+
+## 2026-09-22：langTrack 数据并集割接（生产库 → mono 仓库）
+
+### 背景
+生产曾长期误跑在**独立仓库 `WithLangGraph/`**（9-09 起已按 AGENTS 停更），mono
+`apps/withlanggraph` 才是唯一开发源头。手机每天同步的 langTrack 数据因此落进了独立仓库的
+`data/langTrack.db`，而 mono 仓库只停在 9-11 收数。本次把独立仓库（生产）里 9-12 之后的事件
+**并集**割接进 mono 库，使 mono 成为完整归集。
+
+### 已完成
+- 备份 mono 库：`data/backup/langTrack_before_merge_20260922_122741.db`。
+- 事件并集（去重键 `ts+device_id+type+payload`，幂等单事务）：mono `events 67835 → 89388`，
+  补入生产独有 21553 条（含 9-21 共 2438 条）；`ingested_batches` 补 62 条。保留 mono 自有
+  而生产没有的 8957 条历史事件，未做覆盖、未删源。
+- mono 上重跑 ETL（`uv run python -m gacore.langTrack.etl`，新代码）一次通过：
+  `daily_stats` 覆盖到 2026-09-22，位置 v2 重建 stays=72/trips=48，人工 `place_labels` 标签恢复
+  2 个，`contract_coverage` 19 类校验通过，`dirty_events=0`。
+
+### 一句话
+数组层面验证：mono `events` 覆盖 `2026-08-16 ~ 2026-09-22 00:13`，昨晚（9-21）同步数据已在
+mono 正确反映。独立仓库生产库未动（仍只读参考）。
+
+### 待办
+- [x] 数据并集割接完成。
+- [ ] 关注：手机采集端今晨（9-22 00:13）起已停止上报（ETL 空转无新数据），非本合并引起，需排查。
+- [ ] 旧独立 `dev-console/` 与 `WithLangGraph/` 双仓库并存易混淆，是否改名/删除待用户定。
+
+## 2026-09-22：日报补跑按天切片修复（GAState.target_day 贯穿 fact_card）
+
+### 背景
+生产切换完成后补发 9-11~9-20 日报，发现补跑的日报"没提目标日行程"（用户去过北京、换
+多城却只字未提）。根因：`context.build_system_prompt` 注入的 langTrack 事实卡固定按"运行
+时刻的今天"取数，`gacore.rerun` 的 `for_day` 只贯穿到信息包与轨迹图，未贯穿事实卡——补跑
+时 LLM 拿到的是今天的空轨迹，而非目标日的真实行程。
+
+### 已完成（最小侵入，语义正确）
+- `GAState` 新增通道 `target_day`；`new_state` / `run_once` 支持透传。
+- `context.build_system_prompt`：事实卡注入改按 `state["target_day"]` 切片（None=实时今日，
+  保持 QQ 实时行为不变）；`fact_card.build` 本身就支持 `day=` 且已正确把历史日视为
+  "该日已完整"（`day_window_closed`），故事实卡本体无需改动。
+- `scheduler`：`run_job` / `_default_graph_runner` 把 `for_day` 传入 `target_day`，补跑时
+  整条日报链路（信息包 + 事实卡 + 轨迹图）同源同一天。
+
+### 实测验证
+- `ruff check` 通过；`test_state/test_context/test_scheduler/test_langTrack_fact_card`
+  共 166 项全绿。
+- 补跑 9-11 后事实卡 `day` 从运行日（错）归正为目标日（`day='2026-09-11'`）。
+
+### 待办
+- [x] target_day 贯穿修复完成。
+- [ ] 用修复后逻辑重发 9-11~9-20 全部日报。
+- [ ] 修正 9-15 / 9-16 首次补发邮件 SMTP 断连漏投问题（重发覆盖）。
+
+## 2026-09-23：接入智谱 GLM provider（LLM_PROVIDER=zhipu）
+
+### 背景
+用户提供智谱 API Key 并明确指定模型 `GLM-5.3-Flash`，要求接入。此前系统仅支持
+openai / anthropic / deepseek 三种 provider，无智谱。
+
+### 已完成
+- `llm.py`：`_SUPPORTED_PROVIDERS` 加入 `"zhipu"`；`get_llm` 新增 `zhipu` 分支
+  （OpenAI 兼容，`base_url` 默认 `https://open.bigmodel.cn/api/paas/v4`，模型默认
+  `GLM-5.3-Flash`），与 deepseek 同构、零新增依赖。
+- `apps/withlanggraph/.env`（不入库）：加 `ZHIPU_API_KEY` / `ZHIPU_BASE_URL` /
+  `ZHIPU_MODEL=GLM-5.3-Flash`，并把 `LLM_PROVIDER` 设为 `zhipu`。
+- 根 `.env.example`：补 `ZHIPU_API_KEY=` / `ZHIPU_MODEL=` / `ZHIPU_BASE_URL=` 键名（R9，取值留空）。
+- `tests/test_llm.py`：新增 3 项 zhipu 用例（用配置模型 / 缺省默认 model+base_url / 缺 key 报错）。
+
+### 实测验证
+- `ruff check` 通过；`test_llm.py` 21 项全绿。
+- 用真实 key 调用 `open.bigmodel.cn/api/paas/v4/chat/completions`：HTTP 200，服务端归一模型名为
+  `glm-5.3-flash`，文本返回正常（`finish_reason=length`，输出正常）。
+
+### 待办 / 注意
+- **生产 gacore 进程需重启才生效**：`.env` 在进程启动时读取，当前运行中的服务仍是
+  deepseek，重启后才会切到智谱。切回 deepseek 只需把 `.env` 的 `LLM_PROVIDER` 改回即可。

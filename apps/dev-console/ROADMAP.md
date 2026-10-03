@@ -92,3 +92,26 @@
 - [ ] 补基础测试（进程探测纯函数部分）
 - [ ] services.json 模板化（去掉本机绝对路径）
 - [ ] Windows 服务化（nssm 或 Task Scheduler 常驻）
+
+### 2026-09-29 — langtrack 补 frontend：其 dashboard 已有可开页面
+
+**背景**：2026-09-12 那条记录当时写「langtrack（纯上报 API）无页面不填」——彼时确无页面。此后 langtrack 演进出了 Web 仪表盘（`gacore/langTrack/dashboard.py` + `server.py` 的 `GET /dashboard` 路由），「打开」按钮对 langtrack 变得有意义：一点即开 `http://127.0.0.1:8000/dashboard` 查看每日 app 采集质量（来源覆盖卡）。
+
+**已完成**：
+- `services.json`：langtrack 服务补 `"frontend": "http://127.0.0.1:8000/dashboard"`（位于 `notes` 之后，与其余服务格式一致）
+- 运行机制零改动：`server.py::_serve_status` 本就透传 `frontend`，`public/index.html` 本就按 `frontend` + running 显示可点的「打开」按钮——只差数据
+
+**实测验证**：
+- `services.json` JSON 解析合法（用 `json.load` 校验通过）
+- 重启 dev-console（`start.bat`，杀旧 `server.py` PID 25184 → 启新实例）后 `GET /api/status`（注意**不带 `?token` query**，否则 `self.path` 变成 `/api/status?...` 匹配 404）返回 `langtrack.frontend = http://127.0.0.1:8000/dashboard`、`running=True`，`ports_open` 健康
+- 前端逻辑（index.html line 248-253）确认：有 `frontend` 且非 busy 且 running 时「打开」按钮显示可点
+
+**偏差说明**：
+- 沿用既有约定：`frontend` 不进配置面板可编辑集（`EDITABLE_FIELDS` 不含），仅 `services.json` 模板声明；端口改动需手动同步
+- gacore（无 HTTP 端口，仅命令行特征判定存活）/py-wei（`--no-dashboard` 纯采集）仍**不填** frontend，合理
+
+**待办更新**：
+- [x] langtrack 服务「打开」按钮直达数据看板（2026-09-29）
+- [ ] 补基础测试（进程探测纯函数部分）
+- [ ] services.json 模板化（去掉本机绝对路径）
+- [ ] Windows 服务化（nssm 或 Task Scheduler 常驻）

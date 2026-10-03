@@ -28,6 +28,11 @@
   → 重新打开时 GET /api/reviews/<fileKey> 拉回服务端权威数据
 ```
 
+**评论锚点与 LLM 修复提示**：
+- 锚点格式统一为「`节点 符号ID（行 N）`」「`容器 符号ID（行 N）`」或「`连线 源码行原文（行 N）`」。符号 ID 与行号由前端 `parseSymbols()` 对 .mmd 源码逐行解析得出（节点/子图定义行、带 label 的连线行）；**不再使用 mermaid 渲染后的 SVG DOM id**（形如 `flowchart-RC-2`，对定位源码无意义）。连线锚点按 label 归一化匹配（忽略 `<br/>`、引号与空白），故点击边标签能命中源码行。
+- 「一键复制 LLM 修复提示词」导出时会把历史遗留旧锚点（DOM id / 纯 label）归一化为「符号+行号」，每条意见附**源码行原文**；提示词要求 LLM 区分理解性疑问（先答机制，再仅改该处 label 文案）与明确改图要求，未被点名处一律保持原样。
+- 导出提示词的解析/归一化逻辑验证：`tests/check_prompt_logic.js`（`node tests/check_prompt_logic.js`），对真实 .mmd 断言符号→行号映射与导出格式。
+
 <details>
 <summary>查看/评审时序图（mermaid）</summary>
 

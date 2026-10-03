@@ -8,6 +8,27 @@
 
 ## 执行记录
 
+### 2026-09-13 · 修复「一键复制 LLM 修复提示词」定位失效（DOM id 当锚点）
+
+**背景**：用户拿 viewer 导出的 LLM 修复提示词去修 `apps/withlanggraph/docs/architecture-flow.mmd` 完全不起作用。导出的 loc 形如 `节点 flowchart-RC-2（proactive / cli / rerun）`——`flowchart-RC-2` 是 mermaid 渲染后的 SVG DOM id，源码里根本搜不到，LLM 无法定位；边锚点更是只有 `连线 edge label（edge label）`（当时边标签文本提取失败）。
+
+**根因**：`nodeCommentSym()` 依赖显示文本反查 `currentNodeMap`，未命中即回退 `nodeEl.id`（DOM id）；且整套锚点无行号概念，导出提示词对"改哪一行"没有任何约束力。
+
+**已完成**（`viewer.html`，纯前端）：
+- `parseSymbols()` 新增逐行解析：`currentSymLine`（节点/子图符号 → 1 起行号）、`currentLines`（原文行）、`currentEdgeLines`（归一化 label → {行号, 源码行}）；新增 `normKey()`（剥 `<br/>`/引号/空白，SVG textContent 拼接 `<br/>` 不留空格也能对上）
+- `symFromDomId()`：从 DOM id `flowchart-<SYM>-<N>` 反解真实源码符号
+- 锚点全面改版：`节点 RC（行 11）` / `容器 MAIN（行 14）` / `连线 <源码行原文>（行 21）`；`edgeLabelSym()` 加 textContent 兜底修复边标签提取失败
+- `symNodeId()` 归一化旧锚点（`flowchart-RC-2` → `RC`），角标查找加 `flowchart-` 前缀匹配，老评论角标与分组不破
+- `buildLlmPrompt()` 重写：导出时 `normSymForExport()` 把**历史遗留旧锚点也归一**为「符号+行号」；每条意见附源码行原文；提示词明确区分理解性疑问（先答机制，再只改该处 label 文案）与明确改图要求，未被点名处保持原样
+
+**实测验证**：新增 `tests/check_prompt_logic.js`（node 直跑，逻辑与 viewer.html 逐字一致）：对真实 withlanggraph architecture-flow.mmd + 用户实际导出的 6 条旧格式评论，断言 13 项全过——符号行号（RC→11/SC→9/MMX→30/FB→70/MAIN→14/FLOW→17）、边 label 反查（WT-->PR→行 21、日报正文→行 94）、6 条旧评论导出后 loc 全部变成真符号+行号+源码行。
+
+**偏差说明**：无接口/模块/数据流变化（纯前端内部实现），架构图无需改；tech 文档「评论锚点与 LLM 修复提示」节已同步。已知遗留：历史坏锚点 `连线 edge label（edge label）`（无 label 可回查）导出时保持原样，靠意见文本关键词定位，新评论不再产生此情况。
+
+**待办更新**：
+- [x] 一键复制 LLM 提示词：loc 全部为真实源码符号+行号（含历史旧评论归一）
+- [ ] 手机/浏览器实测：新点节点与边标签写评论 → 锚点带行号；再点一键复制验证格式
+
 ### 2026-09-13 · 修复「点有建议的节点侧栏不展示建议」（符号匹配 bug）
 
 **背景**：上一轮改动「点有建议的节点直接展示右侧栏建议」在真机（含无痕）上不生效——点击节点后右侧栏仍显示「这个位置还没有评论」，且左下角仍弹写批注框。角标数字能正常显示在节点上，但侧栏定位不到。

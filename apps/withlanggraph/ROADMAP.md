@@ -798,3 +798,65 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 - [x] 步骤3：vector sync 失败记入 `recall.jsonl`（`event:"sync_failure"`），消除静默降级盲区。
 - [ ] 基于 `sync_failure` 事件做阈值告警 / 统计（如"缺 vector extra 半天内 N 次"）= 步骤3 延展。
 - [ ] 步骤2：情景事件触发式实时补写（`sync_episodic_daily` 由纯调度改为判定当刻触发，需 review-loop）。
+
+## [2026-09-29] langTrack 历史日"无数据"假阴性 → 补建兜底
+
+**背景**：2026-09-28 定时日报 + 09-29 凌晨补跑，两份日报的〔手机使用·langTrack〕均报"该日无 langTrack 手机数据"。排查发现手机数据**从未丢失**（`daily_stats` 9-28 行 `created_at=2026-09-28`、`total_screen_ms≈12.78M`≈3.55h；手动调 `langTrack_stats("2026-09-28")` 稳定返回 `available=true`、哔哩哔哩 1.4h/微信/抖音）。根因方向：ETL 全量/增量重建窗口 + 读取时序，使日报构建当时读到 `available=False`，把"该日未来得及汇总"误判成"无数据"。
+
+**已完成**：
+- `tools/langTrack_tools.py`：
+  - `_ensure_etl` 捕获 `subprocess` 退出码，非 0 时记 warning（原静默吞返回 True）。
+  - 新增 `_has_day_events(conn, day, device_id)`：按设备/日窗口（ts 毫秒，东八区当日边界）探测 events 表当日是否确有原始事件。
+  - `langTrack_stats` 读取后若 `available=False` 且非多设备歧义，先探测当日是否有事件；有 → 触发 `_ensure_etl()` 重建并重读，避免假阴性；无 → 保持如实 `available=False`（真空日不被掩盖）。
+- 文档：`docs/langTrack-tech.md` §5.1 补历史日兜底说明（R5 同步）。
+
+**实测验证**：
+- `langTrack_stats` 语义：9-28 `available=true`（屏幕3.55h/哔哩哔哩/微信）；9-29(今日) `available=true`（0.37h 实时）；2025-01-01 真空日 `available=false`（不误触发补建）。
+- `_has_day_events`：9-28=device True、2025-01-01=False、设备限定匹配主设备。
+- `uv run pytest apps/withlanggraph/tests -k "langtrack or langTrack or fact_card or daily"` → **527 passed**；`uv run ruff check` 通过。
+
+**偏差说明**：
+- 未复现日报当时的确切并发场景（现库已健康），兜底为防御性修复；若再现假阴性，需进一步确证 ETL subprocess 与读取的时序细节。
+- `_ensure_etl` 仍为全量 ETL（幂等、几秒），未改 incremental 以避免历史日漏重建。
+
+**待办更新**：
+- [ ] 观察后续 2-3 天日报，确认手机数据不再出现假阴性。
+- [ ] 关联：B 站历史源主线（`bili` CLI 未登录）待 `bili login` 后验证。
+
+## [2026-09-30] 日报重复投递 + 格式不一致（模型自调 send_email）修复
+
+**背景**：2026-09-30 凌晨补跑 9-29 日报，用户收到**两封**邮件：
+1. 早封（约 00:24）：模型在 `send_email` 因 SMTP_TO 未配置失败后**自主排查并自行显式传 `to` 发信**——主题自拟「日报 09-29 | …」、正文**未打节锚点**；
+2. 晚封（约 00:26）：系统 `_deliver_email` 标准投递——主题 `[gacore] daily-report · 2026-09-29（补跑）`、正文已 `stamp_report_bullets` 打锚点。
+
+两封格式不一致（用户截图确认第一封格式有问题）且造成重复投递。根因有二：① `.env` 的 `SMTP_TO` 一直未开启，导致系统投递实体第一次发信缺失默认收件人；② 日报 prompt 未约束模型投递职责，模型在发信失败后自行补发。
+
+**已完成**：
+- `config/schedule.json` 日报 prompt 的【最终回复】节新增硬约束：「投递由系统负责，只产出正文，禁止自行调用 send_email 发送日报（系统会统一打锚点并以标准主题投递，你发信会造成重复投递与格式不一致）」。
+- `.env` 开启 `SMTP_TO=1773465183@qq.com`（默认收件人；`.env.example` 键早已存在，R9 合规，未改）。
+
+**实测验证**：
+- `schedule.json` `ConvertFrom-Json` 校验通过（JSON 合法）。
+- 意义：此后发信失败不再触发模型自主补发；收件人解析链路 `job.email_to → SMTP_TO → SMTP_USER` 首跳即命中。
+
+**偏差说明**：
+- 模型自主发信是 LLM 副产物，prompt 约束为软约束（不能 100% 保证模型遵守），真正兜底是 SMTP_TO 提前配置消除失败诱因；两者互补。
+- dev-console 需重启加载新配置（services.json 改动），gacore 需重启令 `.env` 生效——均已在 dev-console 操作记录覆盖。
+
+**待办更新**：
+- [ ] 观察今晚 23:50 例行日报，确认只投递一封、主题与锚点格式正确。
+- [ ] 若再出现模型自行发信，考虑在工具层面对日报/bypass 场景禁用 `send_email`（超出当前 prompt 层的马力）。
+
+## [2026-09-30] dev-console langtrack 卡片「打开」按钮
+
+**背景**：langtrack 已有 dashboard 前端（`GET /dashboard`，采集覆盖卡），但 `services.json` 未配 `frontend` 字段，dev-console 界面上 langtrack 卡片无「打开」入口。
+
+**已完成**：
+- `apps/dev-console/services.json` 的 `langtrack` 服务补 `"frontend": "http://127.0.0.1:8000/dashboard"`。
+- 机制零改动（dev-console 早已支持 `frontend` 字段 + running 时显示「打开」按钮），仅补齐 langtrack 数据。
+
+**实测验证**：
+- `services.json` JSON 解析合法；重启 dev-console 后 `GET /api/status` 返回 `langtrack.frontend=http://127.0.0.1:8000/dashboard`、`running=True`，按钮显示且可点。
+- gacore（无 HTTP 端口）与 py-wei（`--no-dashboard`）未填 `frontend`，避免出现不可点击的按钮。
+
+**待办更新**：无。

@@ -1,4 +1,43 @@
-flowchart TD
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>withlanggraph architecture-flow 渲染预览</title>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"></script>
+<style>
+  body { margin: 0; padding: 0; background: #f5f6f8; font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  .toolbar { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 12px;
+    padding: 10px 16px; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+  .toolbar h1 { font-size: 15px; font-weight: 600; margin: 0; color: #2D3142; }
+  .toolbar .hint { font-size: 12px; color: #888; }
+  .zoom-wrap { margin-left: auto; display: flex; gap: 6px; }
+  .zoom-wrap button { border: 1px solid #ccc; background: #fff; border-radius: 6px; padding: 4px 12px;
+    cursor: pointer; font-size: 13px; }
+  .zoom-wrap button:hover { background: #eef1f5; }
+  #canvas { overflow: auto; padding: 24px; }
+  #mermaid-container { background: #fff; border-radius: 10px; box-shadow: 0 2px 12px rgba(0,0,0,.08);
+    padding: 24px; width: max-content; min-width: 60%; margin: 0 auto; transform-origin: 0 0; }
+  #error { display: none; margin: 24px auto; max-width: 900px; background: #fdecea; color: #a00;
+    border: 1px solid #f5c6c0; border-radius: 8px; padding: 16px; white-space: pre-wrap;
+    font-family: Consolas, monospace; font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="toolbar">
+  <h1>withlanggraph architecture-flow 渲染预览</h1>
+  <span class="hint">修正后的 .mmd 实时渲染</span>
+  <div class="zoom-wrap">
+    <button onclick="zoom(-10)">−</button>
+    <span id="zoom-label">100%</span>
+    <button onclick="zoom(10)">+</button>
+  </div>
+</div>
+<div id="error"></div>
+<div id="canvas"><div id="mermaid-container"></div></div>
+
+<script>
+const MMD_SOURCE = `flowchart TD
     %% =====================================================================
     %% withlanggraph 核心对话流程 (codemap 走查, 依据 apps/withlanggraph/src/gacore/graph.py)
     %% 焦点: 主图状态机 → process(create_agent) → 记忆维护 的完整流水, 每条边标真实判据
@@ -8,19 +47,19 @@ flowchart TD
         direction LR
         SC["scheduler.run_job<br/>配置: config/schedule.json<br/>(name/schedule/type/window/<br/>cooldown_minutes/deliver_to)<br/>触发: 每30s轮询一次<br/>next_run_time 支持 每日固定 HH:MM<br/>或 every N<d/h/m> 间隔"]
         QQ["qq 消息/反馈"]
-        RC["proactive=定时主动推送:<br/>scheduler 每30s轮询 schedule.json 中<br/>type==proactive 的 job<br/>(proactive_due 过 window+cooldown)→入池<br/>cli=交互式 REPL: python -m gacore<br/>rerun=补跑: python -m gacore.rerun --day"]
+        RC["proactive=定时主动推送:<br/>scheduler 每30s轮询 schedule.json 中<br/>type==proactive 的 job<br/>(proactive_due 过 window+cooldown)入池<br/>cli=交互式 REPL: python -m gacore<br/>rerun=补跑: python -m gacore.rerun --day"]
     end
 
     subgraph MAIN["② 主图状态机  graph.build_graph() (核心):<br/>5 个核心节点串联对话流水, 每节点独立职责"]
         direction TB
 
-        subgraph FLOW["主图五节点流水 (classify → wait → process → maintain → cleanup)"]
+        subgraph FLOW["主图五节点流水 (classify | wait | process | maintain | cleanup)"]
             S(("START")) --> CL["① classify_message<br/>解析最近 HumanMessage<br/>提取 [IMAGE:] 标记<br/>累积到 pending_images"]
             CL -->|"pending_images 且有文字<br/>或无图无文字"| PR
-            CL -->|"pending_images 且无文字"| WT["② wait_for_text<br/>interrupt(): 等用户文字<br/>Command(resume=text)->补 HumanMessage<br/>Command(update)->收更多图, 回环"]
-            WT -->|"route_after_wait: 恒进 process<br/>(返回值固定为 'process', 无分支)"| PR
+            CL -->|"pending_images 且无文字"| WT["② wait_for_text<br/>interrupt(): 等用户文字<br/>Command(resume=text)补 HumanMessage<br/>Command(update)收更多图, 回环"]
+            WT -->|"route_after_wait: 恒进 process<br/>(返回值固定为 process, 无分支)"| PR
 
-            subgraph PR["③ process = create_agent 子图<br/>(gacore_core)·核心智能"]
+            subgraph PR["③ process = create_agent 子图<br/>(gacore_core)核心智能"]
                 direction LR
                 MD["model 节点<br/>调用 LLM"]
                 TN[("tool 节点<br/>27 个工具轮询")]
@@ -28,24 +67,24 @@ flowchart TD
             end
 
             PR --> MMX["④ memory_maintain<br/>process 回答后每次自动触发:<br/>CombinedTrigger=keyword 门命中<br/>OR vector 语义召回<br/>(k=3, threshold=0.45)<br/>任一命中才进 LLM judge"]
-            MMX --> CU["⑤ cleanup_images<br/>去 [IMAGE:]标记·清 pending_images<br/>清 rollover_context/output_mode"]
+            MMX --> CU["⑤ cleanup_images<br/>去 [IMAGE:]标记清 pending_images<br/>清 rollover_context/output_mode"]
         end
 
         subgraph SIDE["支撑模块 (主图依赖, 非状态机节点)"]
             direction LR
             ST["state.py GAState<br/>working/轮次/exit_reason"]
-            MDW["middleware 链<br/>GAPrompt → GATurnLogic →<br/>ModelRetry(langchain)"]
+            MDW["middleware 链<br/>GAPrompt | GATurnLogic |<br/>ModelRetry(langchain)"]
         end
     end
 
     subgraph MM["③ 记忆维护  (memory_maintain 内部流程)"]
         direction TB
         TR["trigger<br/>CombinedTrigger<br/>(keyword 门 OR 语义召回)"]
-        TR -->|"未触发 → 返回 no-op<br/>(不打断对话)"| TRN["no-op"]
+        TR -->|"未触发 | 返回 no-op<br/>(不打断对话)"| TRN["no-op"]
         TR -->|"已触发"| JD["judge (LLM)<br/>判定 MERGE / NEW / NOOP"]
-        JD --> AP["apply + persist_entry<br/>唯一写入口<br/>写 global_mem + facts +<br/>向量同步 pgvector<br/>(全量 sync_portrait +<br/>当次增量 sync_line;<br/>失败→recall.jsonl)"]
+        JD --> AP["apply + persist_entry<br/>唯一写入口<br/>写 global_mem + facts +<br/>向量同步 pgvector<br/>(全量 sync_portrait +<br/>当次增量 sync_line;<br/>失败recall.jsonl)"]
         JD -->|"NOOP"| TRN
-        AP --> AU["record_audit<br/>→ memory_audit"]
+        AP --> AU["record_audit<br/>到 memory_audit"]
     end
 
     subgraph TOOLS["工具集 tools/ (process 的 tool 节点可调用, 按职能归并)"]
@@ -63,11 +102,11 @@ flowchart TD
         IG["POST /ingest"]
         RW["原始层 events"]
         ET["ETL 事实层"]
-        OU["读方出口<br/>fact_card·report·dashboard·qq_push"]
+        OU["读方出口<br/>fact_card|report|dashboard|qq_push"]
     end
 
     subgraph OUT["④ 退出/投递"]
-        FB["反馈闭环 feedback.py<br/>触发=QQ 消息经 feedback_route()<br/>按指令词分派:<br/>订正/补充→edit · 确认/生效→confirm<br/>确认重发/重发→redeliver"]
+        FB["反馈闭环 feedback.py<br/>触发=QQ 消息经 feedback_route()<br/>按指令词分派:<br/>订正/补充edit | 确认/生效confirm<br/>确认重发/重发redeliver"]
         LG["jsonl_logger<br/>+ llm_request_log"]
     end
 
@@ -95,15 +134,6 @@ flowchart TD
 
     IG --> RW --> ET --> OU
 
-    %% ============================================================
-    %% 设计规范 (参照 diagram-design 编辑级原则)
-    %% 1. 强调色只给 1-2 个焦点: ① process 的 reAct 循环(核心智能 focus)
-    %%    ② 反馈闭环 FB(边界/回环 bnd, 虚线强调). 其余一律中性语义.
-    %% 2. 模块区分 = 容器淡底色 + 节点白底同色描边; 不做满屏彩色填充.
-    %% 3. 节点分档: 状态/存储=淡墨灰(state), 异步/写回=虚线, 焦点=强调橙.
-    %%    色系: 入口-蓝 | 主图-绿 | 记忆-紫 | 工具-橙 | langTrack-青 | 出口-粉
-    %% ============================================================
-
     %% --- 节点语义 classDef (模块色一律白底同色描边, 低干扰) ---
     classDef entry fill:#ffffff,stroke:#1E88E5,color:#0D47A1
     classDef main  fill:#ffffff,stroke:#66BB6A,color:#1B5E20
@@ -116,7 +146,6 @@ flowchart TD
     classDef focus fill:#FFF3E0,stroke:#EB6C36,stroke-width:2.5px,color:#B33900
     classDef bnd   fill:#ffffff,stroke:#EB6C36,stroke-width:1.5px,stroke-dasharray:5 4,color:#B33900
 
-    %% --- 容器底色 (模块分界, 低饱和 background) ---
     style ENTRY fill:#EBF3FB,stroke:#1E88E5,stroke-width:1.5px,color:#0D47A1
     style MAIN  fill:#F6FAF5,stroke:#43A047,stroke-width:1.5px,color:#1B5E20
     style FLOW  fill:#EEF7ED,stroke:#66BB6A,color:#1B5E20
@@ -127,7 +156,6 @@ flowchart TD
     style LANG  fill:#F1FAFC,stroke:#00ACC1,stroke-width:1.5px,color:#006064
     style OUT   fill:#FEF5F7,stroke:#EC407A,stroke-width:1.5px,color:#880E4F
 
-    %% --- 节点归组 (按模块; 焦点/边界/状态单独强调) ---
     class SC,QQ,RC entry
     class S,CL,WT,MMX,CU main
     class MD,TN focus
@@ -137,4 +165,37 @@ flowchart TD
     class T1,T2,T3,T4,T5,T6 tools
     class IG,RW,ET,OU lang
     class LG out
-    class FB bnd
+    class FB bnd`;
+
+let zoomLevel = 100;
+function zoom(delta) {
+  zoomLevel = Math.max(30, Math.min(300, zoomLevel + delta));
+  document.getElementById('mermaid-container').style.transform = 'scale(' + zoomLevel/100 + ')';
+  document.getElementById('zoom-label').textContent = zoomLevel + '%';
+}
+
+async function render() {
+  mermaid.initialize({
+    startOnLoad: false,
+    securityLevel: 'loose',
+    theme: 'base',
+    themeVariables: {
+      fontFamily: '-apple-system, "Segoe UI", "Microsoft YaHei", sans-serif',
+      fontSize: '14px',
+    },
+    maxTextSize: 500000,
+    flowchart: { nodeSpacing: 40, rankSpacing: 55, htmlLabels: true, curve: 'basis' }
+  });
+  try {
+    const { svg } = await mermaid.render('arch-flow', MMD_SOURCE);
+    document.getElementById('mermaid-container').innerHTML = svg;
+  } catch (e) {
+    const err = document.getElementById('error');
+    err.style.display = 'block';
+    err.textContent = '渲染失败: ' + (e && e.message ? e.message : e);
+  }
+}
+render();
+</script>
+</body>
+</html>
