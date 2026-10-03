@@ -1,6 +1,6 @@
-# 日报链路重设计 v3（设计稿 v0.6，评审中）
+# 日报链路重设计 v3（设计稿 v0.7，评审中）
 
-> 评审进展：Q2~Q6 已定稿（2026-10-03，Q2=A 独立 review_server、Q3=A per-day JSON、Q4=A 偏好即时生效、Q5=A 双入口同存储、Q6=A 订正不写回 events）。**Q1 凭 C2 实测证据改为推荐 A′（删除信息包 langTrack 块、细维度并入 fact_card compact），待确认。C4/C6 v0.4：三级修复阶梯，LLM 最小修订为默认路径，整体重生成需显式确认。C1 v0.5→v0.6：源观测两级全落盘——进包文本（处理过）与完整取数详情（未挑选未压缩）并列可查；L3 原始数据不复制、指向源头系统。**
+> 评审进展：Q2~Q6 已定稿（2026-10-03，Q2=A 独立 review_server、Q3=A per-day JSON、Q4=A 偏好即时生效、Q5=A 双入口同存储、Q6=A 订正不写回 events）。**Q1 凭 C2 实测证据改为推荐 A′（删除信息包 langTrack 块、细维度并入 fact_card compact），待确认。C4/C6 v0.4：三级修复阶梯，LLM 最小修订为默认路径，整体重生成需显式确认。C1 v0.5→v0.7：从 L3 原始数据到 LLM 最终输入的每一层变换都可观测——详情文件三节（完整取数详情/渲染文本/实际进包）+ 逐层归因表；L0 复用现成的 scheduled 存档与 llm_requests.jsonl（不复制）；事实卡 compact_omitted 透传展示。**
 > C1 按评审意见改为"注册表内聚接口 + dashboard 可视化"：新增源零改动获得监控。
 > 每个改动项固定五段：**现状（代码事实）→ 改成什么样 → 怎么改 → 为什么 → 怎么观测**。
 > 谱系外的两个数据前提（不属本设计，但决定其上限）：手机上报 9-22 起停止（langTrack-roadmap 待办）、bili CLI 未登录（ROADMAP 待办）。
@@ -147,24 +147,42 @@ flowchart TD
   - 边界说明：`detail_body` = **当日取数范围内的全部**（builder 查询本身的时间窗/范围决定了边界，不会变出范围外的数据）；仍不含 L3 原始数据。
 - **落盘（双文件）**：`scheduler.run_job` daily job 结束时——
   - `data/logs/info_pack_health.jsonl`（元数据行）：`{ts, date, job, trigger, total_chars, budget, correction_chars, sources:[{key, status, chars, full_chars, detail_chars, note}]}`——小行、可 grep；
-  - `data/logs/pack_detail/{date}/{key}.md`（详情文件）：两节——`## 进包文本`（截断后实际进包的块文本）+ `## 完整取数详情`（detail_body 全文）。保留策略默认 90 天（重日可能 100-300KB，90 天上限约 30MB，可调）。
+  - `data/logs/pack_detail/{date}/{key}.md`（详情文件，**三节**）：`## 完整取数详情`（detail_body 全文，未挑选未压缩）→ `## 渲染文本`（挑选/压缩后、截断前的 pack_body）→ `## 实际进包`（经 `_cap_lines`/预算熔断后的块文本；整块被丢弃时标"未进包"）。保留策略默认 90 天（重日可能 100-300KB，90 天上限约 30MB，可调）。
+- **L0 最终 LLM 输入：不复制，外链现有出口（单一真源）**——
+  - `logs/scheduled/{job}_{ts}.md`：**现成**（2026-09-04 建），含 System Prompt（重构）+ User Prompt（拼装后）+ Reply 全节，即"到底用什么生成了日报"的排查档案；
+  - `logs/{date}/llm_requests.jsonl`（`llm_request_log`）：每次真实模型调用的完整 payload（SYSTEM/HUMAN/AI/TOOL + 工具定义 + 参数，密钥掩码）——真值兜底。
+  - 单源详情页加"查看最终 LLM 输入"外链直达该日存档 md；不第三份拷贝。
 - **dashboard**：review_server（C6，:8010）两个视图——
   - `GET /health` 总览：最近 14 天 × 源的矩阵，色块（绿 ok / 黄 empty / 红 failed / 灰 missing_data）+ chars + note，**一眼可见每个源的数据质量**；
-  - `GET /health/source/{date}/{key}` 单源详情：直接渲染详情文件——**进包文本**（模型看到的）与**完整取数详情**（未处理的全部数据）并列，加截断/挑选对比（chars vs full_chars vs detail_chars；被预算熔断整块丢弃的显示"未进包"）。
+  - `GET /health/source/{date}/{key}` 单源详情：渲染详情文件三节（完整取数详情 / 渲染文本 / 实际进包）+ 三级字符对比（detail_chars vs full_chars vs chars）+ "查看最终 LLM 输入"外链（该日 scheduled 存档 md 与 llm_requests.jsonl）。
+
+**逐层归因表（发现"某信息没进日报"时的下钻手册）**——以 B站源为例，langTrack 源同构：
+
+| 层 | 是什么 | 在哪看 | 该层可能丢失什么 |
+|---|--------|--------|-----------------|
+| L3 原始 | bili 服务端当日观看记录 | 源头系统（bili CLI 登录后查；langTrack 走 events 表） | 采集端没上报 / CLI 未登录 = **源头缺失** |
+| L2b 完整取数详情 | 查询返回的全部结果渲染（每一笔观看） | pack_detail §完整取数详情 | 查询窗口错（日期/设备/范围）= **取数缺失** |
+| L1b 渲染文本 | top-N 挑选、压缩后的块（截断前） | pack_detail §渲染文本 | 挑选规则漏了重要条目 = **挑选失真** |
+| L1a 实际进包 | 再经 `_cap_lines`/预算熔断 | pack_detail §实际进包 | 截断/整块丢弃 = **预算牺牲** |
+| L0 最终 LLM 输入 | user message（订正+偏好+信息包+job.prompt）+ system prompt（事实卡 compact + 近 2 日笔记 + rollover + middleware 注入） | scheduled 存档 md + llm_requests.jsonl（现成） | 拼装顺序/注入失败 = **拼装缺失** |
+| 产出对照 | 模型对每源的消费情况 | 日报正文 vs C7 消费规则 | 模型没用上 = **消费失真**（prompt 层问题） |
+
+- **事实卡支线**（system prompt 侧的 langTrack）：events → ETL → `fact_card` 聚合 → compact 7 section 600 字预算取舍。出口：langTrack dashboard（`outlet="dashboard"`，detail=full 可看）+ **compact_omitted 展示（v0.7 补）**——fact_card 已记录因预算被省略的 section（`compact_omitted`，`_pack_compact`），随 langTrack 源详情一并展示，否则"预算悄悄省掉睡眠 section"这类事不可见。
 - **边界（L3 原始数据不落盘）**：更底层的原始数据（events 表行、Edge 浏览器库记录、bili API 原始 JSON）不在本层复制存储——源头系统各自可查（langTrack dashboard 已有事实卡审查出口 `outlet="dashboard"`），复制会造成双份失真（R5 精神）。二期可选：单源详情页加"重取"按钮实时调 builder（需带历史日时效性警告，如 bili 滑动窗口取不到当天）。
 
 **怎么改**
 1. daily_info_pack.py：定义 SourceSpec 与 SOURCES 注册表（现有 10 源逐条迁入，删除平行 caps dict）；**builder 契约升级三元组 `(title, pack_body, detail_body)`**（10 个 builder 一次性改，detail=完整取数结果渲染，随注册表迁移同提交完成）；新增 `classify_body`、`build_info_pack_report`（SourceStat 含 chars/full_chars/detail_chars）；`build_info_pack` 改薄包装，对外返回值一字不变。
-2. scheduler.py：`_write_pack_health()` 写元数据 jsonl + `_write_pack_detail()` 写 `pack_detail/{date}/{key}.md`（均全 try/except）。
-3. 新测试 `tests/test_source_registry.py`（结构性，注册表驱动）：遍历 SOURCES 断言——每个 key 唯一、cap>0、**每个 builder 的失败输出遵循 sentinel 约定**（mock 失败路径后以 `- 该源失败：` 开头），防新增源破坏分类；`test_info_pack_report.py` 覆盖 status 分类、jsonl 行、**detail_body 为完整取数结果（如 bili mock 10 条记录时 detail 含全部 10 条，pack_body 仅 top N）**。
+2. scheduler.py：`_write_pack_health()` 写元数据 jsonl + `_write_pack_detail()` 写 `pack_detail/{date}/{key}.md` 三节详情（均全 try/except）；L0 复用现有 `_write_output` 存档与 `llm_requests.jsonl`，零新建。
+3. fact_card.py：`compact_omitted` 随 langTrack 源详情输出（数据已在 card 中，仅透传展示）。
+4. 新测试 `tests/test_source_registry.py`（结构性，注册表驱动）：遍历 SOURCES 断言——每个 key 唯一、cap>0、**每个 builder 的失败输出遵循 sentinel 约定**（mock 失败路径后以 `- 该源失败：` 开头），防新增源破坏分类；`test_info_pack_report.py` 覆盖 status 分类、jsonl 行、**detail_body 为完整取数结果（如 bili mock 10 条记录时 detail 含全部 10 条，pack_body 仅 top N）**。
 
 **为什么**
 "信息没用上"（模型问题）与"根本没进包"（数据问题）目前不可区分；且观测若不是注册表驱动，每加一个源就要同步改监控，必然腐化（本次评审明确要求内聚）。preview 让 dashboard 从"状态灯"升级为"可回看模型输入"。
 
 **怎么观测**
 - 自动：test_source_registry（注册表遍历，天然覆盖未来新增源）+ test_info_pack_report。
-- 运行时：`type data\logs\info_pack_health.jsonl | tail -1` 每日一行、10 源齐全且带 body 全文；bili 未登录当日 missing_data 可见。
-- 人工：打开 `http://127.0.0.1:8010/health` 14 天矩阵一眼扫完；**点任一单格进单源详情，核对该源当日完整数据文本**；rerun 一次核对 `trigger=rerun` 行。
+- 运行时：`type data\logs\info_pack_health.jsonl | tail -1` 每日一行、10 源齐全（元数据）；`data\logs\pack_detail\{昨日}\` 下每源一个三节详情文件。
+- 人工：`http://127.0.0.1:8010/health` 14 天矩阵一眼扫完；**归因演练**——发现日报某信息缺失时按逐层归因表下钻（源头→取数→挑选→进包→L0 拼装→消费），定位到唯一一层；rerun 一次核对 `trigger=rerun` 行。
 
 ---
 
@@ -487,7 +505,7 @@ Q4 定即时生效：先跑通闭环，攒批是过度设计；单文件量小�
 ## 验收总标准
 
 1. `uv run --all-packages pytest` 全绿；全量时长不受本设计劣化。
-2. `:8010/health` 总览矩阵一眼可见 14 天 × 每源状态色块 + note；单源详情页**进包文本与完整取数详情并列可查**（挑选/压缩/熔断全部可对比）；jsonl 每日一行、注册表新增源自动入列。
+2. `:8010/health` 总览矩阵一眼可见 14 天 × 每源状态色块 + note；单源详情页三节并列（完整取数详情/渲染文本/实际进包）+ 逐层归因表下钻 + "最终 LLM 输入"外链可达 scheduled 存档与 llm_requests.jsonl；jsonl 每日一行、注册表新增源自动入列。
 3. langTrack 事实在 LLM 输入中只有一个渲染出口（C2 A′）。
 4. 评审页批注 → 默认走 LLM 最小修订：**diff 门禁断言非目标分节逐字不变**，邮件 vN 到达且目标分节体现订正；"整体重生成"需显式确认且走 corrections 注入包首；QQ 端锚点订正行为不回归（C4/C5/C6）。
 5. 连续 3 天日报，ok 源消费覆盖率 100%（正文或归档说明）。
