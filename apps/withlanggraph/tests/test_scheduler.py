@@ -35,6 +35,26 @@ from gacore.scheduler import (
     save_state,
 )
 
+
+@pytest.fixture(autouse=True)
+def _no_real_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
+    """名字带 daily 的 job 会触发两类真实外部资源，unit test 一律拦掉：
+    - build_info_pack：bili CLI 网络请求 + Edge 历史库 + langTrack ETL 子进程
+    - _sync_episodic：加载 100MB bge embedding 模型并写向量表
+    需要真实返回内容的用例自行再覆盖对应 seam。"""
+    monkeypatch.setattr("gacore.daily_info_pack.build_info_pack", lambda day, cfg: "")
+    monkeypatch.setattr("gacore.scheduler._sync_episodic", lambda cfg, for_day: None)
+
+
+def test_daily_job_success_syncs_episodic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """日报类 job 成功后会把当日 daily note 同步进 episodic 向量表（接线不回退）。"""
+    cfg = Config.for_tests(tmp_path)
+    job = Job(name="daily-report", schedule="09:00", prompt="summarize")
+    calls: list[tuple[Config, str | None]] = []
+    monkeypatch.setattr("gacore.scheduler._sync_episodic", lambda cfg_, for_day: calls.append((cfg_, for_day)))
+    run_job(job, cfg, graph_runner=lambda prompt, cfg_, max_turns: "CURRENT_TASK_DONE")
+    assert len(calls) == 1
+
 # ---------- next_run_time: daily HH:MM ----------
 
 

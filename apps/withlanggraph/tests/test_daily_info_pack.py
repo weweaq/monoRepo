@@ -164,6 +164,12 @@ def test_edge_db_locked_whole_pack_not_interrupted(tmp_path, monkeypatch):
         raise sqlite3.OperationalError("database is locked")
 
     monkeypatch.setattr(dip, "_BROWSER_FN", _locked)
+    # 其余真实外部源（bili/ncm=CLI 网络请求、langTrack=ETL 子进程+真实库）一并 mock，
+    # 本测试只验证"单源失败整包降级"的管线行为，不依赖真实机器状态。
+    monkeypatch.setattr(dip, "_BILLI_FN", lambda **k: {"error": "mock", "message": "mock"})
+    monkeypatch.setattr(dip, "_LANGTRACK_FN", lambda day: {"error": "mock", "message": "mock"})
+    monkeypatch.setattr(dip, "_NCM_ME_FN", lambda: {"error": "mock"})
+    monkeypatch.setattr(dip, "_NCM_PLAYLIST_FN", lambda **k: {"error": "mock"})
     pack = dip.build_info_pack("2026-09-02", _cfg(tmp_path))
     assert isinstance(pack, str)
     assert "〔浏览·Edge 域名〕" in pack

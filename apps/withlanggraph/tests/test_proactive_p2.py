@@ -451,6 +451,10 @@ class TestProactiveLogging:
     def test_emotion_considered_logs_concern_due(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         cfg = Config.for_tests(tmp_path)
         monkeypatch.setattr(proactive, "load_known_users", lambda: {"u1": {}})
+        # 不 mock _headless_run 会走到真实 build_graph + LLM 网络调用（慢且不封闭）；
+        # 断言的日志在生成之前打出，fake 结果不影响断言。
+        monkeypatch.setattr(proactive, "_headless_run", _sent_headless([]))
+        monkeypatch.setattr(proactive, "recall_topic", lambda cfg_, uid, now: {"kind": "none", "text": "", "thread_id": ""})
         _seed_entry(
             cfg,
             "u1",
