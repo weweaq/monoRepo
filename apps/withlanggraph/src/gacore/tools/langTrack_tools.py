@@ -75,34 +75,52 @@ def _db_path() -> Path:
 
 
 def _ensure_etl() -> bool:
-
     """ETL 幂等重建事实表（新数据落库后调用，保证读的是最新）。失败不阻塞。"""
+    try:
+        r = subprocess.run(
+            [sys.executable, "-m", "gacore.langTrack.etl"],
+            cwd=str(_root()),
+            capture_output=True,
+            timeout=_ETL_TIMEOUT_SECONDS,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            check=False,
+        )
+        if r.returncode != 0:
+            logger.warning(
+                "langTrack ETL nonzero exit",
+                returncode=r.returncode,
+                stderr=(r.stderr or "")[:500],
+            )
+        return r.returncode == 0
+    except Exception as e:  # noqa: BLE001 - 工具错误路径：返回失败不抛
+        logger.warning("langTrack ETL failed", error_type=type(e).__name__, error=str(e))
+        return False
+
+
+def _has_day_events(conn: sqlite3.Connection, day: str, device_id: str | None) -> bool:
+    """目标日是否有原始事件（事件落库即可，与 daily_stats 是否已汇总无关）。
+
+    用于判定「当日无 daily_stats」是该日真无数据、还是汇总表未来得及重建。
+    事件按 ts 归属当日：ts 为毫秒，day_start/end 由东八区当日边界换算。
+    """
+    import datetime
 
     try:
-
-        subprocess.run(
-
-            [sys.executable, "-m", "gacore.langTrack.etl"],
-
-            cwd=str(_root()),
-
-            capture_output=True,
-
-            timeout=_ETL_TIMEOUT_SECONDS,
-
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-
-            check=False,
-
+        start = datetime.datetime.strptime(day, "%Y-%m-%d").replace(
+            tzinfo=datetime.timezone(datetime.timedelta(hours=8))
         )
-
-        return True
-
-    except Exception as e:  # noqa: BLE001 - 工具错误路径：返回失败不抛
-
-        logger.warning("langTrack ETL failed", error_type=type(e).__name__, error=str(e))
-
+    except ValueError:
         return False
+    start_ms = int(start.timestamp() * 1000)
+    end_ms = start_ms + 86_400_000
+    if device_id is not None:
+        return conn.execute(
+            "SELECT 1 FROM events WHERE device_id=? AND ts>=? AND ts<? LIMIT 1",
+            (device_id, start_ms, end_ms),
+        ).fetchone() is not None
+    return conn.execute(
+        "SELECT 1 FROM events WHERE ts>=? AND ts<? LIMIT 1", (start_ms, end_ms)
+    ).fetchone() is not None
 
 
 
@@ -344,17 +362,39 @@ def langTrack_stats(day: str = "") -> dict:
         return _unavailable(day, "langTrack 数据库不存在")
 
 
-    conn = None
+    def _read() -> dict:
+        _conn = sqlite3.connect(db)
+        try:
+            _conn.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
+            _conn.row_factory = sqlite3.Row
+            return build_fact_card(conn=_conn, day=day, detail="full", outlet="tool")
+        finally:
+            _conn.close()
+
+    def _day_device(card: dict) -> tuple[str | None, bool]:
+        # 用 fact_card 已解析的 device；歧义（多设备未指定）无从单点补建，交由下游降级
+        dev = card.get("device_id") or None
+        ambiguous = bool(card.get("ambiguous_device"))
+        if not dev and not ambiguous:
+            # 单设备 legacy：仍可读 events，用 None 匹配任意设备
+            return dev, False
+        return dev, ambiguous
+
     try:
-        conn = sqlite3.connect(db)
-        # 健康探测：损坏库在此报错（避免把噪音交给 fact_card）
-        conn.execute("SELECT name FROM sqlite_master LIMIT 1").fetchone()
-        conn.row_factory = sqlite3.Row
-        card = build_fact_card(conn=conn, day=day, detail="full", outlet="tool")
+        card = _read()
+        if not card.get("available") and not card.get("ambiguous_device"):
+            dev, ambiguous = _day_device(card)
+            # 当日确有原始事件但 daily_stats 汇总缺行（重建窗口/未及时汇总）
+            # → 触发一次按日重建并重读，避免把「未来得及汇总」误判成「无数据」。
+            probe = sqlite3.connect(db)
+            try:
+                has_events = _has_day_events(probe, day, dev)
+            finally:
+                probe.close()
+            if has_events:
+                _ensure_etl()
+                card = _read()
     except Exception as e:  # noqa: BLE001 - 工具错误路径：返回失败不抛
         return _unavailable(day, f"读取失败: {e}")
-    finally:
-        if conn is not None:
-            conn.close()
 
     return _map_card_to_stats(card, day)
