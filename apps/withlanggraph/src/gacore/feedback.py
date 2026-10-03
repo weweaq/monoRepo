@@ -14,23 +14,32 @@ State flow::
     new(user_text) -> parse_feedback -> pending draft
     confirm(draft_id) -> apply_feedback -> correct note + re-deliver + mark applied
 
-Pure and dependency-light by design: no LLM, no async. Every function takes the Config
-(and, where relevant, the platform tz) explicitly so tests can run against temporary
-state directories. Callers (QQ frontend) wrap invocation in failure tolerance.
+Semantic rewrites that a deterministic patch cannot express go through the C4 repair
+ladder: record_correction logs the correction (data/feedback/corrections/{date}.json or
+preferences.json — the audit base shared by ladders ①②③) and revise_report_llm minimally
+revises the delivered text behind a hard diff gate (non-target sections verbatim-identical).
+
+Pure and dependency-light by design: no async, and exactly one guarded LLM touchpoint —
+the zero-tool minimal-revision call ``revise_report_llm``, where every failure degrades
+instead of raising. Every function takes the Config (and, where relevant, the platform tz)
+explicitly so tests can run against temporary state directories. Callers (QQ frontend)
+wrap invocation in failure tolerance.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Final
+from typing import Final, TypedDict
 
-from gacore.config import Config
+from gacore.config import Config, load_dotenv
 from gacore.jsonl_logger import get_logger
+from gacore.llm import get_llm
 
 logger = get_logger("feedback")
 
@@ -39,6 +48,15 @@ logger = get_logger("feedback")
 # is otherwise ephemeral (email + QQ only, not persisted).
 _DELIVERED_SUBDIR: Final = "delivered_report"
 _PENDING_SUBDIR: Final = "feedback_pending"
+# Correction/pref/version store root (Q3=A): cfg.root/data/feedback — per-day fact
+# corrections in corrections/{date}.json, day-independent prefs in preferences.json,
+# and the C5 report-version counter in versions.json.
+_FEEDBACK_DATA_SUBDIR: Final = "feedback"
+_CORRECTIONS_SUBDIR: Final = "corrections"
+_PREFERENCES_BASENAME: Final = "preferences.json"
+_VERSIONS_BASENAME: Final = "versions.json"
+# Pseudo-section name for the block before the first "# " heading (diff gate splitting).
+_PREAMBLE: Final = "preamble"
 _UT8: Final = timezone(timedelta(hours=8))
 
 # Matches the anchored bullet marker we stamp onto report bullets:  [节-序号]
@@ -103,6 +121,47 @@ class FeedbackContext:
 def _pending_file(cfg: Config) -> Path:
     """Return the pending-draft JSONL path (logs/feedback_pending.jsonl)."""
     return cfg.logs_dir / f"{_PENDING_SUBDIR}.jsonl"
+
+
+def _feedback_data_dir(cfg: Config) -> Path:
+    """Return the feedback store root cfg.root/data/feedback (corrections, prefs, versions)."""
+    return cfg.root / "data" / _FEEDBACK_DATA_SUBDIR
+
+
+def _corrections_file(cfg: Config, date: str) -> Path:
+    """Return the per-day fact-corrections file data/feedback/corrections/{date}.json."""
+    return _feedback_data_dir(cfg) / _CORRECTIONS_SUBDIR / f"{date}.json"
+
+
+def _preferences_file(cfg: Config) -> Path:
+    """Return the day-independent preference file data/feedback/preferences.json."""
+    return _feedback_data_dir(cfg) / _PREFERENCES_BASENAME
+
+
+def _versions_file(cfg: Config) -> Path:
+    """Return the report-version counter file data/feedback/versions.json."""
+    return _feedback_data_dir(cfg) / _VERSIONS_BASENAME
+
+
+def _read_json_array(path: Path) -> list[dict]:
+    """Read a JSON-array store tolerantly: a missing file or bad JSON reads as an empty list."""
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (json.JSONDecodeError, OSError):
+        logger.warning("feedback json store unreadable, treating as empty", path=str(path))
+        return []
+    if not isinstance(data, list):
+        logger.warning("feedback json store is not an array, treating as empty", path=str(path))
+        return []
+    return [rec for rec in data if isinstance(rec, dict)]
+
+
+def _write_json_array(path: Path, records: list[dict]) -> None:
+    """Write a JSON-array store: create parent dirs, then pretty-print as UTF-8 JSON."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(records, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="")
 
 
 # --------------------------------------------------------------------------- parsing
@@ -304,6 +363,130 @@ def update_pending(cfg: Config, fb: Feedback) -> None:
     with open(path, "w", encoding="utf-8", newline="") as f:
         for d in replaced:
             f.write(json.dumps(asdict(d), ensure_ascii=False) + "\n")
+
+
+# --------------------------------------------------------------------------- corrections & preferences store (Q3)
+
+
+def _next_seq(records: list[dict], prefix: str) -> int:
+    """Next 1-based sequence for ids shaped ``{prefix}-NN`` (max existing suffix + 1)."""
+    mx = 0
+    for rec in records:
+        rid = str(rec.get("id") or "")
+        if rid.startswith(f"{prefix}-"):
+            try:
+                mx = max(mx, int(rid[len(prefix) + 1:]))
+            except ValueError:
+                continue
+    return mx + 1
+
+
+def record_correction(cfg: Config, date: str, anchor: str, kind: str, text: str) -> dict:
+    """Persist a correction (kind="fact") or a preference (kind="pref") from QQ or the review page.
+
+    Shared audit base of the C4 repair ladder: ladders ①② write it, ladder ③ (whole-report
+    regeneration) consumes it via list_active_corrections. fact records land in the per-day
+    file data/feedback/corrections/{date}.json — an already-active record for the same anchor
+    is marked "superseded" so only the newest correction per anchor stays active. pref records
+    are day-independent and appended to data/feedback/preferences.json. Timestamps use
+    Asia/Shanghai "%Y-%m-%d %H:%M:%S". Returns the record that was written.
+    """
+    now = anchor_now()
+    compact = date.replace("-", "")
+    if kind == "pref":
+        recs = _read_json_array(_preferences_file(cfg))
+        rec = {
+            "id": f"p-{compact}-{_next_seq(recs, f'p-{compact}'):02d}",
+            "kind": "pref",
+            "text": text.strip(),
+            "status": "active",
+            "created_at": now,
+            "updated_at": now,
+        }
+        recs.append(rec)
+        _write_json_array(_preferences_file(cfg), recs)
+        return rec
+    recs = _read_json_array(_corrections_file(cfg, date))
+    rec = {
+        "id": f"c-{compact}-{_next_seq(recs, f'c-{compact}'):02d}",
+        "anchor": anchor.strip(),
+        "kind": "fact",
+        "text": text.strip(),
+        "status": "active",
+        "created_at": now,
+        "updated_at": now,
+    }
+    for old in recs:
+        if old.get("kind") == "fact" and old.get("anchor") == rec["anchor"] and old.get("status") == "active":
+            old["status"] = "superseded"
+            old["updated_at"] = now
+    recs.append(rec)
+    _write_json_array(_corrections_file(cfg, date), recs)
+    return rec
+
+
+def list_active_corrections(cfg: Config, date: str) -> list[dict]:
+    """Return that day's active fact corrections, lowest id first.
+
+    Used to inject 〔人工订正〕 into ladder ③ regeneration and by the review page to show
+    which corrections are currently in force.
+    """
+    recs = _read_json_array(_corrections_file(cfg, date))
+    return sorted(
+        (r for r in recs if r.get("status") == "active" and r.get("kind") == "fact"),
+        key=lambda r: str(r.get("id") or ""),
+    )
+
+
+# --------------------------------------------------------------------------- report version counter (C5)
+
+
+def _load_versions(cfg: Config) -> dict[str, int]:
+    """Read the {date: version} counter tolerantly; an unreadable file reads as empty."""
+    path = _versions_file(cfg)
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except (json.JSONDecodeError, OSError):
+        logger.warning("versions.json unreadable, treating as empty", path=str(path))
+        return {}
+    if not isinstance(data, dict):
+        logger.warning("versions.json is not an object, treating as empty", path=str(path))
+        return {}
+    out: dict[str, int] = {}
+    for key, val in data.items():
+        try:
+            out[str(key)] = int(val)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def current_report_version(cfg: Config, date: str) -> int:
+    """Current report version for ``date`` — the N shown as （重生成 vN） in the email subject (C5).
+
+    The first delivery is v1 and is deliberately NOT persisted: versions.json only records
+    regenerations (v2+, written by next_report_version), so a missing entry reads as 1.
+    """
+    return _load_versions(cfg).get(date, 1)
+
+
+def next_report_version(cfg: Config, date: str) -> int:
+    """Bump and persist the version for ``date``; the first rerun gets v2, the next v3 (C5).
+
+    Delivery paths (scheduler rerun / review-server revise) call this right before
+    re-delivering a regenerated report so the subject can carry （重生成 vN）. Every call
+    increments and persists the counter in data/feedback/versions.json; the first delivery
+    (v1) never touches the file.
+    """
+    versions = _load_versions(cfg)
+    nxt = versions.get(date, 1) + 1
+    versions[date] = nxt
+    path = _versions_file(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(versions, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="")
+    return nxt
 
 
 # --------------------------------------------------------------------------- anchors in the report
@@ -584,6 +767,255 @@ async def clarify_feedback(llm, cfg: Config, ctx: FeedbackContext, *, date: str 
     return reply or "请再说明一下：要改哪个节、第几条、改成什么？"
 
 
+# --------------------------------------------------------------------------- LLM minimal revision (C4 ladder ②)
+
+
+class ReviseResult(TypedDict):
+    """Outcome of revise_report_llm / revise_from_pending (C4 ladder ②).
+
+    ok/text: the final full report text ("" when ok is False). sections_changed: names of
+    sections whose rstripped text actually differs from the delivered original. diff_ok:
+    the hard diff gate passed (non-target sections verbatim-identical). fallback: True when
+    the deterministic append-degrade path produced the text after two gate failures.
+    """
+
+    ok: bool
+    error: str
+    text: str
+    sections_changed: list[str]
+    diff_ok: bool
+    fallback: bool
+
+
+_REVISE_SYSTEM: Final = (
+    "你是一名日报最小修订助手。你会收到一份已投递的日报全文（条目带 [节-序号] 锚点）和若干订正条目，"
+    "请输出修订后的完整正文。规则：\n"
+    "- 只允许改动各订正条目锚点所指的分节；\n"
+    "- 保持全部 [节-序号] 锚点标记、标题结构与分节顺序不变；\n"
+    "- 未被点名的分节必须逐字保留，一个字都不改（包括空行与标点）；\n"
+    "- 修订幅度最小化：只落实订正条目所述内容，不做任何额外润色；\n"
+    "- 直接输出修订后的完整正文，不要任何解释、前言或代码块包裹。"
+)
+
+_REVISE_STRICTER: Final = (
+    "你上一次的修订违规改动了以下未点名的分节：{sections}。"
+    "这些分节必须与原文逐字一致，一个字都不能动（包括锚点、空行与标点）。"
+    "请重新输出修订后的完整正文：只落实订正条目，其余分节原样复制，不要任何解释。"
+)
+
+
+def _split_section_lines(text: str) -> list[tuple[str, list[str]]]:
+    """Split a report body into (section_name, lines) at markdown level-1 headings (``# ``).
+
+    The block before the first heading is the pseudo-section ``preamble``; each heading line
+    starts a new section named after the heading text. Lines are kept verbatim so sections
+    can be reassembled losslessly.
+    """
+    sections: list[tuple[str, list[str]]] = []
+    for ln in (text or "").splitlines():
+        if ln.startswith("# "):
+            sections.append((ln[2:].strip(), [ln]))
+        elif not sections:
+            sections.append((_PREAMBLE, [ln]))
+        else:
+            sections[-1][1].append(ln)
+    return sections
+
+
+def _split_report_sections(text: str) -> list[tuple[str, str]]:
+    """Same split as _split_section_lines, with each section's lines joined back into text."""
+    return [(name, "\n".join(lines)) for name, lines in _split_section_lines(text)]
+
+
+def _find_anchor_section(sections: list[tuple[str, str]], anchor: str) -> str | None:
+    """Name of the section whose text contains ``anchor`` (e.g. "[工作日志-2]"); None when nowhere.
+
+    A non-bracketed anchor ("工作日志-2") gets one bracketed fallback probe. An anchor landing
+    before the first heading maps to the ``preamble`` pseudo-section.
+    """
+    for name, text in sections:
+        if anchor in text:
+            return name
+    if not (anchor.startswith("[") and anchor.endswith("]")):
+        bracketed = f"[{anchor}]"
+        for name, text in sections:
+            if bracketed in text:
+                return name
+    return None
+
+
+def _diff_gate(
+    original: list[tuple[str, str]],
+    revised: list[tuple[str, str]],
+    target_names: set[str],
+) -> tuple[bool, list[str]]:
+    """Hard-check the minimal-revision promise (C4 ②): non-target sections verbatim-identical.
+
+    Sections are compared positionally — same names in the same order (a heading renamed,
+    added or dropped is a structural violation, reported as "<structure>") — and each
+    section's text is rstripped before the verbatim comparison. Returns (ok, violated names).
+    """
+    if [name for name, _ in revised] != [name for name, _ in original]:
+        return False, ["<structure>"]
+    violated = [
+        name
+        for (name, otext), (_, rtext) in zip(original, revised)
+        if name not in target_names and otext.rstrip() != rtext.rstrip()
+    ]
+    return not violated, violated
+
+
+def _changed_sections(original: list[tuple[str, str]], revised: list[tuple[str, str]]) -> list[str]:
+    """Names of sections whose rstripped text differs between the two splits."""
+    if [name for name, _ in revised] != [name for name, _ in original]:
+        return ["<structure>"]
+    return [
+        name
+        for (name, otext), (_, rtext) in zip(original, revised)
+        if otext.rstrip() != rtext.rstrip()
+    ]
+
+
+def _append_corrections(body: str, items: list[dict], targets: dict[str, str]) -> str:
+    """Degrade path: append each correction as a quoted line at the end of its target section.
+
+    Operates on the delivered original (never on the rejected LLM output). Trailing blank
+    lines of a target section stay below the appended line so the section separation is
+    preserved; non-target sections reassemble byte-for-byte.
+    """
+    sections = _split_section_lines(body)
+    for it in items:
+        name = targets.get(it["anchor"])
+        for sec_name, lines in sections:
+            if sec_name != name:
+                continue
+            blanks = 0
+            while lines and not lines[-1].strip():
+                lines.pop()
+                blanks += 1
+            lines.append(f"> （人工订正）{it['text']}")
+            lines.extend([""] * blanks)
+            break
+    return "\n".join(ln for _, lines in sections for ln in lines)
+
+
+def _revise_error(error: str) -> ReviseResult:
+    """Uniform failure shape for the revise ladder."""
+    return {"ok": False, "error": error, "text": "", "sections_changed": [], "diff_ok": False, "fallback": False}
+
+
+def _revise_user_message(body: str, items: list[dict]) -> str:
+    """Assemble the revise user message: the delivered full text plus numbered correction items."""
+    lines = ["【已投递日报全文】", body, "", "【订正条目】"]
+    for i, it in enumerate(items, 1):
+        lines.append(f"{i}. 锚点 {it['anchor']}：{it['text']}")
+    return "\n".join(lines)
+
+
+def revise_report_llm(cfg: Config, date: str, items: list[dict]) -> ReviseResult:
+    """C4 ladder ② — LLM minimal revision of the delivered report (the default repair path).
+
+    Feeds ONLY the delivered full text plus ``items`` ([{"anchor": "[工作日志-2]", "text": ...}])
+    to a zero-tool single-turn call — ``get_llm([], os.environ, bind_tools=False)`` after
+    load_dotenv, structurally incapable of invoking any tool — then hard-gates the diff:
+    every non-target section must remain verbatim-identical (rstripped) to the delivered
+    original. A gate failure retries once with a stricter instruction naming the violated
+    sections; a second failure degrades to deterministically appending
+    "> （人工订正）{text}" at the end of each target section (ok=True, fallback=True,
+    diff_ok=False). LLM/build/network exceptions return ok=False with an ``error`` summary —
+    never raised.
+
+    Does NOT persist or re-deliver: callers own save_delivered + redeliver_day (and the C5
+    version tag). An anchor matching no section of the delivered text fails fast with
+    error="anchor_not_found:..." — silently dropping a correction is never acceptable.
+    """
+    body = load_delivered(cfg, date)
+    if body is None:
+        return _revise_error("no_delivered")
+    norm: list[dict[str, str]] = []
+    for it in items or []:
+        anchor = str(it.get("anchor") or "").strip()
+        text = str(it.get("text") or "").strip()
+        if anchor and text:
+            norm.append({"anchor": anchor, "text": text})
+    if not norm:
+        return _revise_error("no_items")
+
+    original = _split_report_sections(body)
+    targets: dict[str, str] = {}
+    target_names: set[str] = set()
+    for it in norm:
+        name = _find_anchor_section(original, it["anchor"])
+        if name is None:
+            return _revise_error(f"anchor_not_found:{it['anchor']}")
+        targets[it["anchor"]] = name
+        target_names.add(name)
+
+    user = _revise_user_message(body, norm)
+
+    try:
+        load_dotenv()
+        model = get_llm([], os.environ, bind_tools=False)
+    except Exception as exc:  # noqa: BLE001 — a config failure must not raise out of the ladder
+        logger.warning("revise model build failed", error_type=type(exc).__name__)
+        return _revise_error(f"llm_failed:{type(exc).__name__}:{exc}"[:200])
+
+    def _ask(instruction: str) -> str:
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        resp = model.invoke([SystemMessage(content=_REVISE_SYSTEM), HumanMessage(content=instruction)])
+        return str(getattr(resp, "content", "") or "").strip()
+
+    def _finish(text: str, *, diff_ok: bool, fallback: bool) -> ReviseResult:
+        changed = _changed_sections(original, _split_report_sections(text))
+        logger.info("revise_done", date=date, sections_changed=changed, diff_ok=diff_ok, fallback=fallback)
+        return {
+            "ok": True,
+            "error": "",
+            "text": text,
+            "sections_changed": changed,
+            "diff_ok": diff_ok,
+            "fallback": fallback,
+        }
+
+    try:
+        first = _ask(user)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("revise llm call failed", error_type=type(exc).__name__)
+        return _revise_error(f"llm_failed:{type(exc).__name__}:{exc}"[:200])
+
+    ok, violated = _diff_gate(original, _split_report_sections(first), target_names)
+    if ok:
+        return _finish(first, diff_ok=True, fallback=False)
+
+    stricter = user + "\n\n" + _REVISE_STRICTER.format(sections="、".join(violated))
+    try:
+        second = _ask(stricter)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("revise llm retry failed", error_type=type(exc).__name__)
+        return _revise_error(f"llm_failed:{type(exc).__name__}:{exc}"[:200])
+
+    ok2, _still_bad = _diff_gate(original, _split_report_sections(second), target_names)
+    if ok2:
+        return _finish(second, diff_ok=True, fallback=False)
+
+    return _finish(_append_corrections(body, norm, targets), diff_ok=False, fallback=True)
+
+
+def revise_from_pending(cfg: Config, date: str) -> ReviseResult:
+    """Ladder ①→② upgrade hook: turn a day's still-pending feedback drafts into a minimal revision.
+
+    Callers (QQ flow) use this when apply_feedback's deterministic patch has no exact match
+    for the draft. Builds items from the pending drafts ([节-序号] anchor + content) and
+    delegates to revise_report_llm; error="no_pending" when the day has no pending drafts.
+    """
+    drafts = [d for d in load_pending(cfg) if d.date == date and d.status == "pending"]
+    if not drafts:
+        return _revise_error("no_pending")
+    items = [{"anchor": f"[{d.section}-{d.index}]", "text": d.content} for d in drafts]
+    return revise_report_llm(cfg, date, items)
+
+
 # --------------------------------------------------------------------------- timing
 
 
@@ -595,18 +1027,25 @@ def anchor_now() -> str:
 __all__ = (
     "Feedback",
     "FeedbackContext",
+    "ReviseResult",
     "analyze_feedback",
     "apply_feedback",
     "clarify_feedback",
     "confirm_feedback",
+    "current_report_version",
     "draft_from_context",
     "feedback_route",
     "is_feedback_intent",
     "latest_pending",
+    "list_active_corrections",
     "merge_context",
+    "next_report_version",
     "parse_feedback",
+    "record_correction",
     "redeliver_day",
     "redeliver_latest",
+    "revise_from_pending",
+    "revise_report_llm",
     "save_delivered",
     "stamp_report_bullets",
 )
