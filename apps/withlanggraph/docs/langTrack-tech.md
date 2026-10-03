@@ -215,9 +215,9 @@ report 侧聚合（`report._listen_music`，返回结构化 dict）——**粗�
 
 旧库迁移：`_add_timestamp_columns`（storage.py:37-59）对三张表补 `created_at/updated_at` 并用各自业务时间列回填东八区可读时间。
 
-### 4.2 事实层（`etl.py _SCHEMA`, L163-516）
+### 4.2 事实层（`etl.py _SCHEMA`, L185-551）
 
-公共约定：事实表带 `etl_version` + `created_at`/`updated_at`（东八区），由 B8 `_stamp_fact_tables`（etl.py:1136）统一打标，其自然时间列映射：
+公共约定：事实表带 `etl_version` + `created_at`/`updated_at`（东八区），由 B8 `_stamp_fact_tables`（etl.py:2061）统一打标，其自然时间列映射：
 
 | 表 | 自然时间列 | 表 | 自然时间列 |
 |---|---|---|---|

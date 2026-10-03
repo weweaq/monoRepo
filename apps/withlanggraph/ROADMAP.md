@@ -52,9 +52,10 @@ langTrack 数据链路服务端：`/ingest` 接收 + ETL 加工 + 报告 + dashb
       onnx embedding（bge-small-zh）。已探测确认本机 PG16+pgvector 扩展现成可用、
       deepface 已有同范式（psycopg+pgvector），故直接接 PG 不另装服务。见下方
       「记忆维护 阶段二」执行记录
-- [ ] 记忆维护「阶段二」实测闭环：等 `uv sync --extra vector` 装完（torch
-      首次 ~2GB + 模型 ~95MB），跑 `embedding.encode` 冒烟 + `vector_store` 对真实
-      画像 sync + `VectorTrigger` 端到端一轮，确认语义召回真能命中"搬家到朝阳区"
+- [x] 记忆维护「阶段二」实测闭环（2026-09-09 起分步实测，见「阶段二实测
+      闭环」系列执行记录）：本地 bge-small 加载 + `embedding.encode` 冒烟 +
+      `vector_store` 真实画像 sync + `VectorTrigger` 端到端 + `persist_entry`
+      统一写入口 + Semantic/Episodic 双表并行召回均已落地
 
 ---
 
