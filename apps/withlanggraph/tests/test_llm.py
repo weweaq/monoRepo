@@ -36,6 +36,13 @@ _DEEPSEEK_ENV: Mapping[str, str] = {
     "DEEPSEEK_BASE_URL": "",
 }
 
+_ZHIPU_ENV: Mapping[str, str] = {
+    "LLM_PROVIDER": "zhipu",
+    "ZHIPU_API_KEY": "test.zhipu-secret",
+    "ZHIPU_MODEL": "GLM-5.3-Flash",
+    "ZHIPU_BASE_URL": "",
+}
+
 
 class _FakeTool(BaseTool):
     """A minimal BaseTool so bind_tools has a real tool to convert to schema."""
@@ -126,6 +133,25 @@ def test_get_llm_deepseek_passes_through_base_url() -> None:
 def test_get_llm_deepseek_missing_key_raises() -> None:
     with pytest.raises(ValueError, match="DEEPSEEK_API_KEY"):
         get_llm([], {"LLM_PROVIDER": "deepseek"})
+
+
+def test_get_llm_zhipu_uses_configured_model() -> None:
+    bound = get_llm([], _ZHIPU_ENV)
+    assert isinstance(bound, RunnableBinding)
+    assert isinstance(bound.bound, ChatOpenAI)
+    assert bound.bound.model_name == "GLM-5.3-Flash"
+    assert bound.bound.temperature == 0
+
+
+def test_get_llm_zhipu_defaults_model_and_base_url_when_unset() -> None:
+    bound = get_llm([], {"LLM_PROVIDER": "zhipu", "ZHIPU_API_KEY": "test.zhipu-secret"})
+    assert bound.bound.model_name == "GLM-5.3-Flash"
+    assert bound.bound.openai_api_base == "https://open.bigmodel.cn/api/paas/v4"
+
+
+def test_get_llm_zhipu_missing_key_raises() -> None:
+    with pytest.raises(ValueError, match="ZHIPU_API_KEY"):
+        get_llm([], {"LLM_PROVIDER": "zhipu"})
 
 
 def test_get_llm_binds_tool_schema() -> None:

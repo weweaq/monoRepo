@@ -18,12 +18,15 @@ from langchain_openai import ChatOpenAI
 from gacore.config import ConfigError
 from gacore.llm_request_log import install_llm_logging
 
-_SUPPORTED_PROVIDERS: Final = ("openai", "anthropic", "deepseek")
+_SUPPORTED_PROVIDERS: Final = ("openai", "anthropic", "deepseek", "zhipu")
 _DEFAULT_OPENAI_MODEL: Final = "gpt-4o"
 _DEFAULT_ANTHROPIC_MODEL: Final = "claude-sonnet-4-5"
 # DeepSeek is an OpenAI-compatible endpoint (GA's configure_mykey.py: "native_oai").
 _DEFAULT_DEEPSEEK_MODEL: Final = "deepseek-v4-pro"
 _DEFAULT_DEEPSEEK_BASE_URL: Final = "https://api.deepseek.com/v1"
+# Zhipu (BigModel) is an OpenAI-compatible endpoint.
+_DEFAULT_ZHIPU_MODEL: Final = "GLM-5.3-Flash"
+_DEFAULT_ZHIPU_BASE_URL: Final = "https://open.bigmodel.cn/api/paas/v4"
 
 
 class MissingApiKeyError(ValueError):
@@ -84,6 +87,16 @@ def get_llm(
                 model=source.get("DEEPSEEK_MODEL") or _DEFAULT_DEEPSEEK_MODEL,
                 api_key=api_key,
                 base_url=source.get("DEEPSEEK_BASE_URL") or _DEFAULT_DEEPSEEK_BASE_URL,
+                temperature=0,
+            )
+        case "zhipu":
+            api_key = source.get("ZHIPU_API_KEY")
+            if not api_key:
+                raise MissingApiKeyError("ZHIPU_API_KEY is required when LLM_PROVIDER=zhipu")
+            llm = ChatOpenAI(
+                model=source.get("ZHIPU_MODEL") or _DEFAULT_ZHIPU_MODEL,
+                api_key=api_key,
+                base_url=source.get("ZHIPU_BASE_URL") or _DEFAULT_ZHIPU_BASE_URL,
                 temperature=0,
             )
         case _:
