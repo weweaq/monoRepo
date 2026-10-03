@@ -680,7 +680,7 @@ class RerunIn(BaseModel):
 def _run_rerun_task(cfg: Config, date: str, job: scheduler.Job, email: bool) -> None:
     """后台线程体：run_job 并把结果写回 _RERUN_STATE（任何异常都落为 error 态）。"""
     t0 = time.monotonic()
-    update: dict = {"duration_seconds": round(time.monotonic() - t0, 1), "finished_at": _now_hhmmss()}
+    update: dict = {}
     try:
         result = scheduler.run_job(job, cfg, for_day=date, deliver=email)
         update.update(
@@ -691,6 +691,11 @@ def _run_rerun_task(cfg: Config, date: str, job: scheduler.Job, email: bool) -> 
         )
     except Exception as exc:  # noqa: BLE001 — 后台线程兜底，状态可查
         update.update(state="error", error=f"{type(exc).__name__}: {exc}"[:200])
+    # 耗时/结束时刻在任务收尾时取值——启动时算会把 duration 固定为 0
+    update.update(
+        duration_seconds=round(time.monotonic() - t0, 1),
+        finished_at=_now_hhmmss(),
+    )
     with _RERUN_LOCK:
         _RERUN_STATE[date] = {**_RERUN_STATE.get(date, {}), **update}
 
