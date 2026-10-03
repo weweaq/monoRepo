@@ -1,6 +1,6 @@
-# 日报链路重设计 v3（设计稿 v0.5，评审中）
+# 日报链路重设计 v3（设计稿 v0.6，评审中）
 
-> 评审进展：Q2~Q6 已定稿（2026-10-03，Q2=A 独立 review_server、Q3=A per-day JSON、Q4=A 偏好即时生效、Q5=A 双入口同存储、Q6=A 订正不写回 events）。**Q1 凭 C2 实测证据改为推荐 A′（删除信息包 langTrack 块、细维度并入 fact_card compact），待确认。C4/C6 v0.4 按评审改向：三级修复阶梯，LLM 最小修订为默认路径，整体重生成需显式确认。C1 v0.5 按评审升级：源数据 body 全文落盘 + 单源详情页（L1 模型所见 / L2 源产出可查可对比，L3 原始数据不复制、指向源头系统）。**
+> 评审进展：Q2~Q6 已定稿（2026-10-03，Q2=A 独立 review_server、Q3=A per-day JSON、Q4=A 偏好即时生效、Q5=A 双入口同存储、Q6=A 订正不写回 events）。**Q1 凭 C2 实测证据改为推荐 A′（删除信息包 langTrack 块、细维度并入 fact_card compact），待确认。C4/C6 v0.4：三级修复阶梯，LLM 最小修订为默认路径，整体重生成需显式确认。C1 v0.5→v0.6：源观测两级全落盘——进包文本（处理过）与完整取数详情（未挑选未压缩）并列可查；L3 原始数据不复制、指向源头系统。**
 > C1 按评审意见改为"注册表内聚接口 + dashboard 可视化"：新增源零改动获得监控。
 > 每个改动项固定五段：**现状（代码事实）→ 改成什么样 → 怎么改 → 为什么 → 怎么观测**。
 > 谱系外的两个数据前提（不属本设计，但决定其上限）：手机上报 9-22 起停止（langTrack-roadmap 待办）、bili CLI 未登录（ROADMAP 待办）。
@@ -58,9 +58,11 @@ flowchart TD
 
     subgraph OBS["⑥ 观测（新增）"]
         direction LR
-        JSL[("data/logs/info_pack_health.jsonl<br/>每日报一行 × N 源<br/>status/chars/body 全文")]
-        HL["review_server 源体检<br/>GET /health 总览矩阵<br/>GET /health/source/{date}/{key}<br/>单源详情: body 全文可查"]
+        JSL[("info_pack_health.jsonl<br/>元数据: status/chars<br/>full_chars/detail_chars")]
+        DT[("pack_detail/{date}/{key}.md<br/>进包文本 + 完整取数详情<br/>（未挑选未压缩）保留90天")]
+        HL["review_server 源体检<br/>GET /health 总览矩阵<br/>GET /health/source/{date}/{key}<br/>进包文本 vs 完整详情 并列"]
         JSL --> HL
+        DT --> HL
     end
 
     subgraph FEED["⑦ 反馈闭环（双入口同存储 · 三级修复阶梯）"]
@@ -93,7 +95,8 @@ flowchart TD
     RC --> PRE
     REV --> SD
     COR -. "整体重生成时注入包首（非默认路径）" .-> PK
-    PK -. "SourceStat: status/chars/body" .-> JSL
+    PK -. "SourceStat: status/chars" .-> JSL
+    PK -. "detail_body 全文" .-> DT
     SD --> RV
     EM --> FQ
 
@@ -138,17 +141,22 @@ flowchart TD
   ```
   `build_info_pack_report` 遍历注册表装配 + 产出 `SourceStat{key, status, chars, note, preview}`。**新增一个源 = 在注册表加一条 SourceSpec，监控/健康页/预算熔断/状态元信息全部自动生效，检测代码零改动。**
 - **状态分类内聚为一个函数**：`classify_body(body) -> (status, note)`——空 body→`empty`；以 `- 该源失败：` 开头→`failed`（note=原因）；含"该日无/未登录/无数据"标注行→`missing_data`；否则 `ok`。现有 10 个 builder 的输出已天然符合该约定，分类函数是唯一约定执行点。
-- **body 全文落盘（v0.5 按评审升级：不止 200 字预览）**：SourceStat 记录 builder 的**完整原始产出**（截断前的块文本 `body`）与实际进包字符数 `chars`——"源产出了什么"（L2）与"模型看到了什么"（L1）两层都可查、可对比，而非只看预览。
-- **落盘**：`scheduler.run_job` daily job 结束时追加 `data/logs/info_pack_health.jsonl`（R11 数据目录），一行 = 一次日报：`{ts, date, job, trigger, total_chars, budget, correction_chars, sources:[{key, status, chars, full_chars, note, body}]}`，best-effort 不阻塞投递。体积约 10-15KB/天（<6MB/年），按月清理即可。
+- **两级文本全落盘（v0.6 按评审升级：详细 = 未挑选未压缩的完整取数结果，不止进包文本）**：
+  - **进包文本（处理过的）**：builder 渲染进信息包的块文本（含挑选/压缩，如"top 5"）；
+  - **完整取数详情（详细的）**：builder 当日查询返回的**全部结果**的可读渲染——不做 top-N 挑选、不做条数压缩（如 B站当日每一笔观看带时长、QQ 当日全部摘录、Edge 当日全部页面）。builder 契约从二元组升级为三元组 `(title, pack_body, detail_body)`。
+  - 边界说明：`detail_body` = **当日取数范围内的全部**（builder 查询本身的时间窗/范围决定了边界，不会变出范围外的数据）；仍不含 L3 原始数据。
+- **落盘（双文件）**：`scheduler.run_job` daily job 结束时——
+  - `data/logs/info_pack_health.jsonl`（元数据行）：`{ts, date, job, trigger, total_chars, budget, correction_chars, sources:[{key, status, chars, full_chars, detail_chars, note}]}`——小行、可 grep；
+  - `data/logs/pack_detail/{date}/{key}.md`（详情文件）：两节——`## 进包文本`（截断后实际进包的块文本）+ `## 完整取数详情`（detail_body 全文）。保留策略默认 90 天（重日可能 100-300KB，90 天上限约 30MB，可调）。
 - **dashboard**：review_server（C6，:8010）两个视图——
   - `GET /health` 总览：最近 14 天 × 源的矩阵，色块（绿 ok / 黄 empty / 红 failed / 灰 missing_data）+ chars + note，**一眼可见每个源的数据质量**；
-  - `GET /health/source/{date}/{key}` 单源详情：**该源当日完整块文本**（body 全文折叠展开）、status、截断对比（full_chars vs chars；被预算熔断整块丢弃的显示"未进包"）、note——**真实看到每个源喂给模型的数据**。
-- **边界（L3 原始数据不落盘）**：更底层的原始数据（events 表行、Edge 浏览器库记录、bili API 原始响应）不在本层复制存储——源头系统各自可查（langTrack dashboard 已有事实卡审查出口 `outlet="dashboard"`），复制会造成双份失真（R5 精神）。二期可选：单源详情页加"重取"按钮实时调 builder（需带历史日时效性警告，如 bili 滑动窗口取不到当天）。
+  - `GET /health/source/{date}/{key}` 单源详情：直接渲染详情文件——**进包文本**（模型看到的）与**完整取数详情**（未处理的全部数据）并列，加截断/挑选对比（chars vs full_chars vs detail_chars；被预算熔断整块丢弃的显示"未进包"）。
+- **边界（L3 原始数据不落盘）**：更底层的原始数据（events 表行、Edge 浏览器库记录、bili API 原始 JSON）不在本层复制存储——源头系统各自可查（langTrack dashboard 已有事实卡审查出口 `outlet="dashboard"`），复制会造成双份失真（R5 精神）。二期可选：单源详情页加"重取"按钮实时调 builder（需带历史日时效性警告，如 bili 滑动窗口取不到当天）。
 
 **怎么改**
-1. daily_info_pack.py：定义 SourceSpec 与 SOURCES 注册表（现有 10 源逐条迁入，删除平行 caps dict）；新增 `classify_body`、`build_info_pack_report`（SourceStat 含 body=builder 原始产出全文、full_chars）；`build_info_pack` 改薄包装，对外返回值一字不变。
-2. scheduler.py：`_write_pack_health()` 落 jsonl（全 try/except）。
-3. 新测试 `tests/test_source_registry.py`（结构性，注册表驱动）：遍历 SOURCES 断言——每个 key 唯一、cap>0、**每个 builder 的失败输出遵循 sentinel 约定**（mock 失败路径后以 `- 该源失败：` 开头），防新增源破坏分类；`test_info_pack_report.py` 覆盖 status 分类、jsonl 行、**body 与 builder 原始产出一致**。
+1. daily_info_pack.py：定义 SourceSpec 与 SOURCES 注册表（现有 10 源逐条迁入，删除平行 caps dict）；**builder 契约升级三元组 `(title, pack_body, detail_body)`**（10 个 builder 一次性改，detail=完整取数结果渲染，随注册表迁移同提交完成）；新增 `classify_body`、`build_info_pack_report`（SourceStat 含 chars/full_chars/detail_chars）；`build_info_pack` 改薄包装，对外返回值一字不变。
+2. scheduler.py：`_write_pack_health()` 写元数据 jsonl + `_write_pack_detail()` 写 `pack_detail/{date}/{key}.md`（均全 try/except）。
+3. 新测试 `tests/test_source_registry.py`（结构性，注册表驱动）：遍历 SOURCES 断言——每个 key 唯一、cap>0、**每个 builder 的失败输出遵循 sentinel 约定**（mock 失败路径后以 `- 该源失败：` 开头），防新增源破坏分类；`test_info_pack_report.py` 覆盖 status 分类、jsonl 行、**detail_body 为完整取数结果（如 bili mock 10 条记录时 detail 含全部 10 条，pack_body 仅 top N）**。
 
 **为什么**
 "信息没用上"（模型问题）与"根本没进包"（数据问题）目前不可区分；且观测若不是注册表驱动，每加一个源就要同步改监控，必然腐化（本次评审明确要求内聚）。preview 让 dashboard 从"状态灯"升级为"可回看模型输入"。
@@ -368,7 +376,7 @@ sequenceDiagram
     end
 ```
 
-- 页面清单：`GET /review/{date}` 评审页、`GET /health` 源体检总览 + `GET /health/source/{date}/{key}` 单源详情（C1，body 全文可查）、`GET /api/corrections/{date}`、`POST /api/corrections`（仅落盘不修订）、`POST /api/revise`（**默认动作**：落盘 + LLM 最小修订 + redeliver）、`POST /api/rerun`（整体重生成，前端确认弹窗）、`GET /api/rerun/{date}/status`。
+- 页面清单：`GET /review/{date}` 评审页、`GET /health` 源体检总览 + `GET /health/source/{date}/{key}` 单源详情（C1，进包文本与完整取数详情并列）、`GET /api/corrections/{date}`、`POST /api/corrections`（仅落盘不修订）、`POST /api/revise`（**默认动作**：落盘 + LLM 最小修订 + redeliver）、`POST /api/rerun`（整体重生成，前端确认弹窗）、`GET /api/rerun/{date}/status`。
 - 修订结果视图：新旧文本按锚点分节 diff，高亮实际变更——"最小修改"对用户可见可查。
 - 鉴权沿用 dev-console 惯例：GET 公开（本机/局域网），POST 需 token 请求头（`.env.example` 补 `REVIEW_TOKEN=`，R9）。
 - **不做的**：IMAP 邮件回信通路（解析脆、成本高）。
@@ -479,7 +487,7 @@ Q4 定即时生效：先跑通闭环，攒批是过度设计；单文件量小�
 ## 验收总标准
 
 1. `uv run --all-packages pytest` 全绿；全量时长不受本设计劣化。
-2. `:8010/health` 总览矩阵一眼可见 14 天 × 每源状态色块 + note；单源详情页可查该源当日**完整块文本**（body），L1 模型所见与 L2 源产出可对比；jsonl 每日一行、注册表新增源自动入列。
+2. `:8010/health` 总览矩阵一眼可见 14 天 × 每源状态色块 + note；单源详情页**进包文本与完整取数详情并列可查**（挑选/压缩/熔断全部可对比）；jsonl 每日一行、注册表新增源自动入列。
 3. langTrack 事实在 LLM 输入中只有一个渲染出口（C2 A′）。
 4. 评审页批注 → 默认走 LLM 最小修订：**diff 门禁断言非目标分节逐字不变**，邮件 vN 到达且目标分节体现订正；"整体重生成"需显式确认且走 corrections 注入包首；QQ 端锚点订正行为不回归（C4/C5/C6）。
 5. 连续 3 天日报，ok 源消费覆盖率 100%（正文或归档说明）。
