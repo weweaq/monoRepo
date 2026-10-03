@@ -23,7 +23,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from gacore.config import Config
-from gacore.feedback import Feedback, load_delivered, save_delivered, save_pending
+from gacore.feedback import load_delivered, save_delivered
 from gacore.review_server import create_app
 
 TOKEN = "test-token"
@@ -151,19 +151,9 @@ class TestApiCorrections:
 
 
 class TestApiRevise:
-    @staticmethod
-    def _preset_applied_draft(cfg: Config) -> None:
-        """An applied QQ draft makes redeliver_day non-noop so the _deliver mock is exercised."""
-        save_pending(
-            cfg,
-            Feedback(id="x1", date=DATE, section="工作日志", index=1, intent="fix",
-                     content="已应用的历史订正", status="applied", applied_at="2026-10-03 10:00:00"),
-        )
-
     def test_revise_records_revises_saves_and_redelivers(self, tmp_path: Path, monkeypatch):
         cfg = Config.for_tests(tmp_path)
         save_delivered(cfg, DATE, REPORT)
-        self._preset_applied_draft(cfg)
 
         class _FakeResp:
             content = REVISED
@@ -179,6 +169,11 @@ class TestApiRevise:
             deliveries.append({"name": job.name, "for_day": for_day, "reply": reply})
 
         monkeypatch.setattr("gacore.scheduler._deliver", _fake_deliver)
+        # _deliver_revised 还要 load_jobs 找 daily-report job——tmp cfg 无 schedule.json，mock 之
+        monkeypatch.setattr(
+            "gacore.scheduler.load_jobs",
+            lambda cfg_: [SimpleNamespace(name="daily-report")],
+        )
 
         c = _client(cfg, monkeypatch)
         r = c.post(

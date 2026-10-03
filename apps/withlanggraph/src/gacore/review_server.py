@@ -46,7 +46,6 @@ from gacore.feedback import (
     load_delivered,
     record_correction,
     revise_report_llm,
-    redeliver_day,
     save_delivered,
     # 单一真源约定：订正存储的路径与容错读逻辑只活在 feedback.py，这里复用其内部函数。
     _corrections_file,
@@ -655,6 +654,24 @@ class ReviseIn(BaseModel):
     items: list[ReviseItem]
 
 
+def _deliver_revised(cfg: Config, date: str) -> dict:
+    """修订后邮件重发：与 redeliver_day 同通道（scheduler._deliver → _deliver_email），
+    但不走它的 applied-pending 守卫——评审页批注落的是 corrections，不是 pending 草稿，
+    该守卫永远 noop。版本号由 _deliver_email 的 C5 逻辑按历史天递增。失败仅返回
+    error dict，绝不抛出（投递失败不影响修订已落存档的事实）。"""
+    try:
+        job = next((j for j in scheduler.load_jobs(cfg) if j.name == "daily-report"), None)
+        if job is None:
+            return {"status": "error", "msg": "daily-report job 不存在"}
+        body = load_delivered(cfg, date)
+        if body is None:
+            return {"status": "error", "msg": "no delivered report"}
+        scheduler._deliver(job, cfg, body, None, for_day=date)
+        return {"status": "ok", "date": date}
+    except Exception as exc:  # noqa: BLE001 — 重发失败不抛出
+        return {"status": "error", "msg": f"{type(exc).__name__}: {exc}"[:200]}
+
+
 class RerunIn(BaseModel):
     date: str
     email: bool = True
@@ -762,7 +779,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         rd: dict = {"status": "skipped"}
         if res["ok"]:
             save_delivered(config, payload.date, res["text"])
-            rd = redeliver_day(config, payload.date)
+            rd = _deliver_revised(config, payload.date)
         return {"ok": bool(res["ok"]), "revise": res, "redeliver": rd}
 
     @app.post("/api/rerun")
