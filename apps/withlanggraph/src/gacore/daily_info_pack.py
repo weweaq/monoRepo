@@ -105,6 +105,8 @@ def _instruction_head(date: str) -> str:
         "并非当前真实时刻——可直接引用为当日事实，不要因时间“不在现在”而把它当成旧事忽略。\n"
         "- 写作素材：信息包是今日写作的素材库——请把关键点引用进日报正文（用于加深人物刻画），"
         "但不要整段复制原文。\n"
+        "- 消费覆盖（C7）：每个标注“状态:全量”的信息源至少被正文消费一次；"
+        "确无可用信息的源，在 daily note 归档节点名跳过原因（不进邮件正文）。\n"
         "- 降级说明：单个信息源失败会标注“该源失败/无今日数据”，属正常降级，不影响整体写作；"
         "近 2 日 daily notes 摘要与当日生活事实卡 compact 已随系统提示注入，此处不重复。\n"
     )
@@ -868,12 +870,20 @@ def write_fact_card_detail(cfg: Config, card: Mapping[str, Any] | None) -> None:
         logger.warning("daily_info_pack: write_fact_card_detail failed", error=str(exc))
 
 
+def cap_lines(body: str, cap: int) -> str:
+    """Public line-level truncation primitive (C3) for cross-module pack builders —
+    scheduler._build_job_prompt uses it for the 〔人工订正〕/〔用户偏好〕 blocks so every
+    injected block truncates on line boundaries with the same tail note."""
+    return _cap_lines(body, cap)
+
+
 __all__ = (
     "PACK_BUDGET",
     "SOURCES",
     "SourceSpec",
     "build_info_pack",
     "build_info_pack_report",
+    "cap_lines",
     "classify_body",
     "last_pack_stats",
     "write_fact_card_detail",

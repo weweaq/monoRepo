@@ -438,6 +438,16 @@ def list_active_corrections(cfg: Config, date: str) -> list[dict]:
     )
 
 
+def list_active_preferences(cfg: Config) -> list[dict]:
+    """Return active user preferences (kind="pref"), oldest first — C8 daily-report injection.
+
+    Consumed by scheduler._build_job_prompt as the 〔用户偏好〕 block; the review page and
+    QQ feedback both write through record_correction(kind="pref").
+    """
+    recs = _read_json_array(_preferences_file(cfg))
+    return [r for r in recs if r.get("status") == "active" and r.get("kind") == "pref"]
+
+
 # --------------------------------------------------------------------------- report version counter (C5)
 
 
@@ -1059,6 +1069,7 @@ __all__ = (
     "is_feedback_intent",
     "latest_pending",
     "list_active_corrections",
+    "list_active_preferences",
     "merge_context",
     "next_report_version",
     "parse_feedback",

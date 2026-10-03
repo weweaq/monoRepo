@@ -333,20 +333,51 @@ def _build_job_prompt(job: Job, cfg: Config, for_day: str | None = None) -> str:
         try:
             from gacore.daily_info_pack import (
                 build_info_pack,
+                cap_lines,
                 last_pack_stats,
                 write_pack_detail,
                 write_pack_health,
             )
+            from gacore.feedback import list_active_corrections, list_active_preferences
 
             today = for_day or datetime.now(UTC).astimezone().date().isoformat()
+
+            # ---- C4③/C8 注入块：块顺序即优先级，人工输入恒在信息包之前。----
+            # 订正/偏好块独立于 PACK_BUDGET（_cap_lines 自带上限），保证最高优先级
+            # 素材不会被 10 源预算挤掉；correction_chars 进 health jsonl 供观测。
+            corrections_block = ""
+            prefs_block = ""
+            correction_chars = 0
+            try:
+                corrections = list_active_corrections(cfg, today)
+                if corrections:
+                    lines = [f"〔人工订正·{today}〕以下为人工确认事实，优先级高于一切自动数据源："]
+                    lines += [f"- {r.get('anchor', '')} {r.get('text', '')}" for r in corrections]
+                    corrections_block = cap_lines("\n".join(lines), 600)
+                    correction_chars = len(corrections_block)
+                prefs = list_active_preferences(cfg)
+                if prefs:
+                    plines = ["〔用户偏好〕以下是用户对日报的偏好，写作时遵循："]
+                    plines += [f"- {r.get('text', '')}" for r in prefs]
+                    prefs_block = cap_lines("\n".join(plines), 400)
+            except Exception as inj_exc:  # noqa: BLE001 — 注入失败降级为无订正块，job 照常
+                logger.warning(
+                    "corrections/preferences injection failed",
+                    job=job.name,
+                    date=today,
+                    error_type=type(inj_exc).__name__,
+                )
+
             info_pack = build_info_pack(today, cfg)
-            if info_pack:
-                prompt = f"{info_pack}\n\n{job.prompt}"
+            blocks = [b for b in (corrections_block, prefs_block, info_pack) if b]
+            if blocks:
+                prompt = "\n\n".join(blocks) + f"\n\n{job.prompt}"
                 logger.info(
                     "daily info pack injected into user prompt",
                     job=job.name,
                     date=today,
                     info_pack_chars=len(info_pack),
+                    correction_chars=correction_chars,
                 )
                 # ---- C1 v0.7 体检落盘钩子（best-effort：落盘失败不影响 job）----
                 # stats 由 build_info_pack 薄包装暂存（last_pack_stats）；测试替换该 seam
@@ -355,7 +386,10 @@ def _build_job_prompt(job: Job, cfg: Config, for_day: str | None = None) -> str:
                 if pack_stats:
                     trigger = "rerun" if for_day else "scheduled"
                     try:
-                        write_pack_health(cfg, today, job.name, trigger, pack_stats, len(info_pack))
+                        write_pack_health(
+                            cfg, today, job.name, trigger, pack_stats, len(info_pack),
+                            correction_chars=correction_chars,
+                        )
                         for _st in pack_stats:
                             write_pack_detail(
                                 cfg,
@@ -913,9 +947,27 @@ def _deliver_email(job: Job, cfg: Config, reply: str, error: str | None, env: Ma
 
     today = datetime.now(UTC).astimezone().date().isoformat()
     prefix = "[gacore][FAILED]" if error else "[gacore]"
-    # 历史补跑时主题挂数据日（for_day）而非发送时刻，收件人才能一眼看出这是哪天的日报
-    day_label = f"{for_day}（补跑）" if for_day and for_day != today else today
+    # C5 版本号：历史天（for_day != today）的每次真实发送都递增版本——首投 v1 无标记，
+    # 之后重生成/修订重发为 v2/v3…（覆盖 rerun 与 QQ「确认重发」两条路径，集中在此
+    # 单点）。当天例行投递不进版本序列，保持原样。
+    version = 0
+    if for_day and for_day != today:
+        try:
+            from gacore.feedback import next_report_version
+
+            version = next_report_version(cfg, for_day)
+        except Exception as e:  # noqa: BLE001 — 版本计数失败不影响投递
+            logger.warning("report version bump failed", date=for_day, error_type=type(e).__name__)
+    day_label = f"{for_day}（重生成 v{version}）" if version >= 2 else (for_day or today)
     subject = f"{prefix} {job.name} · {day_label}"
+    if version >= 2:
+        try:
+            from gacore.feedback import list_active_corrections
+
+            n_corr = len(list_active_corrections(cfg, for_day))
+        except Exception:  # noqa: BLE001 — 说明行失败不影响正文
+            n_corr = 0
+        reply = f"本版为 v{version} 重生成，依据 {n_corr} 条人工订正。\n\n{reply}"
     body = _email_body_html(reply, error)
     image_paths = [str(traj_png)] if traj_png is not None else None
     result = send_email.func(

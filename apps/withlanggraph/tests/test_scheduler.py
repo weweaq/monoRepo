@@ -288,6 +288,43 @@ class TestBuildJobPrompt:
         assert prompt == "周报指令"  # 非日报类：信息包完全不注入（隔离）
         assert called == []  # 且 build_info_pack 不被调用
 
+    def test_daily_job_injects_corrections_then_preferences_then_pack(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """C4③/C8：人工订正与用户偏好按优先级注入包首（订正→偏好→信息包）。"""
+        from gacore.feedback import record_correction
+
+        cfg = Config.for_tests(tmp_path)
+        today = datetime.now(UTC).astimezone().date().isoformat()
+        record_correction(cfg, today, "[工作日志-2]", "fact", "上午实际去了朝阳大悦城")
+        record_correction(cfg, today, "-", "pref", "个人观察节不要罗列数据")
+        monkeypatch.setattr(
+            "gacore.daily_info_pack.build_info_pack", lambda date, cfg=None: "〔当日信息包·TEST〕素材段"
+        )
+        job = Job(name="daily-report", schedule="09:00", prompt="原始写作指令")
+
+        prompt = _build_job_prompt(job, cfg)
+
+        assert prompt.index("〔人工订正·") < prompt.index("〔用户偏好〕") < prompt.index("〔当日信息包·TEST〕")
+        assert "上午实际去了朝阳大悦城" in prompt
+        assert "个人观察节不要罗列数据" in prompt
+        assert "原始写作指令" in prompt
+
+    def test_rerun_injects_target_day_corrections(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """C4③ 按 for_day 取订正：补跑 9-08 只带 9-08 的订正，不带其他日期的。"""
+        from gacore.feedback import record_correction
+
+        cfg = Config.for_tests(tmp_path)
+        record_correction(cfg, "2026-09-08", "[工作日志-1]", "fact", "9-8 的订正")
+        record_correction(cfg, "2026-09-09", "[工作日志-1]", "fact", "9-9 的订正")
+        monkeypatch.setattr(
+            "gacore.daily_info_pack.build_info_pack", lambda date, cfg=None: "〔当日信息包〕"
+        )
+        job = Job(name="daily-report", schedule="09:00", prompt="写作指令")
+
+        rerun_prompt = _build_job_prompt(job, cfg, for_day="2026-09-08")
+        assert "〔人工订正·2026-09-08〕" in rerun_prompt
+        assert "9-8 的订正" in rerun_prompt
+        assert "9-9 的订正" not in rerun_prompt
+
     def test_info_pack_build_failure_falls_back_to_plain_prompt(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -793,7 +830,7 @@ class TestDeliverEmail:
         _deliver_email(job, cfg, "reply", None, env=env)  # must not raise
 
     def test_rerun_subject_carries_for_day(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """历史补跑时主题挂数据日 + 补跑标记，而非发送时刻的 today。"""
+        """历史补跑时主题挂数据日 + 重生成版本号（C5：首投 v1 无标记，重生成 v2 起）。"""
         captured: dict[str, str] = {}
         monkeypatch.setattr("gacore.tools.email_tools._send_sync", _fake_send_sync(captured))
         cfg = Config.for_tests(tmp_path)
@@ -803,10 +840,38 @@ class TestDeliverEmail:
         _deliver_email(job, cfg, "reply", None, env=env, for_day="2026-09-08")
 
         assert "2026-09-08" in captured["subject"]
-        assert "补跑" in captured["subject"]
+        assert "重生成 v2" in captured["subject"]
+
+    def test_rerun_versions_increment_across_sends(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """同日第二次重生成 v3：版本计数随每次历史天真实发送递增。"""
+        captured: dict[str, str] = {}
+        monkeypatch.setattr("gacore.tools.email_tools._send_sync", _fake_send_sync(captured))
+        cfg = Config.for_tests(tmp_path)
+        job = Job(name="daily-report", schedule="09:00", prompt="hi", deliver_to="email")
+        env = {"SMTP_USER": "me@qq.com", "SMTP_PASSWORD": "pw"}
+
+        _deliver_email(job, cfg, "reply1", None, env=env, for_day="2026-09-08")
+        assert "重生成 v2" in captured["subject"]
+        _deliver_email(job, cfg, "reply2", None, env=env, for_day="2026-09-08")
+        assert "重生成 v3" in captured["subject"]
+
+    def test_rerun_body_carries_version_note(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """重生成版本 ≥2 时正文头部带说明行，并统计生效人工订正条数（C5）。"""
+        captured: dict[str, str] = {}
+        monkeypatch.setattr("gacore.tools.email_tools._send_sync", _fake_send_sync(captured))
+        cfg = Config.for_tests(tmp_path)
+        from gacore.feedback import record_correction
+
+        record_correction(cfg, "2026-09-08", "[工作日志-2]", "fact", "上午实际去了朝阳大悦城")
+        job = Job(name="daily-report", schedule="09:00", prompt="hi", deliver_to="email")
+        env = {"SMTP_USER": "me@qq.com", "SMTP_PASSWORD": "pw"}
+
+        _deliver_email(job, cfg, "# 今日状态\n- [今日状态-1] ok", None, env=env, for_day="2026-09-08")
+
+        assert "本版为 v2 重生成，依据 1 条人工订正" in captured["body"]
 
     def test_same_day_rerun_subject_has_no_marker(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """for_day == today（正常调度路径）时主题保持原样，无补跑标记。"""
+        """for_day == today（正常调度路径）时主题保持原样，无重生成标记。"""
         captured: dict[str, str] = {}
         monkeypatch.setattr("gacore.tools.email_tools._send_sync", _fake_send_sync(captured))
         cfg = Config.for_tests(tmp_path)
@@ -816,7 +881,7 @@ class TestDeliverEmail:
         today = datetime.now(UTC).astimezone().date().isoformat()
         _deliver_email(job, cfg, "reply", None, env=env, for_day=today)
 
-        assert "补跑" not in captured["subject"]
+        assert "重生成" not in captured["subject"]
         assert today in captured["subject"]
 
 
