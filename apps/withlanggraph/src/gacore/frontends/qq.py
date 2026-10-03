@@ -112,9 +112,13 @@ from gacore.feedback import (
     clarify_feedback,
     confirm_feedback,
     draft_from_context,
+    escalate_revise,
     feedback_route,
     latest_pending,
+    load_pending,
     merge_context,
+    record_correction,
+    redeliver_day,
     redeliver_latest,
     save_pending,
 )
@@ -1120,7 +1124,7 @@ class QQApp:
                 if id_match:
                     res = confirm_feedback(cfg, id_match.group(1))
                     if res.get("status") != "ok":
-                        await self.send_text(chat_id, f"生效失败：{res.get('msg', '')}", msg_id=msg_id, is_group=is_group)
+                        await self._try_escalate(chat_id, id_match.group(1), msg_id=msg_id, is_group=is_group)
                         return
                     fb_tag = f"{res['section']}-{res['index']}"
                 else:
@@ -1130,7 +1134,7 @@ class QQApp:
                         return
                     res = apply_feedback(cfg, fb)
                     if res.get("status") != "ok":
-                        await self.send_text(chat_id, f"生效失败：{res.get('msg', '')}", msg_id=msg_id, is_group=is_group)
+                        await self._try_escalate(chat_id, fb.id, msg_id=msg_id, is_group=is_group)
                         return
                     fb_tag = f"{res['section']}-{res['index']}"
                 await self.send_text(
@@ -1156,6 +1160,12 @@ class QQApp:
             if fb is not None:
                 self._feedback_sessions.pop(user_id, None)
                 save_pending(cfg, fb)
+                try:
+                    # C4 audit base: every correction lands in corrections/ even when ladder ①
+                    # patches it — ladder ③ (whole-report regeneration) consumes these later.
+                    record_correction(cfg, fb.date, f"[{fb.section}-{fb.index}]", "fact", fb.content)
+                except Exception:  # noqa: BLE001 - audit is best-effort, never blocks the draft
+                    logger.warning("record_correction failed", draft=fb.id)
                 kind = "订正" if fb.intent == "fix" else "追加"
                 await self.send_text(
                     chat_id,
@@ -1178,6 +1188,30 @@ class QQApp:
         except Exception:  # noqa: BLE001 - feedback loop must never crash the message handler
             logger.error("QQ feedback handler error", stack_trace=traceback.format_exc())
             await self.send_text(chat_id, "反馈处理出错，请稍后重试。", msg_id=msg_id, is_group=is_group)
+
+    async def _try_escalate(self, chat_id, draft_id, *, msg_id, is_group) -> None:
+        """Ladder ①→② (C4): the deterministic patch couldn't locate the anchor bullet —
+        fall back to the zero-tool minimal revision (revise_report_llm), which rewrites only
+        the targeted section under the diff gate, then re-deliver with the C5 version tag."""
+        cfg = Config.default()
+        fb = next((d for d in load_pending(cfg) if d.id == draft_id and d.status == "pending"), None)
+        if fb is None:
+            await self.send_text(chat_id, "生效失败：找不到该订正草稿。", msg_id=msg_id, is_group=is_group)
+            return
+        res = escalate_revise(cfg, fb)
+        if not res["ok"]:
+            await self.send_text(
+                chat_id, f"生效失败（最小修订也不可用：{res['error']}）。可换一种说法再试。", msg_id=msg_id, is_group=is_group,
+            )
+            return
+        rd = redeliver_day(cfg, fb.date)
+        note = "（含降级追加的订正原文）" if res["fallback"] else ""
+        sent = "" if rd.get("status") == "ok" else "（重发未完成，稍后可回复「确认重发」）"
+        await self.send_text(
+            chat_id,
+            f"✅ 精确补丁不可用，已改用最小修订改写「{fb.section}-{fb.index}」{note}并重发{sent}。",
+            msg_id=msg_id, is_group=is_group,
+        )
 
 
     async def _maybe_rollover(self, user_id: str) -> None:

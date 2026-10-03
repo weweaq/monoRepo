@@ -18,7 +18,10 @@ from gacore.config import Config
 from gacore.feedback import (
     Feedback,
     current_report_version,
+    escalate_revise,
     list_active_corrections,
+    load_delivered,
+    load_pending,
     next_report_version,
     record_correction,
     revise_from_pending,
@@ -332,4 +335,57 @@ class TestReviseFromPending:
         res = revise_from_pending(cfg, DATE)
         assert res["ok"] is False
         assert res["error"] == "no_pending"
+        assert model.calls == []
+
+
+# --------------------------------------------------------------------------- ladder ①→② escalation
+
+
+class TestEscalateRevise:
+    """escalate_revise: revise minimally, replace the archive, mark the draft applied."""
+
+    @staticmethod
+    def _draft() -> Feedback:
+        return Feedback(id="p9", date=DATE, section="工作日志", index=2, intent="fix",
+                        content="上午实际去了朝阳大悦城", status="pending")
+
+    def test_success_updates_archive_and_marks_applied(self, tmp_path: Path, monkeypatch):
+        cfg = Config.for_tests(tmp_path)
+        _deliver(cfg)
+        fb = self._draft()
+        save_pending(cfg, fb)
+        revised = REPORT.replace("- [工作日志-2] 上午收 9-08 日报尾巴", "- [工作日志-2] 上午实际去了朝阳大悦城")
+        model, seen = _patch_llm(monkeypatch, [revised])
+        res = escalate_revise(cfg, fb)
+        assert res["ok"] is True and res["diff_ok"] is True and res["fallback"] is False
+        assert seen["kwargs"].get("bind_tools") is False  # zero-tool guarantee holds on the ladder too
+        # Delivered archive now carries the revised section...
+        assert load_delivered(cfg, DATE).rstrip() == revised.rstrip()
+        # ...and the draft is applied so 确认重发's ledger logic sees unsent work.
+        assert [d.status for d in load_pending(cfg) if d.id == "p9"] == ["applied"]
+        assert len(model.calls) == 1
+
+    def test_fallback_result_still_books_kept(self, tmp_path: Path, monkeypatch):
+        cfg = Config.for_tests(tmp_path)
+        _deliver(cfg)
+        fb = self._draft()
+        save_pending(cfg, fb)
+        bad = REPORT.replace(
+            "- [工作日志-2] 上午收 9-08 日报尾巴", "- [工作日志-2] 上午实际去了朝阳大悦城"
+        ).replace("- [个人观察-1] LPL 老线再加深", "- [个人观察-1] 关注IG了")
+        model, _seen = _patch_llm(monkeypatch, [bad, bad])
+        res = escalate_revise(cfg, fb)
+        assert res["ok"] is True and res["fallback"] is True
+        work = _section_of(load_delivered(cfg, DATE), "工作日志")
+        assert work.rstrip().endswith("> （人工订正）上午实际去了朝阳大悦城")
+        assert [d.status for d in load_pending(cfg) if d.id == "p9"] == ["applied"]
+
+    def test_no_delivered_leaves_draft_pending(self, tmp_path: Path, monkeypatch):
+        cfg = Config.for_tests(tmp_path)
+        fb = self._draft()
+        save_pending(cfg, fb)
+        model, _seen = _patch_llm(monkeypatch, ["不应被消费"])
+        res = escalate_revise(cfg, fb)
+        assert res["ok"] is False and res["error"] == "no_delivered"
+        assert [d.status for d in load_pending(cfg) if d.id == "p9"] == ["pending"]
         assert model.calls == []

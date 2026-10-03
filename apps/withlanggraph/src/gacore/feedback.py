@@ -1016,6 +1016,26 @@ def revise_from_pending(cfg: Config, date: str) -> ReviseResult:
     return revise_report_llm(cfg, date, items)
 
 
+def escalate_revise(cfg: Config, fb: Feedback) -> ReviseResult:
+    """Ladder ①→② upgrade for ONE draft: revise the delivered report minimally and bookkeep.
+
+    Called by the QQ flow when apply_feedback's deterministic patch cannot locate the anchor
+    bullet. On success the revised text replaces the delivered archive (stamp_report_bullets
+    is idempotent on the already-stamped revision) and the draft is marked applied so the
+    existing 确认重发 ledger logic treats it as unsent work; the caller triggers the actual
+    re-send via redeliver_day. The revise result is returned unchanged (ok/error/fallback
+    flags) — the caller owns user-facing messaging.
+    """
+    res = revise_report_llm(cfg, fb.date, [{"anchor": f"[{fb.section}-{fb.index}]", "text": fb.content}])
+    if not res["ok"]:
+        return res
+    save_delivered(cfg, fb.date, res["text"])
+    fb.status = "applied"
+    fb.applied_at = anchor_now()
+    update_pending(cfg, fb)
+    return res
+
+
 # --------------------------------------------------------------------------- timing
 
 
@@ -1034,6 +1054,7 @@ __all__ = (
     "confirm_feedback",
     "current_report_version",
     "draft_from_context",
+    "escalate_revise",
     "feedback_route",
     "is_feedback_intent",
     "latest_pending",
