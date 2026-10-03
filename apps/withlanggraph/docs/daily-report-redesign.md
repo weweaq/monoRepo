@@ -1,6 +1,6 @@
-# 日报链路重设计 v3（设计稿 v0.3，评审中）
+# 日报链路重设计 v3（设计稿 v0.4，评审中）
 
-> 评审进展：Q2~Q6 已定稿（2026-10-03，Q2=A 独立 review_server、Q3=A per-day JSON、Q4=A 偏好即时生效、Q5=A 双入口同存储、Q6=A 订正不写回 events）。**Q1 凭 C2 实测证据改为推荐 A′（删除信息包 langTrack 块、细维度并入 fact_card compact），待确认。**
+> 评审进展：Q2~Q6 已定稿（2026-10-03，Q2=A 独立 review_server、Q3=A per-day JSON、Q4=A 偏好即时生效、Q5=A 双入口同存储、Q6=A 订正不写回 events）。**Q1 凭 C2 实测证据改为推荐 A′（删除信息包 langTrack 块、细维度并入 fact_card compact），待确认。C4/C6 v0.4 按评审改向：三级修复阶梯，LLM 最小修订为默认路径，整体重生成需显式确认。**
 > C1 按评审意见改为"注册表内聚接口 + dashboard 可视化"：新增源零改动获得监控。
 > 每个改动项固定五段：**现状（代码事实）→ 改成什么样 → 怎么改 → 为什么 → 怎么观测**。
 > 谱系外的两个数据前提（不属本设计，但决定其上限）：手机上报 9-22 起停止（langTrack-roadmap 待办）、bili CLI 未登录（ROADMAP 待办）。
@@ -63,13 +63,16 @@ flowchart TD
         JSL --> HL
     end
 
-    subgraph FEED["⑦ 反馈闭环（双入口同存储）"]
+    subgraph FEED["⑦ 反馈闭环（双入口同存储 · 三级修复阶梯）"]
         direction LR
         FQ["QQ 消息<br/>feedback_route: 订正→edit<br/>确认→confirm"]
-        RV["review_server :8010<br/>/review 锚点批注页<br/>POST /api/corrections<br/>POST /api/rerun"]
-        RC["record_correction<br/>kind=fact→corrections<br/>kind=pref→preferences"]
+        RV["review_server :8010<br/>/review 锚点批注页<br/>修订(默认)/重生成(需确认)"]
+        RC["record_correction<br/>fact→corrections<br/>pref→preferences"]
+        REV["LLM 最小修订（默认路径）<br/>零工具：只喂已发邮件+订正词<br/>diff 门禁：非目标分节逐字不变<br/>改完 redeliver vN"]
         FQ --> RC
         RV --> RC
+        RV --> REV
+        FQ -. "补丁无精确匹配时升级" .-> REV
     end
 
     subgraph LT["langTrack 数据子系统（现状）"]
@@ -88,6 +91,8 @@ flowchart TD
     LLM --> SB
     RC --> COR
     RC --> PRE
+    REV --> SD
+    COR -. "整体重生成时注入包首（非默认路径）" .-> PK
     PK -. "SourceStat: status/chars/preview" .-> JSL
     SD --> RV
     EM --> FQ
@@ -98,7 +103,7 @@ flowchart TD
     classDef store fill:#f3f4f6,stroke:#2D3142,color:#2D3142
 
     class COR,PRE store
-    class CB,PB,RG,CLS,CPL,JSL,HL,RV,RC plan
+    class CB,PB,RG,CLS,CPL,JSL,HL,RV,RC,REV plan
     class PK,EM,FC mod
 ```
 
@@ -225,59 +230,77 @@ flowchart TD
 
 ---
 
-## C4 人工订正层（Q3=A / Q5=A / Q6=A，本设计核心）
+## C4 订正修复阶梯（Q3=A / Q5=A / Q6=A，本设计核心；v0.4 按评审改向）
+
+> 评审意见（2026-10-03）：**整体重新生成改动太大，邮件其余部分难免不同**。据此重定向：最小修订为默认路径，整体重生成降级为显式确认的重量级手段。
 
 **现状（代码事实）**
-- 订正链路已存在但止步于"打补丁"：QQ 消息 → `feedback_route`（feedback.py:121）→ `parse_feedback`（:257）→ pending 草稿（`logs/feedback_pending.jsonl`，:103）→ `confirm_feedback`（:511）→ `apply_feedback`（:371）改 `load_delivered` 文本，**不重投、更不进重生成**。
-- `rerun --day`（rerun.py:66）重生成时 `_build_job_prompt`（scheduler.py:318）只注入 `build_info_pack`，人工订正不在场，同样的错误会原样再犯。
+- 确定性补丁已存在且天然是最小修改：QQ 消息 → `feedback_route`（feedback.py:121）→ `parse_feedback`（:257）→ pending 草稿（`logs/feedback_pending.jsonl`，:103）→ `confirm_feedback`（:511）→ `apply_feedback`（:371）补丁改 `load_delivered` 文本 + correct daily note。
+- 缺口一：语义性改写（补充一段经过 / 重写一句说法）无法确定性补丁，此前只能整体 rerun。
+- 缺口二：`rerun --day`（rerun.py:66）重生成时 `_build_job_prompt`（scheduler.py:318）只注入 `build_info_pack`，人工订正不在场——重跑原样再犯。
 
-**改成什么样（含全链路时序）**
+**改成什么样：三级修复阶梯，默认最小修改**
+
+| 级 | 路径 | 输入 | 工具 | 适用 | 修改范围 |
+|---|------|------|------|------|---------|
+| ① | 确定性补丁（现有 `apply_feedback`） | 锚点 + 精确替换文本 | 无（纯代码） | "把 X 改成 Y" | 仅目标 bullet |
+| ② | **LLM 最小修订（新，默认）** | **已投递邮件全文（带 [节-序号] 锚点）+ 人工订正词** | **零工具（结构性禁用）** | 语义改写 / 补充事实 / 调整说法 | 仅锚点所在分节，diff 门禁强制 |
+| ③ | 整体重生成（`rerun --day`，需显式确认） | corrections 注入包首 + 信息包 | 全量 27 工具 | 结构性错误 / 大量补录当日事实 | 整版重写，主题 vN |
+
+②的关键设计（即评审提出的"只输入需要修改的邮件 + 人工提示修改词"）：
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant U as 用户
-    participant QQ as QQ frontend
+    participant U as 用户（QQ 或评审页）
     participant FB as feedback.py
     participant CS as corrections/{date}.json
-    participant SC as scheduler._build_job_prompt
-    participant LLM as 日报 LLM
+    participant L as LLM（get_llm 零工具单轮）
+    participant SD as save_delivered 存档
+    participant EM as 邮件 redeliver
 
-    Note over U,LLM: 入口一（QQ，现有链路增强）
-    U->>QQ: "订正 [工作日志-2]：当天下午去了朝阳大悦城"
-    QQ->>FB: is_feedback_intent → feedback_route=edit
-    FB->>FB: parse_feedback → save_pending（草稿）
-    U->>QQ: "确认"
-    QQ->>FB: confirm_feedback → apply_feedback
-    FB->>FB: 补丁改已发文本（现有行为，保留）
-    FB->>CS: record_correction(kind=fact) ← 新增落盘
-    Note over CS: {anchor, kind, text, status=active,<br/>created_at, updated_at}<br/>同 anchor 旧记录置 superseded
-
-    Note over U,LLM: 生效（定时 run 或 rerun --day 同一函数）
-    SC->>CS: list_active_corrections(date)
-    CS-->>SC: 订正列表
-    SC->>SC: 包首注入〔人工订正〕（_cap_lines 600，不占 PACK_BUDGET）
-    SC->>LLM: 订正块 + 信息包 + job.prompt
-    LLM-->>U: 邮件（重生成 vN，正文体现订正事实）
+    U->>FB: 订正词（绑定锚点，如"[工作日志-2] 当天下午去了朝阳大悦城"）
+    FB->>CS: record_correction 落盘（审计 + ③复用）
+    alt ① 确定性补丁可精确匹配
+        FB->>FB: apply_feedback 直接替换，结束
+    else ② LLM 最小修订（默认升级路径）
+        FB->>FB: 组装输入：已投递邮件全文（带锚点）+ 订正条目<br/>system prompt=修订规则；无信息包/事实卡/任何工具
+        FB->>L: 单轮调用
+        L-->>FB: 修订后全文
+        FB->>FB: diff 门禁：按锚点分节比对，非目标分节必须逐字一致
+        alt 门禁通过
+            FB->>SD: 覆盖存档 + correct daily note（沿用现有逻辑）
+            FB->>EM: redeliver（主题 vN，C5）
+        else 门禁失败
+            FB->>L: 带 stricter 指令重试 1 次
+            L-->>FB: 修订后全文
+            FB->>FB: 复检门禁
+            alt 仍失败 → 降级
+                FB->>SD: 订正词原文追加到目标分节末尾（标"（人工订正）"）
+                FB->>EM: redeliver vN + 告知用户走了降级
+            end
+        end
+    end
 ```
 
-- 存储（Q3）：`data/feedback/corrections/{YYYY-MM-DD}.json`，元素 `{id, anchor, kind: fact|pref, text, status: active|superseded, created_at, updated_at}`（R6 精神：东八区、首写/最近更新）。
-- 双入口（Q5）：QQ 与评审页（C6）都调 `record_correction`，同存储、superseded 去重、无主从。
-- 不写回 events（Q6）：订正属解释层，原始数据不可变审计；fact_card/ETL 零改动。
-- 实时 QQ 对话不读 corrections（只服务日报链路）。
+- **输入最小化**：不喂信息包、不喂事实卡、不给任何取数工具——模型想跑偏都没有原料，修改自然收敛在人工指定的位置。
+- **零工具是结构保证不是 prompt 约束**：不走 `build_graph`（27 工具），直接 `get_llm()` 无 `bind_tools` 单轮调用——物理上不可能调 `send_email` / `edit_daily` / `langTrack_stats`。2026-09-30 模型自调 send_email 事故在这条路径上被结构性消灭。
+- **diff 门禁硬校验**：最小修改是代码可验证的承诺（非目标分节逐字一致），不是对模型的期望。
+- 存储（Q3）/双入口（Q5）/不写回 events（Q6）维持 v0.3 结论：corrections 文件是三个路径共用的审计与事实底座（①②写入，③消费）。
 
 **怎么改**
-1. feedback.py：新增 `record_correction / list_active_corrections`（含 supersede）。
-2. scheduler.py：`_build_job_prompt` daily 分支包首拼订正块。
-3. `apply_feedback` 末尾挂 `record_correction`（失败仅告警，不破坏现有补丁流）。
-4. 测试：record→注入断言；同 anchor 二次订正 superseded 断言；apply_feedback 双路断言。
+1. feedback.py：新增 `revise_report_llm(cfg, date, items) -> ReviseResult`（组装输入 → get_llm 零工具单轮 → diff 门禁 → 降级链）；`record_correction / list_active_corrections`（supersede）按 v0.3 不变。
+2. `redeliver_day`（feedback.py:455）复用为 ②③ 的投递出口；②产出同步 correct daily note（复用 `apply_feedback` 现有 note 修正逻辑，保证邮件与归档不分叉）。
+3. scheduler.py：③路径 `_build_job_prompt` 包首拼〔人工订正〕块（仅重生成消费）。
+4. QQ 链路：`apply_feedback` 无精确匹配时自动升级 ②。
+5. 测试：diff 门禁单测（mock LLM 返回带额外改动的文本 → 断言重试与降级）；①→② 升级触发；record→③注入断言；superseded 断言。
 
 **为什么**
-"结合日报回复 → 重新生成"的骨架（feedback + rerun）都在，缺的就是"人工输入进重生成上下文"这一块——它是补录"这个月发生了但手机没记到的事"的唯一通道。文件而非 sqlite：日订正 <10 条、与 pending 同模式，规避 R6 迁移成本。
+重生成会把没被点名的内容也重写，版本越多"真相"越模糊。阶梯 ② 把 LLM 自由度压到一个分节，其余逐字锁死并由代码校验；输入最小化（只有邮件与订正词）同时消灭了旧设计最大的两个风险面（乱取数、自发邮件）。③ 保留给"这个月发生很多事要整版补录"的场景——那是重生成唯一合理的用途。
 
 **怎么观测**
-- 自动：新增单测。
-- 运行时：订正后 `type data\feedback\corrections\{date}.json` 可见 → rerun → 邮件正文含该事实；jsonl 的 `correction_chars` 记录注入量。
+- 自动：diff 门禁与升级链单测。
+- 运行时：revise 日志 `revise_done {date, sections_changed, diff_ok, fallback}`；评审页修订视图高亮实际变更分节；corrections 文件审计链可查；C1 jsonl 的 `correction_chars` 仅在 ③ 时出现。
 
 ---
 
@@ -308,29 +331,33 @@ C4 落地后重生成成为常规操作而非抢救手段，版本号是"哪版�
 - 反馈入口只有 QQ 消息（frontends/qq.py → feedback.py）；邮件正文已打 `[节-序号]` 锚点（`stamp_report_bullets`，feedback.py:320；`save_delivered` :346 存档），但看邮件时无处下钩；无 IMAP 收件通路。
 - 仓库已有两个 web 先例：langTrack dashboard（FastAPI，`gacore/langTrack/server.py:150`）与 mermaid-viewer 评审页（锚点批注交互模式）；dev-console 已支持"打开"按钮（frontend 字段）。
 
-**改成什么样（含交互时序）**
+**改成什么样（含交互时序；默认动作 = LLM 最小修订，重生成需确认）**
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant U as 用户（浏览器）
     participant RV as review_server :8010
-    participant FB as feedback.py
+    participant FB as feedback.py（修复阶梯）
     participant SC as run_job(for_day)
     participant EM as 邮件
 
-    Note over U,EM: 日常批注
+    Note over U,EM: 日常批注 → 默认走最小修订（C4-②）
     U->>RV: GET /review/2026-10-03
     RV->>RV: load_delivered / 回退 logs/scheduled 最新存档
     RV-->>U: 渲染日报（[节-序号] 锚点为可点角标）
     U->>RV: 点锚点 → 侧栏批注（选 事实订正/偏好）→ 提交
-    U->>RV: POST /api/corrections {date, anchor, kind, text}（token 头）
-    RV->>FB: record_correction → corrections 或 preferences 落盘
+    U->>RV: POST /api/revise {date, items:[{anchor, kind, text}]}（token 头）
+    RV->>FB: record_correction 落盘 → revise_report_llm
+    FB->>FB: 零工具单轮修订 + diff 门禁（非目标分节逐字不变）
+    FB->>EM: redeliver vN
+    RV-->>U: 页面高亮实际变更分节（diff 视图）
 
-    Note over U,EM: 触发重生成
+    Note over U,EM: 整体重生成 = 显式确认的次要动作（C4-③）
+    U->>RV: 点"整体重生成"→ 确认弹窗（列出生效订正条数）
     U->>RV: POST /api/rerun {date, email:true}（token 头）
     RV->>SC: 后台线程 run_job(for_day=date, deliver=true)
-    SC->>SC: 读 corrections 注入包首（C4）→ 主题 vN（C5）
+    SC->>SC: corrections 注入包首（C4-③）→ 主题 vN（C5）
     SC->>EM: 投递
     loop 页面轮询
         U->>RV: GET /api/rerun/{date}/status
@@ -338,7 +365,8 @@ sequenceDiagram
     end
 ```
 
-- 页面清单：`GET /review/{date}` 评审页、`GET /health` 源体检页（C1）、`GET /api/corrections/{date}`、`POST /api/corrections`、`POST /api/rerun`、`GET /api/rerun/{date}/status`。
+- 页面清单：`GET /review/{date}` 评审页、`GET /health` 源体检页（C1）、`GET /api/corrections/{date}`、`POST /api/corrections`（仅落盘不修订）、`POST /api/revise`（**默认动作**：落盘 + LLM 最小修订 + redeliver）、`POST /api/rerun`（整体重生成，前端确认弹窗）、`GET /api/rerun/{date}/status`。
+- 修订结果视图：新旧文本按锚点分节 diff，高亮实际变更——"最小修改"对用户可见可查。
 - 鉴权沿用 dev-console 惯例：GET 公开（本机/局域网），POST 需 token 请求头（`.env.example` 补 `REVIEW_TOKEN=`，R9）。
 - **不做的**：IMAP 邮件回信通路（解析脆、成本高）。
 
@@ -436,8 +464,8 @@ Q4 定即时生效：先跑通闭环，攒批是过度设计；单文件量小�
 | S0 | 前置：手机上报恢复排查 / bili login | fix(langTrack)（视根因） | 无 |
 | S1 | C1 体检层（注册表 + jsonl + preview） | feat(daily): SourceSpec 注册表 + build_info_pack_report | 无 |
 | S2 | C2(A′ 待确认)+C3 拼接层 | refactor(daily,fact_card): 单渲染出口 + 行级截断 + 元信息 | S1 |
-| S3 | C4+C5 订正层与版本号 | feat(feedback,scheduler) | 无（可与 S2 并行） |
-| S4 | C6 评审页（/review + /health） | feat(review_server) | S1（health 读 jsonl）、S3（corrections API） |
+| S3 | C4 修复阶梯（①补丁 + ②LLM 最小修订 + diff 门禁 + 降级链）+ C5 版本号 | feat(feedback,scheduler) | 无（可与 S2 并行） |
+| S4 | C6 评审页（/review + /health；修订默认、重生成需确认） | feat(review_server) | S1（health 读 jsonl）、S3（revise/corrections API） |
 | S5 | C7+C8 prompt 与偏好层 | feat(daily): schedule.json + 偏好注入 | S2 |
 | S6 | R5 三处同步：ROADMAP / tech（新增"反馈与重生成"节、fact_card section 变更）/ 架构图收敛校验（真源图 = §0 目标态去 plan 虚线，codemap 全图走查） | docs(withlanggraph) | 全部 |
 
@@ -450,6 +478,6 @@ Q4 定即时生效：先跑通闭环，攒批是过度设计；单文件量小�
 1. `uv run --all-packages pytest` 全绿；全量时长不受本设计劣化。
 2. `:8010/health` 一页可见 14 天 × 每源状态色块 + preview（数据本体）+ note；jsonl 每日一行、注册表新增源自动入列。
 3. langTrack 事实在 LLM 输入中只有一个渲染出口（C2 A′）。
-4. 评审页批注 → corrections/preferences 落盘 → rerun → 邮件 vN 且正文体现订正与偏好；QQ 端锚点订正行为不回归。
+4. 评审页批注 → 默认走 LLM 最小修订：**diff 门禁断言非目标分节逐字不变**，邮件 vN 到达且目标分节体现订正；"整体重生成"需显式确认且走 corrections 注入包首；QQ 端锚点订正行为不回归（C4/C5/C6）。
 5. 连续 3 天日报，ok 源消费覆盖率 100%（正文或归档说明）。
 6. R5 三处同步无失真，架构图节点全部可回溯源码。
