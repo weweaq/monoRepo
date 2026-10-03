@@ -308,6 +308,9 @@
       var currentSrc = "";
       var currentNodeMap = {};   // { displayText_lower: [symbolName,...] }
       var currentEdgeList = [];  // [{sym,label}]  raw edge strings w/ label
+      var currentSymLine = {};   // { symbol|subgraphId: 1-based line no in the mmd }
+      var currentLines = [];     // raw source lines (index 0 = line 1)
+      var currentEdgeLines = {}; // { normalizedLabel: {line, text} } labeled edges by line
       var currentReviews = [];   // [{id,type,sym,date,text}]
       var activeSym = null;      // when set, side list filters to this symbol's reviews
       var currentSvg = null;     // last rendered <svg> element (for PNG export)
@@ -381,6 +384,43 @@
         }
         var edgeDotRe = /([A-Za-z_][A-Za-z0-9_]*)\s*\-\-\s*(.*?)\s*\-\->/g;
         // (kept minimal to avoid false positives)
+
+        // 4) line-number index: symbol/subgraph -> 1-based source line, and
+        //    labeled edges -> source line. This is what makes exported LLM
+        //    prompts point at REAL mmd symbols (mermaid rewrites SVG dom ids
+        //    like flowchart-RC-2, which are useless as source anchors).
+        currentSymLine = {};
+        currentLines = src.split("\n");
+        currentEdgeLines = {};
+        src.split("\n").forEach(function (l, idx) {
+          var ln = idx + 1;
+          if (/^\s*%%/.test(l)) return;
+          var sg = l.match(/\bsubgraph\s+([A-Za-z_][A-Za-z0-9_]*)/);
+          if (sg && currentSymLine[sg[1]] === undefined) currentSymLine[sg[1]] = ln;
+          var ndRe = /(?:^|[^A-Za-z0-9_\-])([A-Za-z_][A-Za-z0-9_]*)\s*(\[\[|\{\{|\(\(|\[|\{|\()/g;
+          var mm;
+          while ((mm = ndRe.exec(l)) !== null) {
+            if (currentSymLine[mm[1]] === undefined) currentSymLine[mm[1]] = ln;
+          }
+          if (/(->|---|-\.|==|<-)/.test(l)) {
+            var plRe = /\|([^|]+)\|/g, pm;
+            while ((pm = plRe.exec(l)) !== null) {
+              var k = normKey(pm[1]);
+              if (k && currentEdgeLines[k] === undefined) currentEdgeLines[k] = { line: ln, text: l.trim() };
+            }
+            var dtRe = /-\.\s*([^.]+?)\s*\.-/g, dm;
+            while ((dm = dtRe.exec(l)) !== null) {
+              var k2 = normKey(dm[1]);
+              if (k2 && currentEdgeLines[k2] === undefined) currentEdgeLines[k2] = { line: ln, text: l.trim() };
+            }
+          }
+        });
+      }
+
+      // normalize a label for matching: drop <br/>, quotes and ALL whitespace,
+      // because SVG textContent concatenates <br/>-split spans without spaces.
+      function normKey(s) {
+        return String(s).replace(/<br\s*\/?>/gi, "").replace(/["']/g, "").replace(/\s+/g, "");
       }
 
       // --------------------------------------------------------------
@@ -630,33 +670,54 @@
         return t ? t.textContent.trim() : "";
       }
 
+      // mermaid rewrites node dom ids as flowchart-<symbol>-<n>; recover the
+      // real .mmd symbol name from such an id (plain ids pass through).
+      function symFromDomId(domId) {
+        if (!domId) return null;
+        var s = String(domId);
+        var m = s.match(/^flowchart-([A-Za-z_][A-Za-z0-9_]*)-\d+$/);
+        return m ? m[1] : s;
+      }
+
       function nodeCommentSym(nodeEl) {
-        // prefer the aria-label (contains display text), map back to mmd symbol
+        // best: recover the real mmd symbol from mermaid's rewritten dom id
+        var sym = symFromDomId(nodeEl.id);
+        if (sym && currentSymLine[sym] !== undefined) {
+          return "节点 " + sym + "（行 " + currentSymLine[sym] + "）";
+        }
+        // fallback: display-text lookup
         var textEl = nodeEl.querySelector && (nodeEl.querySelector("text") || nodeEl);
         var disp = (textEl && textEl.textContent) || nodeEl.id;
         disp = disp.replace(/<br\/?>/gi, " ").trim();
         var key = disp.toLowerCase();
         if (currentNodeMap[key] && currentNodeMap[key].length) {
-          return "节点 " + currentNodeMap[key][0] + "（" + disp + "）";
+          var s2 = currentNodeMap[key][0];
+          return "节点 " + s2 + "（行 " + (currentSymLine[s2] || "?") + "）";
         }
-        // fallback: node id
+        // last resort: raw dom id
         return "节点 " + (nodeEl.id || disp) + "（" + disp + "）";
       }
 
       // Map a mermaid subgraph container (<g class="cluster">) to a commentable
-      // symbol "容器 <id>（<标题>）" so users can review sub-diagrams by title.
+      // symbol "容器 <id>（行 N）" so users can review sub-diagrams.
       function clusterSym(clusterEl) {
-        var id = clusterEl.id || "subgraph";
+        var id = symFromDomId(clusterEl.id) || "subgraph";
         var labelEl = clusterEl.querySelector && clusterEl.querySelector(".cluster-label");
         var disp = (labelEl && labelEl.textContent) || id;
         disp = String(disp).replace(/\s+/g, " ").trim();
+        var ln = currentSymLine[id];
+        if (ln !== undefined) return "容器 " + id + "（行 " + ln + "）";
         return "容器 " + id + "（" + disp + "）";
       }
-      // Edge label text (<g class="edgeLabel">) -> commentable "连线 <label>".
+      // Edge label text (<g class="edgeLabel">) -> "连线 <source line>（行 N）",
+      // matched by normalized label text (whitespace/<br/>-insensitive).
       function edgeLabelSym(el) {
         var textEl = el.querySelector && (el.querySelector("text") || el.querySelector("foreignObject"));
-        var txt = (textEl && textEl.textContent) || el.getAttribute("data-label") || "edge label";
+        var txt = (textEl && textEl.textContent) || el.textContent || el.getAttribute("data-label") || "";
         txt = String(txt).replace(/\s+/g, " ").trim();
+        if (!txt) txt = "edge label";
+        var hit = currentEdgeLines[normKey(txt)];
+        if (hit) return "连线 " + hit.text + "（行 " + hit.line + "）";
         return "连线 " + txt + "（edge label）";
       }
 
@@ -930,11 +991,15 @@
       // --------------------------------------------------------------
       // on-diagram review badges + LLM fix loop
       // --------------------------------------------------------------
-      // strip "节点 ID（文本）" down to the raw symbol id used in the SVG
+      // strip "节点 ID（文本）" down to the base mmd symbol id (also unwraps
+      // mermaid's rewritten dom ids like flowchart-SC-8 -> SC, so old stored
+      // reviews and new ones compare equal)
       function symNodeId(sym) {
         if (!sym) return null;
         var m = sym.match(/^节点\s+([A-Za-z0-9_\-.]+)/);
-        return m ? m[1] : null;
+        if (!m) return null;
+        var f = m[1].match(/^flowchart-([A-Za-z_][A-Za-z0-9_]*)-\d+$/);
+        return f ? f[1] : m[1];
       }
       // the display text inside 节点 ID（显示文本） — stable across renders, unlike
       // the SVG node id (mermaid can rewrite nested ids like flowchart-SC-8).
@@ -966,6 +1031,10 @@
         Object.keys(count).forEach(function (id) {
           var g;
           try { g = svg.querySelector('[id="' + id + '"]'); } catch (e) { g = null; }
+          if (!g) {
+            // mermaid rewrites node ids to flowchart-<symbol>-<n>: prefix match
+            try { g = svg.querySelector('[id^="flowchart-' + id + '-"]'); } catch (e) { g = null; }
+          }
           if (!g) return;
           var node = g.closest ? g.closest(".node") : (g.classList && g.classList.contains("node") ? g : null);
           if (!node) return;
@@ -999,20 +1068,63 @@
         });
       }
       // build a copy-paste prompt that hands all unresolved reviews to an LLM
+      // loc normalization: old reviews stored mermaid dom ids (flowchart-RC-2)
+      // or bare label text; rewrite them to real symbol + line for the LLM.
+      function normSymForExport(sym) {
+        if (!sym) return sym;
+        var id = symNodeId(sym);
+        if (/^节点/.test(sym) && id && currentSymLine[id] !== undefined) {
+          return "节点 " + id + "（行 " + currentSymLine[id] + "）";
+        }
+        var c = sym.match(/^容器\s+([A-Za-z0-9_\-.]+)/);
+        if (c && currentSymLine[c[1]] !== undefined) {
+          return "容器 " + c[1] + "（行 " + currentSymLine[c[1]] + "）";
+        }
+        if (/^连线/.test(sym) && /行\s*\d+/.test(sym)) return sym;
+        var eo = sym.match(/^连线\s+(.+?)\s*（edge label）\s*$/);
+        if (eo) {
+          var hit = currentEdgeLines[normKey(eo[1])];
+          if (hit) return "连线 " + hit.text + "（行 " + hit.line + "）";
+        }
+        return sym;
+      }
+      // resolve a (normalized) loc sym back to its raw source line text
+      function srcLineFor(sym) {
+        if (!sym) return "";
+        if (/^连线/.test(sym)) return "";   // edge locs already embed the line
+        var m = String(sym).match(/行\s*(\d+)/);
+        if (m) {
+          var ln = parseInt(m[1], 10);
+          if (currentLines[ln - 1] !== undefined) return currentLines[ln - 1].trim();
+        }
+        var id = symNodeId(sym);
+        if (id && currentSymLine[id] !== undefined) return currentLines[currentSymLine[id] - 1].trim();
+        return "";
+      }
       function buildLlmPrompt() {
         var open = currentReviews.filter(function (r) { return r.status !== "closed"; });
         if (!open.length) return "";
         var lines = [];
-        lines.push("请根据对 mermaid 流程图 <" + (fileKey() || "diagram") + "> 的这些评审意见，输出**修正后的完整 .mmd 源码**。");
-        lines.push("约束：只按意见点名位置改动，保留其余结构、符号名与连线方向；loc 是该意见对应的 mmd 符号定位（形如 `节点 符号ID（显示文本）`）。");
+        lines.push("请根据对 mermaid 流程图 <" + (fileKey() || "diagram") + "> 的这些评审意见，处理后输出修正后的完整 .mmd 源码。");
+        lines.push("");
+        lines.push("定位约定：loc 形如「节点 符号ID（行 N）」「容器 符号ID（行 N）」或「连线 源码行原文（行 N）」，符号 ID 与行号均取自该 .mmd 源码（行号从 1 起）；每条意见另附「源码行」原文，定位以原文为准。");
+        lines.push("处理规则：");
+        lines.push("- 意见是理解性疑问（如怎么触发/什么意思/怎么配置）时：先依据真实代码想清机制，在处理说明里用一两句话回答；再仅把该节点/连线的 label 文案改到看图即懂，不加节点、不改结构。");
+        lines.push("- 意见是明确的改图要求时：按意见改。");
+        lines.push("- 未被点名的节点、连线、样式一律原样保留。");
         lines.push("");
         open.slice().sort(function (a, b) { return a.id - b.id; }).forEach(function (r, i) {
-          lines.push((i + 1) + ". loc: " + oneLine(r.sym));
+          var loc = normSymForExport(r.sym);
+          lines.push((i + 1) + ". loc: " + oneLine(loc));
+          var src = srcLineFor(loc);
+          if (src) lines.push("   源码行: " + src);
           lines.push("   类型: " + r.type);
           lines.push("   意见: " + oneLine(r.text));
         });
         lines.push("");
-        lines.push("输出要求：用 fenced code block（```mermaid ... ```）包裹可直接覆盖保存的完整源码，不加解释。");
+        lines.push("输出要求：");
+        lines.push("1. 先逐条给处理说明（一两句话：改了什么 / 疑问的答案）。");
+        lines.push("2. 再用一个 fenced code block（```mermaid ... ```）输出修正后的完整 .mmd 源码，可直接整体覆盖保存；除此之外不加任何解释。");
         return lines.join("\n");
       }
       document.getElementById("btn-llm").addEventListener("click", function () {
