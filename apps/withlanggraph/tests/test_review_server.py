@@ -13,6 +13,7 @@ writer side (S1) is a separate workstream — this module only reads.
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from pathlib import Path
@@ -472,6 +473,23 @@ class TestLogsRoute:
 
 
 class TestReviewPage:
+    def test_bare_review_redirects_to_latest_delivered(self, tmp_path: Path, monkeypatch):
+        """/review 无日期 → 307 跳最近一篇 delivered（dev-console「打开」落地页）。"""
+        cfg = Config.for_tests(tmp_path)
+        save_delivered(cfg, "2026-10-02", REPORT)
+        save_delivered(cfg, DATE, REPORT)
+        c = _client(cfg, monkeypatch)
+        res = c.get("/review", follow_redirects=False)
+        assert res.status_code == 307
+        assert res.headers["location"] == f"/review/{DATE}"  # 最新一篇，而非更早的
+
+    def test_bare_review_redirect_falls_back_to_today(self, tmp_path: Path, monkeypatch):
+        cfg = Config.for_tests(tmp_path)
+        c = _client(cfg, monkeypatch)
+        res = c.get("/review", follow_redirects=False)
+        assert res.status_code == 307
+        assert re.fullmatch(r"/review/\d{4}-\d{2}-\d{2}", res.headers["location"])
+
     def test_renders_delivered_report_with_anchor_badges(self, tmp_path: Path, monkeypatch):
         cfg = Config.for_tests(tmp_path)
         save_delivered(cfg, DATE, REPORT)

@@ -35,7 +35,7 @@ from pathlib import Path, PurePosixPath
 
 import uvicorn
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
 from gacore import scheduler
@@ -684,6 +684,20 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     app = FastAPI(title="daily report review")
 
     # ---- 页面（GET 公开） ----
+
+    @app.get("/review")
+    def review_latest() -> Response:
+        """/review 无日期 → 跳最近一篇已投递日报（dev-console「打开」按钮的落地页）。"""
+        latest = ""
+        delivered = config.logs_dir / "delivered_report"
+        if delivered.is_dir():
+            dated = sorted(p.stem for p in delivered.glob("*.md") if _DATE_RE.fullmatch(p.stem))
+            latest = dated[-1] if dated else ""
+        if not latest:
+            from datetime import datetime as _dt
+
+            latest = _dt.now().astimezone().date().isoformat()
+        return RedirectResponse(f"/review/{latest}", status_code=307)
 
     @app.get("/review/{date}", response_class=HTMLResponse)
     def review_page(date: str) -> Response:
