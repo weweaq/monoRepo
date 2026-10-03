@@ -13,7 +13,8 @@
       "interpreter": "D:\\AAAmyPrj\\github\\myrepos\\mono\\.venv\\Scripts\\pythonw.exe",
       "args": ["-m", "gacore.langTrack", "--host", "0.0.0.0", "--port", "8000"],
       "match": ["gacore.langTrack"],
-      "notes": "接收手机上报事件的 HTTP 服务；mono uv workspace 环境 + 配置 .env"
+      "notes": "接收手机上报事件的 HTTP 服务；mono uv workspace 环境 + 配置 .env",
+      "frontend": "http://127.0.0.1:8000/dashboard"
     },
     {
       "id": "gacore",
