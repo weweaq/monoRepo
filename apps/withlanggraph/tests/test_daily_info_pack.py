@@ -36,19 +36,68 @@ def _cfg(tmp_path: Path) -> Config:
 def test_long_term_empty(tmp_path):
     title, pack_body, detail_body = dip._build_long_term_picture("2026-09-02", _cfg(tmp_path))
     assert title == "〔长期画像·compact〕"
-    assert "无长期画像文件" in pack_body or "memory/global_mem_insight" in pack_body
+    assert "无长期画像" in pack_body or "memory/global_mem_insight" in pack_body
     assert detail_body == ""  # 无文件 → 无取数结果
 
 
 def test_long_term_full(tmp_path):
+    """尾部窗口语义：最新行保留、最旧行被丢（v3.2 修正，此前 head 截断丢新增）。"""
     cfg = _cfg(tmp_path)
     cfg.memory_dir.mkdir(parents=True, exist_ok=True)
-    full_text = "\n".join(f"line{i}" for i in range(60))
+    full_text = "\n".join(f"[2026-08-{i % 28 + 1:02d}] line{i} {'内容' * 20}" for i in range(60))
     (cfg.memory_dir / "global_mem_insight.txt").write_text(full_text, encoding="utf-8")
     title, pack_body, detail_body = dip._build_long_term_picture("2026-09-02", cfg)
-    assert "line0" in pack_body
-    assert len(pack_body.splitlines()) <= dip._LONG_TERM_LINES + 1  # 40 行上限（+摘要标记行）
-    assert detail_body == full_text  # detail 不做摘要压缩：全文
+    assert "line59" in pack_body      # 最新行在尾部窗口内
+    assert "line0" not in pack_body   # 最旧行被窗口丢掉
+    assert "动态层取编年史尾部" in pack_body  # 尾注标注
+    assert "line59" in detail_body    # detail 含全文
+    assert "〔编年史〕" in detail_body
+
+
+def test_long_term_anchor_kept_and_single_truncation(tmp_path):
+    """锚点全保留 + 单一截断：超预算时只从动态层最旧端丢行，整体 ≤ _LONG_TERM_CAP。
+
+    锚点文件里的 "# " 维护注释只给人看，不注入 pack/detail。
+    """
+    cfg = _cfg(tmp_path)
+    cfg.memory_dir.mkdir(parents=True, exist_ok=True)
+    anchor = "# 维护约定：只由人工编辑\n- 锚点事实A：生日\n- 锚点事实B：婚期\n# 另一条注释"
+    (cfg.memory_dir / "global_mem_anchor.txt").write_text(anchor, encoding="utf-8")
+    # 60 行长行（每行 ~100 字）→ 尾部窗口远超 1600 预算，动态层须按预算再砍
+    long_lines = [f"[2026-09-{i % 28 + 1:02d}] insight: {'细节' * 45}" for i in range(60)]
+    (cfg.memory_dir / "global_mem_insight.txt").write_text("\n".join(long_lines), encoding="utf-8")
+    title, pack_body, detail_body = dip._build_long_term_picture("2026-10-04", cfg)
+    assert "〔固定锚〕" in pack_body
+    assert "锚点事实A" in pack_body and "锚点事实B" in pack_body  # 锚点永不被挤掉
+    assert "维护约定" not in pack_body and "另一条注释" not in pack_body  # 注释不注入
+    assert len(pack_body) <= dip._LONG_TERM_CAP                    # builder 内单一截断到位
+    assert "line0" not in pack_body
+    assert "已覆盖" in pack_body and "完整见 memory/global_mem_insight.txt" in pack_body
+    assert "锚点事实A" in detail_body and "〔编年史〕" in detail_body  # detail=锚+全文
+
+
+def test_long_term_only_anchor(tmp_path):
+    """只有锚点、编年史缺失：正常产出，不判无数据。"""
+    cfg = _cfg(tmp_path)
+    cfg.memory_dir.mkdir(parents=True, exist_ok=True)
+    (cfg.memory_dir / "global_mem_anchor.txt").write_text("- 锚点事实A", encoding="utf-8")
+    title, pack_body, detail_body = dip._build_long_term_picture("2026-10-04", cfg)
+    assert "锚点事实A" in pack_body
+    assert "〔固定锚〕" in detail_body
+    assert dip.classify_body(pack_body)[0] == "ok"
+
+
+def test_long_term_full_chars_within_budget_real_shape(tmp_path):
+    """真实形态回归：84 行中文编年史（~24k 字符）进包后 ≤1600 且含最新日期行。"""
+    cfg = _cfg(tmp_path)
+    cfg.memory_dir.mkdir(parents=True, exist_ok=True)
+    lines = [f"[2026-08-{d:02d}] insight: {'很长的一条画像描述，' * 20}" for d in range(1, 29)]
+    lines += [f"[2026-10-{d:02d}] insight: {'十月新增的重要事实，' * 20}" for d in range(1, 5)]
+    (cfg.memory_dir / "global_mem_insight.txt").write_text("\n".join(lines), encoding="utf-8")
+    title, pack_body, _ = dip._build_long_term_picture("2026-10-04", cfg)
+    assert len(pack_body) <= dip._LONG_TERM_CAP
+    assert "2026-10-03" in pack_body   # 最新内容在窗口内
+    assert "2026-08-01" not in pack_body
 
 
 # --------------------------------------------------------------------------- #
@@ -300,9 +349,11 @@ def test_chat_full_user_messages(tmp_path):
     log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     title, pack_body, detail_body = dip._build_chat("2026-09-02", cfg)
     bullet_lines = [ln for ln in pack_body.splitlines() if ln.startswith("- ")]
-    assert len(bullet_lines) == dip._CHAT_TOP  # pack 只列前 15
+    assert len(bullet_lines) == dip._CHAT_TOP  # pack 只列最近 15
     assert "共 20 条" in pack_body
-    assert "仅列前 15" in pack_body
+    assert "仅列最近 15" in pack_body
+    assert "消息内容 19 号" in pack_body   # v3.2：取尾部=最新消息
+    assert "消息内容 3 号" not in pack_body  # 最旧的被窗口丢掉
     # detail=当日全部摘录，不截条数也不截每条字数
     detail_lines = [ln for ln in detail_body.splitlines() if ln.startswith("- ")]
     assert len(detail_lines) == 20
@@ -326,7 +377,59 @@ def test_chat_date_filtering(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# 前日日报：空 / 满（pack=260 字摘要；detail=1000 字更长摘要）                 #
+# classify_body：状态行位置守卫（v3.2 修 _LONG_TERM 误报）                      #
+# --------------------------------------------------------------------------- #
+def test_classify_missing_status_lines():
+    """各 builder 的状态行（"- " 开头、关键词在行首 8 字符内）→ missing_data。"""
+    for body in (
+        "- 今日无 B 站观看记录",
+        "- 当日无 Edge 浏览记录",
+        "- 今日无 git 提交",
+        "- 无长期画像（memory/global_mem_anchor.txt 与 global_mem_insight.txt 均缺失），本日仅凭当日信号写作。",
+        "- 无历史日报输出可作基准（首次运行）",
+        "- 该账号无可列歌单",
+        "- 今日仓库内无文件改动",
+        "- 无 langTrack 音乐数据",
+        "- 当日无 QQ 对话记录",
+    ):
+        assert dip.classify_body(body)[0] == "missing_data", body
+
+
+def test_classify_quoted_content_not_missing():
+    """正文引文里出现"无…数据"（位置超出状态行区）不再误报 missing_data（v3.2）。"""
+    body = "- [2026-08-27] insight: langTrack 手机端 8/26 无采集数据，链路疑似中断，待恢复。"
+    assert dip.classify_body(body)[0] == "ok"
+
+
+def test_classify_failed_and_empty():
+    assert dip.classify_body("")[0] == "empty"
+    assert dip.classify_body("- 该源失败：database is locked")[0] == "failed"
+    assert dip.classify_body("- 该源失败/未登录：登录过期")[0] == "failed"
+    assert dip.classify_body("- 正常内容") [0] == "ok"
+
+
+# --------------------------------------------------------------------------- #
+# B站/Edge detail 拉取窗口诚实标注（v3.2）                                      #
+# --------------------------------------------------------------------------- #
+def test_bili_detail_window_note(tmp_path, monkeypatch):
+    entries = [
+        {"bvid": f"BV{i}", "title": f"视频{i}", "author": "UP", "viewed_at": f"2026-09-02T10:{i % 60:02d}:00"}
+        for i in range(50)
+    ]
+    monkeypatch.setattr(dip, "_BILLI_FN", lambda **k: {"entries": entries, "total": 500})
+    _, _, detail_body = dip._build_bili("2026-09-02", _cfg(tmp_path))
+    assert "拉取上限 50 条" in detail_body
+
+
+def test_edge_detail_window_note(tmp_path, monkeypatch):
+    entries = [{"url": f"https://site{i}.com/p", "title": f"页面{i}"} for i in range(100)]
+    monkeypatch.setattr(dip, "_BROWSER_FN", lambda **k: {"entries": entries})
+    _, _, detail_body = dip._build_edge("2026-09-02", _cfg(tmp_path))
+    assert "拉取上限 100 条" in detail_body
+
+
+# --------------------------------------------------------------------------- #
+# 前日日报：空 / 满（pack=260 字摘要；detail=1000 字更长摘要）                   #
 # --------------------------------------------------------------------------- #
 def test_memory_empty(tmp_path):
     title, pack_body, detail_body = dip._build_memory("2026-09-02", _cfg(tmp_path))
@@ -404,8 +507,8 @@ def _flood_cfg_files(cfg: Config) -> None:
 def test_build_info_pack_drops_tail_blocks_within_budget(tmp_path, monkeypatch):
     """预算耗尽 → 从装不下的块起整块丢弃（其后全弃），无半行断章（C3）。"""
     _flood_all_sources(monkeypatch)
-    # 预算缩到 1800：头部+长期画像装得下，B站起装不下 → 整块丢弃
-    monkeypatch.setattr(dip, "PACK_BUDGET", 1800)
+    # 预算缩到 1500：头部(~430)+长期画像(尾窗 40 行≈1030)装得下，B站块(~550)装不下 → 整块丢弃
+    monkeypatch.setattr(dip, "PACK_BUDGET", 1500)
     cfg = _cfg(tmp_path)
     _flood_cfg_files(cfg)
     pack = dip.build_info_pack("2026-09-02", cfg)

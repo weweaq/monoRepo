@@ -745,14 +745,71 @@ def _long_term_insight(cfg: Config) -> str:
     return ""
 
 
+def _long_term_anchor(cfg: Config) -> str:
+    """Return the hand-curated stable persona anchor (memory/global_mem_anchor.txt).
+
+    固定锚与编年史分离：身份类事实（生日/婚姻/居所等）不随时间衰减，但按日期追加的
+    编年史无论从头部还是尾部取窗口，迟早都会把它们挤出去，因此单独存一份人工策展
+    文件，摘要时无条件全量保留。本文件只由人工维护，自动写入方
+    （memory_maintenance / memory_tools）不得追加。
+    """
+    path = cfg.memory_dir / "global_mem_anchor.txt"
+    if path.is_file():
+        text = path.read_text(encoding="utf-8", errors="replace")
+        # "# " 开头的行为维护约定注释，只给人看，不注入画像
+        return "\n".join(ln for ln in text.splitlines() if ln.strip() and not ln.lstrip().startswith("#")).strip()
+    return ""
+
+
 def _summarize_long_term(text: str, limit_lines: int = 40) -> str:
-    """Compress the long-term persona into a compact summary when inject_full is off."""
+    """Tail-window compact of the long-term chronicle: newest lines win.
+
+    编年史按日期追加（最新在文件尾部，且对旧事实的修订也追加在尾部），头部截断
+    会永久保留最旧版本、丢失全部新增（2026-10-04 v3.2 由"取前 N 行"修正为尾部窗口）。
+    """
     if not text:
         return ""
     lines = [ln for ln in text.splitlines() if ln.strip()]
     if len(lines) <= limit_lines:
         return text
-    return "\n".join(lines[:limit_lines]) + "\n...(画像较长,已按摘要截断,完整内容见 memory/global_mem_insight.txt)"
+    return (
+        "\n".join(lines[-limit_lines:])
+        + f"\n（编年史共 {len(lines)} 行，以上为最近 {limit_lines} 行；完整内容见 memory/global_mem_insight.txt）"
+    )
+
+
+def _compact_long_term(anchor: str, text: str, max_chars: int, limit_lines: int = 40) -> str:
+    """长期画像 compact：固定锚（全保留）+ 编年史尾部窗口，整体不超 max_chars（单一截断）。
+
+    截断只发生在动态层最旧端（尾部窗口装不下时从其头部丢行），锚点永不被挤掉；
+    尾注标注动态层实际覆盖的时间范围（按行首 [YYYY-MM-DD] 日期戳解析，无日期戳时省略）。
+    """
+    parts: list[str] = []
+    if anchor:
+        parts.append("〔固定锚〕\n" + anchor)
+    if text:
+        lines = [ln for ln in text.splitlines() if ln.strip()][-limit_lines:]  # 先按行数取尾窗
+        used = len("\n\n".join(parts)) + (2 if parts else 0)
+        budget = max_chars - used - 60  # 60 = 尾注预算
+        dyn: list[str] = []
+        size = 0
+        for ln in reversed(lines):
+            extra = len(ln) + (1 if dyn else 0)
+            if size + extra > budget:
+                break
+            dyn.append(ln)
+            size += extra
+        if not dyn and lines and budget > 0:
+            dyn = [lines[-1][:budget]]  # 末行自身超预算：字符级兜底，动态层不空
+        dyn.reverse()
+        if dyn:
+            m_first, m_last = re.match(r"\[(\d{4}-\d{2}-\d{2})", dyn[0]), re.match(r"\[(\d{4}-\d{2}-\d{2})", dyn[-1])
+            span = f"{m_first.group(1)} ~ {m_last.group(1)}" if m_first and m_last else ""
+            head = f"（动态层取编年史尾部，已覆盖 {span}" if span else "（动态层取编年史尾部"
+            parts.append("\n".join(dyn) + f"\n{head}；完整见 memory/global_mem_insight.txt）")
+    if not parts:
+        return ""
+    return "\n\n".join(parts)
 
 
 def _export_onboard_pack(cfg: Config) -> None:
@@ -771,7 +828,12 @@ def _export_onboard_pack(cfg: Config) -> None:
     daily_summary = load_recent_daily_summaries(cfg, days=days)
     insight_full = _long_term_insight(cfg)
     inject_full = cfg.rollover.inject_long_term_full
-    long_term_md = insight_full if inject_full else _summarize_long_term(insight_full)
+    # 与日报同口径：固定锚 + 编年史尾部窗口（新内容不再丢失）；inject_full 仍注入全文
+    long_term_md = (
+        insight_full
+        if inject_full
+        else _compact_long_term(_long_term_anchor(cfg), insight_full, max_chars=8000)
+    )
     now = datetime.now(UTC).astimezone()
     date = now.date().isoformat()
     pack = {

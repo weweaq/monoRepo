@@ -117,19 +117,30 @@ def _instruction_head(date: str) -> str:
 # 每个 builder 自带 try/except；失败时 pack_body 以 "- 该源失败：" 开头（classify_body 约定） #
 # --------------------------------------------------------------------------- #
 def _build_long_term_picture(date: str, cfg: Config) -> tuple[str, str, str]:
-    """长期画像：pack=compact（40 行内），detail=画像全文（不做摘要压缩）。"""
-    from gacore.scheduler import _long_term_insight, _summarize_long_term  # 延迟 import 避循环
+    """长期画像：pack=固定锚+编年史尾部窗口（单一截断，≤_LONG_TERM_CAP），detail=锚+画像全文。
+
+    v3.2 采样修正（2026-10-04）：此前 head 截断两层叠加（前 40 行→再砍 1600 字符），
+    实测日报 LLM 每天只看到编年史开头 ~08-02~08-27，最近数周新增（含对旧事实的修订）全部
+    丢失。现改为：锚点文件全量保留 + 编年史尾部窗口，builder 内一次性截到源预算。
+    """
+    from gacore.scheduler import _compact_long_term, _long_term_anchor, _long_term_insight  # 延迟 import 避循环
 
     try:
         text = _long_term_insight(cfg)
-        if not text:
+        anchor = _long_term_anchor(cfg)
+        if not text and not anchor:
             return (
                 "〔长期画像·compact〕",
-                "- 无长期画像文件（memory/global_mem_insight.txt 缺失），本日仅凭当日信号写作。",
+                "- 无长期画像（memory/global_mem_anchor.txt 与 global_mem_insight.txt 均缺失），本日仅凭当日信号写作。",
                 "",
             )
-        compact = _summarize_long_term(text, limit_lines=_LONG_TERM_LINES)
-        return "〔长期画像·compact〕", compact, text
+        compact = _compact_long_term(anchor, text, max_chars=_LONG_TERM_CAP, limit_lines=_LONG_TERM_LINES)
+        detail_parts: list[str] = []
+        if anchor:
+            detail_parts.append(f"〔固定锚〕\n{anchor}")
+        if text:
+            detail_parts.append(f"〔编年史〕\n{text}")
+        return "〔长期画像·compact〕", compact, "\n\n".join(detail_parts)
     except Exception as exc:  # noqa: BLE001 - 单源降级
         logger.warning("daily_info_pack: long-term picture failed", error_type=type(exc).__name__, error=str(exc))
         return "〔长期画像·compact〕", f"- 该源失败：{exc}", ""
@@ -140,13 +151,14 @@ def _build_chat(date: str, cfg: Config) -> tuple[str, str, str]:
 
     数据来源 memory/qq_chat_log.jsonl（qq.py 收发消息时逐行 append，schema 见
     _persist_chat_log）。只取 direction=user 且非 "/" 命令的行，按时间正序列。
-    pack=前 _CHAT_TOP 条（每条截 90 字）；detail=当日全部摘录（不截条数不截字数）。
+    pack=最近 _CHAT_TOP 条（每条截 90 字；日志按时间追加，取尾部=保留最新状态，
+    v3.2 修正：此前取"前 15 条"会丢掉晚间消息）；detail=当日全部摘录（不截条数不截字数）。
     """
     title = "〔对话·当日 QQ 摘录〕"
     path = cfg.memory_dir / "qq_chat_log.jsonl"
     if not path.is_file():
         return title, "- 当日无 QQ 对话记录（qq_chat_log.jsonl 不存在）", ""
-    pack_lines: list[str] = []
+    day_lines: list[str] = []
     detail_lines: list[str] = []
     total = 0
     try:
@@ -172,17 +184,17 @@ def _build_chat(date: str, cfg: Config) -> tuple[str, str, str]:
                 total += 1
                 hhmm = ts[11:16] if len(ts) >= 16 else ""
                 detail_lines.append(f"- {hhmm} {text}")
-                if len(pack_lines) < _CHAT_TOP:
-                    pack_lines.append(f"- {hhmm} {text[:90]}")
+                day_lines.append(f"- {hhmm} {text[:90]}")
     except OSError as exc:
         return title, f"- 该源失败：{exc}", ""
-    if not pack_lines:
+    if not day_lines:
         if total:
             return title, f"- 当日 QQ 对话仅 {total} 条命令类消息，无正文摘录", ""
         return title, "- 当日无 QQ 对话记录", ""
+    pack_lines = day_lines[-_CHAT_TOP:]
     body = "\n".join(pack_lines)
     if total > _CHAT_TOP:
-        body += f"\n（当日共 {total} 条用户消息，仅列前 {_CHAT_TOP}）"
+        body += f"\n（当日共 {total} 条用户消息，仅列最近 {len(pack_lines)}）"
     return title, body, "\n".join(detail_lines)
 
 
@@ -275,6 +287,8 @@ def _build_bili(date: str, cfg: Config) -> tuple[str, str, str]:
             return f"- {ts} {t}｜UP:{author}"
 
         detail_body = "\n".join(_line(e) for e in today_entries)
+        if len(entries) >= 50:
+            detail_body += "\n（工具单次拉取上限 50 条，当日更早观看可能未覆盖）"
         lines = [_line(e) for e in today_entries[:_BILI_TOP]]
         body = "\n".join(lines)
         if len(today_entries) > _BILI_TOP:
@@ -319,7 +333,10 @@ def _build_edge(date: str, cfg: Config) -> tuple[str, str, str]:
             host = urlparse(str(entry.get("url") or "")).netloc or "(未知)"
             t = str(entry.get("title") or "").strip() or "(无标题)"
             detail_lines.append(f"- {host} {t}｜{entry.get('url')}")
-        return title, "\n".join(lines), "\n".join(detail_lines)
+        detail_body = "\n".join(detail_lines)
+        if len(entries) >= 100:
+            detail_body += "\n（工具单次拉取上限 100 条，当日更早记录可能未覆盖）"
+        return title, "\n".join(lines), detail_body
     except Exception as exc:  # noqa: BLE001
         logger.warning("daily_info_pack: edge failed", error_type=type(exc).__name__, error=str(exc))
         return title, f"- 该源失败：{exc}", ""
@@ -514,7 +531,9 @@ def _build_memory(date: str, cfg: Config) -> tuple[str, str, str]:
 # --------------------------------------------------------------------------- #
 # 状态分类（C1）：builder 文案约定 → 机器可读状态的唯一执行点                  #
 # --------------------------------------------------------------------------- #
-_MISSING_DATA_RE = re.compile(r"该日无|今日无|当日无|未登录|不可用|无.*数据")
+_MISSING_DATA_RE = re.compile(
+    r"该日无|今日无|当日无|未登录|不可用|无长期画像|无历史日报|无可列歌单|无文件改动|无.*数据"
+)
 
 
 def classify_body(body: str) -> tuple[str, str]:
@@ -522,7 +541,9 @@ def classify_body(body: str) -> tuple[str, str]:
 
     - 空 → ("empty", "")
     - 以 "- 该源失败" 开头（含 "该源失败或未登录："、"该源失败/不可用：" 变体）→ ("failed", 冒号后内容)
-    - 任一行含 该日无/今日无/当日无/未登录/不可用/无.*数据 → ("missing_data", 首个命中行)
+    - 状态行命中缺失模式 → ("missing_data", 首个命中行)。状态行约定（v3.2）：以 "- " 开头
+      且缺失关键词出现在行首 8 字符内——此前 "无.*数据" 会命中正文引文（如编年史里的
+      "手机端无采集数据"），导致 _LONG_TERM 全天误报 missing_data，故加位置守卫。
     - 否则 ("ok", "")
     """
     if not body.strip():
@@ -532,8 +553,12 @@ def classify_body(body: str) -> tuple[str, str]:
         colon = stripped.find("：")
         return "failed", stripped[colon + 1:].strip() if colon != -1 else ""
     for ln in body.splitlines():
-        if _MISSING_DATA_RE.search(ln):
-            return "missing_data", ln.strip()
+        s = ln.strip()
+        if not s.startswith("- "):
+            continue
+        m = _MISSING_DATA_RE.search(s)
+        if m and m.start() <= 8:
+            return "missing_data", s
     return "ok", ""
 
 
