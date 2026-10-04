@@ -121,7 +121,7 @@ flowchart TD
     HP --> RVW
     DT --> RVW
     FB --> RVW
-    RVW -. "redeliver_day / run_job(for_day)" .-> FB
+    RVW -. "_deliver_revised→scheduler._deliver（与 redeliver_day 同通道）/ run_job(for_day)" .-> FB
 
     %% ============================================================
     %% 设计规范 (参照 diagram-design 编辑级原则)
