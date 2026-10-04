@@ -87,28 +87,92 @@ def classify_run(calls: list[dict]) -> tuple[str, str, str]:
     return "other", "其他调用", _one_line(htext, 70)
 
 
-def load_system_events(date: str) -> list[dict]:
-    """System-side actions from app.jsonl (not LLM calls): email deliveries etc."""
-    path = ROOT / "logs" / date / "app.jsonl"
-    if not path.is_file():
-        return []
-    events = []
-    with path.open(encoding="utf-8") as f:
+def load_system_events(date: str) -> tuple[list[dict], list[dict]]:
+    """System-side records from app.jsonl: (deliveries, error-level events).
+
+    Deliveries power the 📬/🔁 run lane; ERROR events (any module — the memory-gate
+    TypeError found on 2026-10-03 is the motivating example) render red in the lane.
+    """
+    deliveries: list[dict] = []
+    errors: list[dict] = []
+    app = ROOT / "logs" / date / "app.jsonl"
+    if not app.is_file():
+        return deliveries, errors
+    with app.open(encoding="utf-8") as f:
         for line in f:
-            if "deliver_email sent" not in line:
+            if "deliver_email sent" in line:
+                try:
+                    e = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                deliveries.append({
+                    "ts": e.get("ts"),
+                    "pid": e.get("pid"),
+                    "session": e.get("session"),
+                    "subject": str(e.get("subject") or ""),
+                    "failed": "[FAILED]" in str(e.get("subject") or ""),
+                })
+                continue
+            if '"level": "ERROR"' not in line:
                 continue
             try:
                 e = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            events.append({
+            detail = str(e.get("error") or e.get("stack_trace") or "")
+            errors.append({
                 "ts": e.get("ts"),
                 "pid": e.get("pid"),
                 "session": e.get("session"),
-                "subject": str(e.get("subject") or ""),
-                "failed": "[FAILED]" in str(e.get("subject") or ""),
+                "module": str(e.get("module") or ""),
+                "message": str(e.get("message") or "")[:200],
+                "detail": detail[:300],
             })
-    return events
+    return deliveries, errors
+
+
+def attach_errors(runs: list[dict], errors: list[dict]) -> None:
+    """Attach ERROR events to the run they occurred in: same pid/session,
+    between run start and 300s after run end."""
+    for run in runs:
+        start = _parse_ts(run["start"]) - timedelta(seconds=60)
+        end = _parse_ts(run["end"]) + timedelta(seconds=300)
+        seen: set[str] = set()
+        evs = []
+        for e in errors:
+            if e.get("session"):
+                same = e["session"] in run["sessions"] or e["pid"] in run["pids"]
+            else:
+                same = e["pid"] in run["pids"]
+            if not same:
+                continue
+            ts = _parse_ts(e["ts"])
+            if not (start <= ts <= end):
+                continue
+            key = e["ts"][:19] + e["message"][:50]
+            if key in seen:
+                continue
+            seen.add(key)
+            evs.append(e)
+        run["errors"] = sorted(evs, key=lambda x: x["ts"])
+
+
+def _resp_summary(resp: dict | None) -> dict | None:
+    """Condense the logged response for the timeline view (old records have none)."""
+    if not resp:
+        return None
+    if resp.get("error"):
+        return {"error": resp["error"], "chars": 0, "text": "", "usage": None}
+    content = resp.get("content")
+    text = content if isinstance(content, str) else _content_text(content)
+    usage = resp.get("usage") or None
+    return {
+        "chars": resp.get("content_chars") or len(text),
+        "text": text if len(text) <= 4000 else text[:4000] + "…[truncated]",
+        "toolCalls": len(resp.get("tool_calls") or []),
+        "usage": usage,
+        "error": None,
+    }
 
 
 def build_runs(records: list[dict]) -> list[dict]:
@@ -182,6 +246,8 @@ def build_runs(records: list[dict]) -> list[dict]:
                 ],
                 "newIdxStart": prev_count,
                 "turnToolCalls": tcs,
+                "durationMs": r.get("duration_ms"),
+                "resp": _resp_summary(r.get("response")),
             })
         tools_used: list[str] = []
         last_ai_text = ""
@@ -304,7 +370,9 @@ def main() -> int:
     if not records:
         sys.exit("no parseable records")
     runs = build_runs(records)
-    attach_system_events(runs, load_system_events(args.date))
+    deliveries, error_events = load_system_events(args.date)
+    attach_system_events(runs, deliveries)
+    attach_errors(runs, error_events)
     attach_output_archives(runs, load_output_archives(args.date))
     data = {
         "date": args.date,

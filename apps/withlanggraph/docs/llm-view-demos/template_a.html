@@ -77,7 +77,10 @@ function showMsg(ri,ci,mi){var c=DATA.runs[ri-1].calls[ci-1];var m=c.msgs[mi];
 drawer("run"+ri+" 调用#"+ci+" · 第"+(mi+1)+"条 · "+m.role+" · "+fmtC(m.chars)+"字","<pre>"+esc(m.text)+"</pre>"+(m.toolCalls&&m.toolCalls.length?"<h4>tool_calls</h4><pre>"+esc(pretty(m.toolCalls))+"</pre>":""))}
 function copyCall(){if(CUR)copyText(JSON.stringify(CUR,null,2))}
 
-function callHead(c){return "<b>调用 #"+c.i+"</b><span class=chip>"+hh(c.ts)+"</span><span class=chip>"+esc(c.provider)+"/"+esc(c.model)+"</span><span class=chip>"+(c.msgsCount?("消息 "+c.msgsCount+" 条"):"内部调用（judge 等，输入非消息列表）")+"</span><span class=chip>新增 "+c.newCount+"</span><span class=chip>绑定工具 "+c.toolsBound+"</span>"+(c.runKind?"<span class=chip>"+esc(c.runKind)+"</span>":"")}
+function callHead(c){var dur=c.durationMs!=null?(c.durationMs/1000).toFixed(1)+"s":null;
+var respChip=null;
+if(c.resp){respChip=c.resp.error?'<span class=chip style="background:#FFEBEE;color:#C62828">❌ 调用失败</span>':'<span class=chip style="background:#E8F5E9;color:#2E7D32">响应 '+fmtC(c.resp.chars)+"字</span>";}
+return "<b>调用 #"+c.i+"</b><span class=chip>"+hh(c.ts)+"</span><span class=chip>"+esc(c.provider)+"/"+esc(c.model)+"</span><span class=chip>"+(c.msgsCount?("消息 "+c.msgsCount+" 条"):"内部调用（judge 等，输入非消息列表）")+"</span><span class=chip>新增 "+c.newCount+"</span><span class=chip>绑定工具 "+c.toolsBound+"</span>"+(dur?"<span class=chip>"+dur+"</span>":"")+(respChip||"")+(c.runKind?"<span class=chip>"+esc(c.runKind)+"</span>":"")}
 function msgHtml(ri,ci,c,i){var m=c.msgs[i];var isNew=i>=c.newIdxStart;
 return '<div class="msgline exp'+(isNew?"":" dim")+'" id="m_'+ri+"_"+ci+"_"+i+'" onclick="showMsg('+ri+","+ci+","+i+')">'+badge(m.role)+(m.name?' <span class=chip>'+esc(m.name)+"</span>":"")+(m.toolCallId?' <span class=chip>id:'+esc(String(m.toolCallId).slice(0,10))+"</span>":"")+' <span class=muted>'+fmtC(m.chars)+"字</span> "+esc(m.text.slice(0,150))+(isNew?'<span class=newbadge>NEW</span>':"")+"</div>"}
 function tcardHtml(ri,ci,j,tc){return '<div class="tcard fold'+(TOOLF!=="*"&&tc.name===TOOLF?" toolhit":"")+'" id="tc_'+ri+"_"+ci+"_"+j+'"><div class="th exp" onclick="tg(this)">🔧 '+esc(tc.name)+' <span class=muted>'+(tc.result?tc.resultChars+"字结果":"（无结果记录）")+'</span></div><div class="tb"><div><b>args</b></div><pre>'+esc(pretty(tc.args))+"</pre><div><b>result</b></div><pre>"+esc(tc.result==null?"（无）":tc.result)+"</pre></div></div>"}
@@ -87,11 +90,14 @@ h+='<div class=muted style="margin-bottom:10px">运行 '+run.id+" · "+esc(run.t
 if(run.systemEvents&&run.systemEvents.length){h+='<div style="margin:6px 0 0">';
 run.systemEvents.forEach(function(e){h+='<div style="font-size:12px;color:'+(e.failed?"#c62828":"#2E7D32")+'">系统侧：'+(e.failed?"❌ 失败通知已发":"📬 已投递")+" · "+hh(e.ts)+" · <span class=chip>"+esc(e.subject)+"</span><span class=muted>（scheduler 经 SMTP，非 LLM 调用）</span></div>"});h+="</div>";}
 if(run.systemBatch){h+='<div style="font-size:12px;color:#888;margin-top:4px">系统侧：🔁 run 结束后发生批量重发 '+run.systemBatch.count+" 封（QQ 反馈触发，含旧报，略）</div>";}
+if(run.errors&&run.errors.length){run.errors.forEach(function(e){h+='<div style="font-size:12px;color:#C62828;margin-top:4px">⚠ ERROR ['+esc(e.module)+"] "+hh(e.ts)+" · "+esc(e.message)+(e.detail?" — "+esc(e.detail):"")+"</div>";});}
 h+="</div>";
 if(run.output){h+='<div class="call fold open" id="out"><div class="hd exp" onclick="tg(this)">📄 产出存档（最终回复正文 '+fmtC(run.output.replyChars)+"字 · 对 "+run.calls.length+' 次调用的最终响应，不在请求日志里） <span class=muted>'+esc(run.output.file)+"</span></div><div class=\"bd\"><pre>"+esc(run.output.reply)+"</pre></div></div>";}
 run.calls.forEach(function(c){var toolhit=TOOLF!=="*"&&c.turnToolCalls.some(function(t){return t.name===TOOLF});
 h+='<div class="call fold'+(toolhit?" open toolhit":"")+'" id="call_'+run.id+"_"+c.i+'"><div class="hd exp" onclick="tg(this)">'+callHead(c)+'</div><div class="bd">';
 h+=c.msgs.map(function(m,i){return msgHtml(run.id,c.i,c,i)}).join("");
+if(c.resp&&(c.resp.text||c.resp.error)){var style=c.resp.error?"color:#C62828":"";
+h+='<div class="tcard fold" style="border-color:'+(c.resp.error?"#EF9A9A":"#A5D6A7")+'"><div class="th exp" onclick="tg(this)" style="'+style+'">💬 模型响应 '+fmtC(c.resp.chars)+"字"+(c.resp.toolCalls?" · 发起 "+c.resp.toolCalls+" 个工具调用":"")+(c.resp.error?" · 调用失败":"")+"</div>"+'<div class="tb"><pre style="'+(c.resp.error?"background:#B71C1C":"")+'">'+esc(c.resp.error||c.resp.text)+"</pre>"+(c.resp.usage?'<div class=muted>tokens: '+esc(pretty(c.resp.usage))+"</div>":"")+"</div></div>";}
 if(c.turnToolCalls.length){h+='<h4 style="margin:8px 0 2px">工具往返 '+c.turnToolCalls.length+" 次（模型响应发起 → 工具结果随本请求到达）</h4>";
 c.turnToolCalls.forEach(function(tc,j){h+=tcardHtml(run.id,c.i,j,tc)});}
 else h+='<div class=muted style="margin-top:6px">本请求无工具往返</div>';
