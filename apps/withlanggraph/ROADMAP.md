@@ -1075,3 +1075,7 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 **待办更新**：
 - [ ] 用户逛 /data 后拍板 `_PHONE_PLACE`（位置轨迹）/`_PHONE_USAGE`（手机使用）两源接入（cap/priority/builder 设计已议：复用 report.py 查询函数、措辞口径借 fact_card 保证不失真）；`_PHONE_NOTIF`（通知内容）涉私信进邮件，单独立项。
 - [ ] fact_card/daily notes 的 system prompt 旁路收编评估（daily notes 摘要优先）。
+
+### [2026-10-04] v3.2.3 追补：/data 右详情改"按天"——全量按日直方图 + payload 全量取数
+
+用户反馈：payload 下拉框不够看、要能看全部；且按天组织更符合排查习惯。改造：`collect` 每事件类型内嵌**全量按日直方图** `hist`（单条 SQL 按 UTC+8 分日 GROUP BY，ts<2026-01-01 脏数据不入图），右详情渲染为日历 chips（最新在前），点日期经新路由 **`GET /api/data/events?type=&day=&limit=`** 拉当日全部 payload（`data_catalog.events_for_day`：day/type 正则校验→非法 400，limit 默认 500 上限 20000，超限页内"加载全部"显式拉全量，单条截 1000 字，按时间倒序）。实测真实数据：session 2026-10-03 全 266 条；audio_env 2026-08-19 突发日 13,577 条全量拉取正常；非法 day 400。测试 57 项全绿（TestDataSource 改/增：collect 形态、API 取数/校验/截断、历史日、非法 JSON 兜底），8010 已重启验证。
