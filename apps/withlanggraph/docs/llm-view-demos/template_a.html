@@ -83,7 +83,11 @@ return '<div class="msgline exp'+(isNew?"":" dim")+'" id="m_'+ri+"_"+ci+"_"+i+'"
 function tcardHtml(ri,ci,j,tc){return '<div class="tcard fold'+(TOOLF!=="*"&&tc.name===TOOLF?" toolhit":"")+'" id="tc_'+ri+"_"+ci+"_"+j+'"><div class="th exp" onclick="tg(this)">🔧 '+esc(tc.name)+' <span class=muted>'+(tc.result?tc.resultChars+"字结果":"（无结果记录）")+'</span></div><div class="tb"><div><b>args</b></div><pre>'+esc(pretty(tc.args))+"</pre><div><b>result</b></div><pre>"+esc(tc.result==null?"（无）":tc.result)+"</pre></div></div>"}
 
 function renderMain(){var run=CUR;var el=document.getElementById("main");var h="";
-h+='<div class=muted style="margin-bottom:10px">运行 '+run.id+" · "+esc(run.title)+" · "+hh(run.start)+" → "+hh(run.end)+" · "+run.calls.length+" 次调用"+(TOOLF!=="*"?" · 工具筛选:"+esc(TOOLF):"")+"</div>";
+h+='<div class=muted style="margin-bottom:10px">运行 '+run.id+" · "+esc(run.title)+" · "+hh(run.start)+" → "+hh(run.end)+" · "+run.calls.length+" 次调用"+(TOOLF!=="*"?" · 工具筛选:"+esc(TOOLF):"");
+if(run.systemEvents&&run.systemEvents.length){h+='<div style="margin:6px 0 0">';
+run.systemEvents.forEach(function(e){h+='<div style="font-size:12px;color:'+(e.failed?"#c62828":"#2E7D32")+'">系统侧：'+(e.failed?"❌ 失败通知已发":"📬 已投递")+" · "+hh(e.ts)+" · <span class=chip>"+esc(e.subject)+"</span><span class=muted>（scheduler 经 SMTP，非 LLM 调用）</span></div>"});h+="</div>";}
+if(run.systemBatch){h+='<div style="font-size:12px;color:#888;margin-top:4px">系统侧：🔁 run 结束后发生批量重发 '+run.systemBatch.count+" 封（QQ 反馈触发，含旧报，略）</div>";}
+h+="</div>";
 run.calls.forEach(function(c){var toolhit=TOOLF!=="*"&&c.turnToolCalls.some(function(t){return t.name===TOOLF});
 h+='<div class="call fold'+(toolhit?" open toolhit":"")+'" id="call_'+run.id+"_"+c.i+'"><div class="hd exp" onclick="tg(this)">'+callHead(c)+'</div><div class="bd">';
 h+=c.msgs.map(function(m,i){return msgHtml(run.id,c.i,c,i)}).join("");
@@ -95,7 +99,12 @@ el.innerHTML=h;applyOnlyNew();}
 function applyOnlyNew(){var on=document.getElementById("onlynew").checked;document.querySelectorAll("#main .msgline.dim").forEach(function(e){e.style.display=on?"none":""})}
 
 function renderSide(){document.getElementById("side").innerHTML=DATA.runs.map(function(r){if(TOOLF!=="*"&&!r.calls.some(function(c){return c.turnToolCalls.some(function(t){return t.name===TOOLF})}))return"";
-return '<div class="run" id="run'+r.id+'" onclick="pick('+r.id+')"><div class="t"><span class="badge kind-'+r.kind+'">'+esc(r.title)+"</span></div>"+'<div class="q">'+esc(r.task)+"</div>"+(r.lastAi?'<div class="q">↳ 末条AI: '+esc(r.lastAi)+"</div>":"")+'<div class="s">'+r.calls.length+" 次调用 · "+hh(r.start).slice(0,11)+" · 工具: "+(r.toolsUsed.map(function(t){return esc(t)}).join(" ")||"无")+"</div></div>"}).join("")||'<div class=muted style="padding:10px">无匹配 run</div>'}
+return '<div class="run" id="run'+r.id+'" onclick="pick('+r.id+')"><div class="t"><span class="badge kind-'+r.kind+'">'+esc(r.title)+"</span></div>"+'<div class="q">'+esc(r.task)+"</div>"+(r.lastAi?'<div class="q">↳ 末条AI: '+esc(r.lastAi)+"</div>":"")+'<div class="s">'+r.calls.length+" 次调用 · "+hh(r.start).slice(0,11)+" · 工具: "+(r.toolsUsed.map(function(t){return esc(t)}).join(" ")||"无")+"</div>"+sysHtml(r)+"</div>"}).join("")||'<div class=muted style="padding:10px">无匹配 run</div>'}
+function sysHtml(r){var out="";
+if(r.systemEvents&&r.systemEvents.length){out+=r.systemEvents.map(function(e){var hh1=hh(e.ts).slice(6);var lab=e.failed?"❌ 失败通知":"📬 系统已投递";
+return '<div class="s" style="color:'+(e.failed?"#c62828":"#2E7D32")+'">→ '+lab+" "+hh1+" · "+esc(e.subject)+"</div>"}).join("");}
+if(r.systemBatch){out+='<div class=s style="color:#888">→ 🔁 run 结束后发生批量重发 '+r.systemBatch.count+" 封（QQ 反馈触发，含旧报，略）</div>";}
+return out}
 function pick(id){document.querySelectorAll(".run").forEach(function(e){e.classList.remove("on")});var card=document.getElementById("run"+id);if(card)card.classList.add("on");CUR=DATA.runs[id-1];exitSearch();renderMain();document.getElementById("main").scrollTop=0}
 function onTool(){TOOLF=document.getElementById("ftool").value;var q=document.getElementById("q");if(q.value.trim().length>=2){onSearch()}else{renderSide();if(CUR)renderMain()}}
 

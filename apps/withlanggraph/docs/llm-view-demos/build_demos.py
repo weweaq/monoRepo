@@ -18,7 +18,7 @@ import argparse
 import json
 import re
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]  # apps/withlanggraph
@@ -44,7 +44,11 @@ def load_day(date: str) -> list[dict]:
 
 
 def _parse_ts(ts: str) -> datetime:
-    return datetime.fromisoformat(ts)
+    dt = datetime.fromisoformat(ts)
+    if dt.tzinfo is None:
+        # llm_requests ts is naive; project convention is East-8
+        dt = dt.replace(tzinfo=_parse_ts("2000-01-01T00:00:00+08:00").tzinfo)
+    return dt
 
 
 def _content_text(content) -> str:
@@ -81,6 +85,29 @@ def classify_run(calls: list[dict]) -> tuple[str, str, str]:
     if human:
         return "chat", "QQ 对话", _one_line(htext, 70)
     return "other", "其他调用", _one_line(htext, 70)
+
+
+def load_system_events(date: str) -> list[dict]:
+    """System-side actions from app.jsonl (not LLM calls): email deliveries etc."""
+    path = ROOT / "logs" / date / "app.jsonl"
+    if not path.is_file():
+        return []
+    events = []
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            if "deliver_email sent" not in line:
+                continue
+            try:
+                e = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            events.append({
+                "ts": e.get("ts"),
+                "pid": e.get("pid"),
+                "subject": str(e.get("subject") or ""),
+                "failed": "[FAILED]" in str(e.get("subject") or ""),
+            })
+    return events
 
 
 def build_runs(records: list[dict]) -> list[dict]:
@@ -169,6 +196,8 @@ def build_runs(records: list[dict]) -> list[dict]:
                 last_ai_text = m["text"]
                 break
         kind, title, task = classify_run(calls)
+        run_pids = {c.get("pid") for c in calls if c.get("pid")}
+        run_end = calls[-1].get("ts")
         out.append({
             "id": ri,
             "kind": kind,
@@ -176,11 +205,43 @@ def build_runs(records: list[dict]) -> list[dict]:
             "task": task,
             "lastAi": _one_line(last_ai_text, 70),
             "start": calls[0].get("ts"),
-            "end": calls[-1].get("ts"),
+            "end": run_end,
+            "pids": sorted(run_pids),
             "toolsUsed": tools_used,
             "calls": call_objs,
         })
     return out
+
+
+def attach_system_events(runs: list[dict], events: list[dict]) -> None:
+    """Attach post-run system deliveries to runs: same pid + within 300s after run end.
+
+    A run's own delivery = a single distinct subject in the window. Multiple distinct
+    subjects within seconds = a QQ-feedback redeliver batch (old reports resent) —
+    reported as a batch note, not as this run's delivery. Near-duplicates (same
+    subject within 1s) collapse.
+    """
+    for run in runs:
+        end = _parse_ts(run["end"])
+        seen: set[tuple[str, str]] = set()
+        evs: list[dict] = []
+        for e in events:
+            if e["pid"] not in run["pids"]:
+                continue
+            ts = _parse_ts(e["ts"])
+            if not (end <= ts <= end + timedelta(seconds=300)):
+                continue
+            key = (e["subject"], e["ts"][:19])
+            if key in seen:
+                continue
+            seen.add(key)
+            evs.append(e)
+        subjects = {e["subject"] for e in evs}
+        if len(subjects) > 1:
+            run["systemEvents"] = []
+            run["systemBatch"] = {"ts": min(e["ts"] for e in evs), "count": len(evs)}
+        else:
+            run["systemEvents"] = sorted(evs, key=lambda x: x["ts"])
 
 
 def main() -> int:
@@ -191,11 +252,13 @@ def main() -> int:
     records = load_day(args.date)
     if not records:
         sys.exit("no parseable records")
+    runs = build_runs(records)
+    attach_system_events(runs, load_system_events(args.date))
     data = {
         "date": args.date,
         "generated": datetime.now().isoformat(timespec="seconds"),
-        "source": f"logs/{args.date}/llm_requests.jsonl",
-        "runs": build_runs(records),
+        "source": f"logs/{args.date}/llm_requests.jsonl + logs/{args.date}/app.jsonl(投递)",
+        "runs": runs,
     }
     blob = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
 
