@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><title>Demo C payload 检查器 · 2026-10-03</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:"Segoe UI","Microsoft YaHei",sans-serif;background:#f5f6f8;color:#2D3142;font-size:13px}
+header{position:sticky;top:0;z-index:9;background:#fff;padding:10px 16px;box-shadow:0 1px 3px rgba(0,0,0,.12);display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+header h1{font-size:15px}
+header .meta{color:#888;font-size:12px}
+.badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;margin-right:4px}
+.role-system{background:#EDE7F6;color:#4527A0}.role-human{background:#E3F2FD;color:#1565C0}
+.role-ai{background:#E8F5E9;color:#2E7D32}.role-tool{background:#FFF3E0;color:#E65100}
+.chip{display:inline-block;background:#EEF1F5;border-radius:4px;padding:1px 6px;font-size:11px;margin:1px 2px;color:#455A64}
+pre{background:#263238;color:#ECEFF1;padding:10px;border-radius:6px;overflow:auto;max-height:380px;font-family:Consolas,monospace;font-size:12px;white-space:pre-wrap;word-break:break-all}
+.exp{cursor:pointer}.exp:hover{background:#ECEFF1}
+button{border:1px solid #ccc;background:#fff;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:12px}
+button:hover{background:#eef1f5}
+.muted{color:#999}
+
+#top{padding:8px 16px;background:#fff;border-bottom:1px solid #e3e5e8;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+#top select{border:1px solid #ccc;border-radius:6px;padding:4px 8px;font-size:12px;min-width:340px}
+#wrap{display:flex;height:calc(100vh - 92px)}
+#left{flex:1.1;overflow:auto;padding:12px 14px}
+#right{flex:1;border-left:1px solid #e3e5e8;overflow:auto;padding:12px 14px;background:#FBFCFD}
+.bubble{background:#fff;border-radius:10px;box-shadow:0 1px 3px rgba(0,0,0,.1);margin-bottom:8px;overflow:hidden;border-left:4px solid #ccc}
+.bubble.system{border-left-color:#8E24AA}.bubble.human{border-left-color:#1E88E5}.bubble.ai{border-left-color:#43A047}.bubble.tool{border-left-color:#F9A825}
+.bubble>.bh{padding:6px 10px;cursor:pointer;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.bubble>.bb{display:none;padding:0 10px 10px}.bubble.open>.bb{display:block}
+.bubble.new>.bh{background:#E8F5E9}
+.bubble.new::after{content:"NEW";font-size:10px;color:#2E7D32;margin-left:auto;font-weight:700}
+h3.sec{margin:12px 0 6px;font-size:13px}
+</style></head><body>
+<header><h1>Demo C · payload 检查器（prompt 调试）</h1><span class="meta">2026-10-03 · 左=对话还原（绿色 NEW=相对上次调用新增）· 右=raw JSON</span></header>
+<div id="top">
+<select id="sel" onchange="pick(this.value)"></select>
+<label><input type="checkbox" id="onlynew" onchange="render()"> 只看新增消息</label>
+<label><input type="checkbox" id="autonew" onchange="render()"> 新消息自动展开</label>
+<button onclick="copyJSON()">复制该调用 JSON</button>
+</div>
+<div id="wrap"><div id="left"></div><div id="right"><h3 class="sec">raw JSON</h3><pre id="raw"></pre></div></div>
+<script>const DATA=__DATA__;
+
+function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}
+function fmtC(n){return n>=1000?(n/1000).toFixed(1)+"k":n}
+function pretty(o){try{return JSON.stringify(o,null,2)}catch(e){return String(o)}}
+function hh(ts){return (ts||"").replace("T"," ").slice(5,19)}
+function badge(role){return '<span class="badge role-'+role+'">'+role+'</span>'}
+
+let CUR=null;
+function pick(v){const p=v.split(':');CUR=DATA.runs[p[0]-1].calls[p[1]-1];document.getElementById('raw').textContent=JSON.stringify(CUR,null,2);render()}
+function render(){const c=CUR;const only=document.getElementById('onlynew').checked;const auto=document.getElementById('autonew').checked;const start=only?Math.min(c.newIdxStart,c.msgs.length):0;
+let h='<div class=muted>调用 #'+c.i+' · run 内第 '+c.i+' 次 · '+hh(c.ts)+' · '+c.provider+'/'+c.model+' · '+(c.msgsCount?'消息 '+c.msgsCount+' 条':'无消息列表输入')+'（新增 '+c.newCount+'） · 绑定工具 '+c.toolsBound+'</div>';
+c.msgs.forEach(function(m,i){if(i<start)return;const isNew=i>=c.newIdxStart;
+h+='<div class="bubble '+esc(m.role)+(isNew&&i>=c.newIdxStart?' new':'')+((isNew&&auto)||!isNew?' open':'')+'"><div class="bh" onclick="this.parentNode.classList.toggle(\'open\')">'+badge(m.role)+(m.name?'<span class=chip>'+esc(m.name)+'</span>':'')+(m.toolCallId?'<span class=chip>id:'+esc(String(m.toolCallId).slice(0,12))+'</span>':'')+'<span class=muted>'+fmtC(m.chars)+'字 · 第'+(i+1)+'条</span></div><div class="bb"><pre>'+esc(m.text)+'</pre>'+(m.toolCalls.length?'<h4>tool_calls</h4><pre>'+esc(pretty(m.toolCalls))+'</pre>':'')+'</div></div>'});
+if(c.turnToolCalls.length){h+='<h3 class="sec">本轮工具调用（结果在下一次调用的消息里）</h3>'+c.turnToolCalls.map(function(tc){return '<div class="bubble tool open"><div class="bh">🔧 <b>'+esc(tc.name)+'</b><span class=muted>result '+(tc.result?tc.resultChars:0)+'字</span></div><div class="bb"><div><b>args</b></div><pre>'+esc(pretty(tc.args))+'</pre><div><b>result</b></div><pre>'+esc(tc.result==null?"（无结果记录）":tc.result)+'</pre></div></div>'}).join('')}
+document.getElementById('left').innerHTML=h}
+function copyJSON(){if(CUR)navigator.clipboard.writeText(JSON.stringify(CUR,null,2)).then(function(){alert('已复制')},function(){})}
+(function(){const s=document.getElementById('sel');let h='';DATA.runs.forEach(function(r){h+='<optgroup label="run '+r.id+' · '+hh(r.start).slice(5,11)+'（'+r.calls.length+'次）">';r.calls.forEach(function(c){h+='<option value="'+r.id+':'+c.i+'">run'+r.id+' 调用#'+c.i+' · '+hh(c.ts).slice(6)+' · '+(c.turnToolCalls.length?c.turnToolCalls.length+'个工具':'无工具')+' · 新增'+c.newCount+'</option>'});h+='</optgroup>'});s.innerHTML=h;pick(s.value)})();
+</script></body></html>
