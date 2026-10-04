@@ -1,8 +1,22 @@
 # 日报链路 v3 实测体验指南（2026-10-04）
 
-> 对象：2026-10-03/04 落地的日报链路重设计 v3（提交序列 `1476d35`→`ab7daaf`，设计稿 `daily-report-redesign.md`）。
-> 用法：按 §0 准备一次，然后 §1→§4 按顺序点；§5 是不用动手的自然验证；每步都给了"预期看到什么"，对不上就是问题。
+> 对象：2026-10-03/04 落地的**全部改动**（提交 `25cf74d`→`6c7d1f9`）。§1~§7 是日报链路 v3 主线；**§8 是两天内其余改动的点验路径**（智谱 provider / target_day / 假阴性兜底 / mermaid-viewer 锚点 / dev-console / 慢测试 / 体检定时任务）。
+> 用法：按 §0 准备一次，然后按 §8 索引表挑感兴趣的点；每步都给了"预期看到什么"，对不上就是问题。
 > 注意：**"原样替换"模式已设计、尚未实施**——评审页批注框里目前只有"提交修订"（LLM 改写）一种方式，找不到属正常。
+
+## §8 索引：两天改动 → 验证路径速查
+
+| 改动 | 提交 | 怎么验证 | 章节 |
+|------|------|---------|------|
+| 评审页闭环 + health 归因 + rerun | `1476d35`~`ab7daaf` | 浏览器点 §1/§2，或 `--no-email` rerun | §1/§2/§4 |
+| 智谱 GLM provider | `e650284` | llm_requests.jsonl 看 provider/model | §8.1 |
+| 日报补跑 target_day 切片 | `25cf74d` | rerun 后邮件讲的是目标日的事 | §8.2 |
+| langTrack 历史日假阴性兜底 | `5fda986` | langTrack dashboard 看历史日 | §8.3 |
+| 日报 prompt 禁自调 send_email | `2c6f41c` | 例行日报只收一封、主题规范 | §5 |
+| mermaid-viewer 锚点符号+行号 | `44a27c3` | 打开 viewer 点节点/复制 LLM 提示词 | §8.4 |
+| dev-console langtrack"打开"按钮 | `909764e` | dev-console 点按钮直达 dashboard | §8.5 |
+| 慢测试修复（他人）+ 提速验证 | — | 跑全量 pytest 计时 | §8.6 |
+| 仓库体检 skill + 每天 9:00 定时任务 | `7f95750` + automation | 次日 9:00 看体检报告 | §8.7 |
 
 ---
 
@@ -13,13 +27,14 @@
    - gacore 进程必须加载 v3 代码（信息包/修复阶梯/版本号都在里面）；
    - review 服务当前是手工拉起的临时实例，start.bat 会接管为标准方式；
    - langtrack 服务的 dashboard 用上新版 fact_card。
-3. **30 秒自检**（三个都对再往下走）：
+3. **60 秒自检**（都对再往下走）：
 
 | 检查 | 操作 | 预期 |
 |------|------|------|
 | review 活着 | 浏览器开 `http://127.0.0.1:8010/review` | 自动跳转到 `/review/最近日期`（307 跳转，不是 404） |
 | 数据在 | 同页能看到日报正文和 `[节-序号]` 角标 | — |
 | dev-console | 开 dev-console 页 | 多出 `review` 服务卡片，running=True，有"打开"按钮 |
+| 其余服务 | langtrack `:8000/dashboard`、mermaid-viewer `:8123/.../viewer.html` | 均能打开（§8.3/§8.4 要用） |
 
 ---
 
@@ -144,3 +159,53 @@ uv run python -m gacore.rerun --day 2026-10-03 --no-email
 - [ ] QQ 订正→确认 老路径不回归；坏锚点自动升级 ②
 - [ ] `--no-email` rerun 后 jsonl 9 源齐全、无 _LANGTRACK、pack_detail 10 文件
 - [ ] 今晚例行日报：jsonl trigger=scheduled、主题无 vN 无"补跑"
+
+---
+
+## §8 两天内其余改动点验
+
+### 8.1 智谱 GLM provider（`e650284`）
+
+- **配置确认**：`apps/withlanggraph/.env` 里 `LLM_PROVIDER=zhipu`、`ZHIPU_API_KEY=...`（有值）
+- **实际生效证据**：开 `apps/withlanggraph/logs/2026-10-03/llm_requests.jsonl`（当天有日报/对话就有），任意一行看 `"provider": "zhipu", "model": "GLM-5.3-Flash"`——真实请求走的智谱
+- 切回 deepseek 只需改 `.env` 的 `LLM_PROVIDER` 并重启 gacore
+
+### 8.2 日报补跑 target_day 切片（`25cf74d`）
+
+- 补跑 9-11~9-20 中任意一天：`uv run python -m gacore.rerun --day 2026-09-15 --no-email`
+- **预期**：生成的日报讲的是 **9-15 那天**的事（langTrack 事实卡按目标日切片），而不是运行日的空轨迹——修复前补跑会"只字不提目标日行程"
+- 佐证：scheduled 存档 User Prompt 里的生活事实卡 `day=2026-09-15`
+
+### 8.3 langTrack 历史日假阴性兜底（`5fda986`）
+
+- 打开 langtrack 服务的 dashboard：`http://127.0.0.1:8000/dashboard`
+- 任选一个历史日（如 2026-09-28）：显示"屏幕 3.5h / 哔哩哔哩…"即读取正常——修复前这种日会被误报"无手机数据"
+- 兜底逻辑平时不触发（数据健康时），它的价值是"日报构建时刻汇总表缺行时自动补建"，从 dashboard 的稳定输出间接确认
+
+### 8.4 mermaid-viewer 评审锚点改版（`44a27c3`）
+
+1. dev-console → mermaid-viewer 卡片"打开"（`http://127.0.0.1:8123/apps/mermaid-viewer/viewer.html`），加载 `apps/withlanggraph/docs/architecture-flow.mmd`
+2. **点任意节点** → 左下弹出的批注锚点预期是 **`节点 SC（行 9）`** 这种「符号+行号」格式，不再是 `flowchart-SC-2` 这种无意义 DOM id
+3. **点边标签**写一条意见 → 锚点是 `连线 <源码行原文>（行 N）`
+4. 点**一键复制 LLM 修复提示词** → 每条意见带 `loc: 节点 XX（行 N）` + `源码行:` 原文；历史遗留的旧格式锚点（如 `edge label`）会保持原样（已知边界）
+5. 逻辑回归：`node apps/mermaid-viewer/tests/check_prompt_logic.js` → 13 项全 PASS
+
+### 8.5 dev-console langtrack"打开"按钮（`909764e`）
+
+- dev-console → langtrack 卡片 → "打开"按钮 → 直达 `http://127.0.0.1:8000/dashboard`
+- 对照：gacore（无 HTTP 端口）与 py-wei 卡片**没有**"打开"按钮——这是有意为之，不是缺失
+
+### 8.6 测试提速验证（慢测试已由他人修复）
+
+```
+uv run --all-packages pytest -q
+```
+
+- **预期：全量 1244 passed / 5 skipped，总时长约 1~2 分钟**（修复前 5~10 分钟）
+- test_scheduler 的 TestRunJob 每个用例 24s → 亚秒级；不再有真实 LLM 调用和 Edge/bili 真实读取
+
+### 8.7 仓库体检定时任务（`7f95750` + automation）
+
+- 每天 **9:00** 自动执行：提交完整性盘点 → ruff/pytest 门禁 → 文档代码三处同步抽查 → 输出体检报告
+- 验证：次日 9 点后在 Automations 页看运行记录与报告；也可随时手动触发一次
+- 它会自动盯住：工作区是否干净、架构图与代码是否失真（比如 §8.4 那类改动若忘了同步文档会被点名）
