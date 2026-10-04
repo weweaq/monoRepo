@@ -809,7 +809,7 @@ def _health_source_page(cfg: Config, date: str, key: str) -> str:
         f"{_funnel_bars(entry)}"
         '<div class="dual">'
         '<section class="dsec" style="flex:1.4">'
-        f'<h3>完整取数详情 <span class="small muted">{len(attrs) if attrs else len([l for l in detail_body.splitlines() if l.strip()])} 行 · 灰色删除线 = 未进渲染文本</span></h3>'
+        f'<h3>完整取数详情 <span class="small muted">{len(attrs) if attrs else len([l for l in detail_body.splitlines() if l.strip()])} 行 · 灰色删除线 = 未进渲染文本 · 归因口径：该行首 token 是否出现在渲染文本（启发式，个别行可能误判）</span></h3>'
         f"{chips_html}"
         f'<div class="scroll">{left}</div>'
         "</section>"
