@@ -874,6 +874,7 @@ flowchart LR
 - 配置：`get_llm`（`src/gacore/llm.py`）返回实例前统一 `install_llm_logging(llm, provider)`——单挂点覆盖主 agent graph / scheduler job / qq trivial 三路，不侵入各调用点。
 - 机制：`install_llm_logging` 对模型实例 monkey-patch `invoke/ainvoke/stream/astream/bind_tools`，capture 后原样转发；`bind_tools` 把工具定义暂存到实例（`_gacore_bound_tools`），后续调用随记录写入；调用前拦截任意方法拼完整记录（messages / tools / params / provider / model / run_kind / timestamp / thread?）。
 - 落盘：`logs/{YYYY-MM-DD}/llm_requests.jsonl`，JSONL 追加写，`ensure_ascii=False`，utf-8。
+- **session 同源（2026-10-04）**：记录的 `session` 即 `jsonl_logger.session_id()`（app.jsonl 的进程级 id）。此前两套 sink 各自 `uuid4()` 生成，跨日志只能按 pid+时间窗启发式关联（pid 会被进程重启复用）；现在同一进程的请求行与系统侧行**精确 join**，历史日志（两 id 不同期）由消费侧按 pid 兜底（`docs/llm-view-demos/build_demos.py` 的 attach_system_events，session 命中或 pid 命中均接受）。
 - 脱敏：递归遍历结构，键名命中 `api_key|access_token|Authorization|secret|token`（大小写不敏感）的值 → `***`；超长字符串（>2000 字符）截断；`messages` 内 image 内容只记元数据不记 base64。
 - 兜底：登录全程 try/except，失败仅 best-effort 静默（不阻断模型调用）；线程安全借 `threading.Lock`。
 - 验证（桩 FakeModel，不联网）：invoke/ainvoke/astream/stream 四 run_kind 全部写盘；绑 tools 后记录含 ntools=2；params 含 temperature/model_kwargs；api_key 掩码 `***` 且原文未泄漏；py_compile 四文件 EXIT=0。

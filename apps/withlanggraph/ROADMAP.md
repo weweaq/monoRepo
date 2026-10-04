@@ -983,3 +983,20 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 **待办更新**：
 - [ ] 【已排期后续优化】LLM 定期蒸馏：把 ~24k 字符编年史定期蒸馏为"当前画像摘要"（接 8-6 memory proxy 课题），替代采样窗口成为画像 compact 的最终形态——用户确认必定要做，本期先以锚点+尾窗过渡。
 - [ ] 观察 3 天日报：长期画像是否引用到 09 月以后的事实（尾窗生效的写作侧证据）。
+
+## [2026-10-04] 日志 session 同源：llm_requests.jsonl 与 app.jsonl 精确关联
+
+**背景**：LLM 运行可视化 demo（`docs/llm-view-demos/`）需要把系统侧动作（投递/episodic 同步等，记于 `logs/{date}/app.jsonl`）关联到对应的 LLM 调用序列（记于 `llm_requests.jsonl`），发现两套 sink 的进程级 session id 互不相通——`jsonl_logger.py` 与 `llm_request_log.py` 各自模块级 `uuid4().hex[:8]`，只能按 pid+时间窗启发式 join，而 pid 会被进程重启复用，存在误关联风险。
+
+**已完成**：
+- `jsonl_logger.py`：新增公开函数 `session_id()`（返回进程级 `_SESSION_ID`），成为 gacore 全部日志 sink 的唯一 session 源。
+- `llm_request_log.py`：`_SESSION_ID` 改为 `session_id()` 复用（本来就 import 该模块取 `_SECRET_KEYS`，无新依赖）；模块 docstring 补同源语义。
+- 测试：`tests/test_log_session_join.py` 2 项——两 sink `_SESSION_ID` 相等；`_JsonlFormatter` 产出的 app.jsonl 行 session 字段等于 `session_id()`。
+- demo 消费侧（`docs/llm-view-demos/build_demos.py` `attach_system_events`）：进程匹配改为"session 命中或 pid 命中"双路——新日志精确 join，历史日志（两 id 不同期，session 不匹配不构成异进程证据）按 pid 兜底，2026-10-03 数据回归通过（run1/run6 投递归属、run2/3/4 批量重发判别均不变）。
+
+**实测验证**：`uv run pytest tests/test_log_session_join.py tests/test_jsonl_logger_daily.py tests/test_llm.py` → 26 passed；ruff 通过；demo 重建后 10-03 关联结果与修复前一致（历史数据兜底路径生效）。
+
+**偏差说明**：仅统一 id 来源，两侧日志的格式/落盘/脱敏均未改动；架构图 OUT 节点（jsonl_logger + llm_request_log）行为不变，无需改图。
+
+**待办更新**：
+- [ ] 观察下次重启后（2026-10-05 起）的新日志：同一天内多进程的 session 应与各自 app.jsonl 行一致（精确 join 生效的直接证据）。
