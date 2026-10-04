@@ -1,19 +1,31 @@
-"""LLM request-body logging for gacore: capture the full payload sent to the model.
+"""LLM request+response body logging for gacore: capture the full call unit.
 
 Every real model call — the main agent graph (incl. scheduled jobs that reuse the same
-graph), the QQ trivial-reply branch, and any future get_llm caller — is intercepted at the
-model instance level (monkey-patched invoke / ainvoke / stream / astream / bind_tools) and
-appended as one JSON line to ``logs/<YYYY-MM-DD>/llm_requests.jsonl``, side-by-side with
-the existing ``app.jsonl`` so a failing turn can be replayed.
+graph), the QQ trivial-reply branch, and any future get_llm caller — is intercepted at
+the model instance level (monkey-patched invoke / ainvoke / stream / astream / bind_tools).
+One JSON line per call = the complete unit for ops triage: the full request (messages,
+tool definitions, params) PLUS the response (content, tool_calls, token usage), the
+duration, and — when the call fails — the error. Lines are written after the call
+completes so response and duration land in the same record.
 
 What is captured per request:
 - ts / session / pid / provider / model
   (session is the SAME per-process id as app.jsonl's — see jsonl_logger.session_id —
   so a request line joins the system-side lines of its process exactly)
 - run kind (invoke|ainvoke|stream|astream)
-- the full message list (SYSTEM / HUMAN / AI / TOOL payloads, role + content + tool_calls)
+- the full message list (SYSTEM / HUMAN / AI / TOOL payloads, role + content + tool_calls);
+  non-message inputs (plain string prompts from judge/structured calls) are wrapped as a
+  single user message instead of being dropped
 - tool definitions (name / description / args schema) captured at bind_tools time
 - common request parameters (temperature, max_tokens, top_p, model_kwargs, ...)
+
+What is captured per response:
+- content (truncated like request messages) and content_chars
+- tool_calls issued by the model (masked)
+- usage_metadata (input/output/total tokens) and finish_reason when the provider exposes them
+- on failure: {"error": "Type: message"} and the original exception is re-raised unchanged
+- on streaming: aggregated text + tool_call_chunks + usage, with "interrupted": true when
+  the consumer closed the generator early
 
 What is never captured: API keys and other secret-valued fields — values under keys
 matching the jsonl_logger secret set are masked with "***" recursively, and the LLM
@@ -46,7 +58,8 @@ _MAX_MESSAGE_CHARS: Final = 30000
 # request lines join system-side lines of the same process exactly — no pid guessing.
 _SESSION_ID: Final = session_id()
 _PID: Final = os.getpid()
-_WRITE_LOCK: threading.RLock = threading.RLock()
+
+_WRITE_LOCK = threading.RLock()
 
 
 def _mask(obj: Any) -> Any:
@@ -67,6 +80,21 @@ def _truncate(text: str, limit: int = _MAX_MESSAGE_CHARS) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + f"...[truncated {len(text) - limit} chars]"
+
+
+def _content_text(content: Any) -> str:
+    """Flatten message content (str or block list) to one text blob (for lengths/joins)."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict):
+                parts.append(str(block.get("text") or block.get("type") or ""))
+        return "".join(parts)
+    return str(content or "")
 
 
 def _serialize_content(content: Any) -> Any:
@@ -137,17 +165,105 @@ def _extract_messages(input_: Any) -> list[BaseMessage]:
     return []
 
 
+def _messages_to_log(input_: Any) -> list[BaseMessage | dict[str, Any]]:
+    """Messages for the record; wrap non-message inputs (judge/structured string prompts).
+
+    The memory judge and structured-output calls invoke the model with a plain string,
+    not a BaseMessage list — previously those lines recorded zero messages, which read
+    as "empty call" in ops views. Wrap them verbatim as a single user message.
+    """
+    msgs = _extract_messages(input_)
+    if msgs or input_ is None:
+        return list(msgs)
+    if isinstance(input_, str):
+        return [{"role": "user", "content": _truncate(input_)}]
+    try:
+        wrapped = json.dumps(input_, ensure_ascii=False, default=str)
+    except Exception:  # noqa: BLE001 — best-effort capture of exotic inputs
+        wrapped = str(input_)
+    return [{"role": "user", "content": _truncate(wrapped)}]
+
+
 def _params_from(llm: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
     """Collect the request-level params without ever touching secret fields."""
     params: dict[str, Any] = {}
     for key in ("temperature", "max_tokens", "max_output_tokens", "top_p", "top_k", "stop"):
-        value = kwargs.get(key, getattr(llm, key, None))
-        if value is not None:
-            params[key] = value if not isinstance(value, list) else [str(v) for v in value]
-    model_kwargs = kwargs.get("model_kwargs") or getattr(llm, "model_kwargs", None)
-    if model_kwargs:
-        params["model_kwargs"] = _mask(dict(model_kwargs))
+        if key in kwargs and kwargs[key] is not None:
+            params[key] = kwargs[key]
+    for key in ("temperature", "max_tokens", "top_p", "top_k"):
+        val = getattr(llm, key, None)
+        if val is not None and key not in params:
+            params[key] = val
     return params
+
+
+def _serialize_response(result: Any) -> dict[str, Any]:
+    """Best-effort response capture: content / tool_calls / usage / finish_reason."""
+    try:
+        if isinstance(result, BaseMessage):
+            resp: dict[str, Any] = {
+                "content": _serialize_content(result.content),
+                "content_chars": len(_content_text(result.content)),
+            }
+            tool_calls = getattr(result, "tool_calls", None) or []
+            if tool_calls:
+                resp["tool_calls"] = _mask(tool_calls)
+            usage = getattr(result, "usage_metadata", None)
+            if usage:
+                resp["usage"] = _mask(dict(usage))
+            meta = getattr(result, "response_metadata", None)
+            finish = meta.get("finish_reason") if isinstance(meta, dict) else None
+            if finish:
+                resp["finish_reason"] = finish
+            return resp
+        return {"kind": type(result).__name__, "text": _truncate(str(result))}
+    except Exception:  # noqa: BLE001 — never fail logging on an exotic response
+        return {"kind": type(result).__name__}
+
+
+def _error_response(e: BaseException) -> dict[str, Any]:
+    return {"error": _truncate(f"{type(e).__name__}: {e}", 500)}
+
+
+class _StreamAgg:
+    """Aggregate streamed chunks into one response record (text / tool_calls / usage)."""
+
+    def __init__(self) -> None:
+        self._parts: list[str] = []
+        self._tool_chunks: dict[int, dict[str, str]] = {}
+        self._usage: dict[str, Any] | None = None
+        self.chunks = 0
+
+    def add(self, chunk: Any) -> None:
+        self.chunks += 1
+        self._parts.append(_content_text(getattr(chunk, "content", "")))
+        usage = getattr(chunk, "usage_metadata", None)
+        if usage:
+            self._usage = dict(usage)
+        for tcc in getattr(chunk, "tool_call_chunks", None) or []:
+            if isinstance(tcc, dict):
+                idx = int(tcc.get("index") or 0)
+                slot = self._tool_chunks.setdefault(idx, {"name": "", "args": "", "id": ""})
+                slot["name"] = slot["name"] or str(tcc.get("name") or "")
+                slot["id"] = slot["id"] or str(tcc.get("id") or "")
+                slot["args"] += str(tcc.get("args") or "")
+
+    def response(self, *, error: str | None = None, interrupted: bool = False) -> dict[str, Any]:
+        resp: dict[str, Any] = {
+            "aggregated": True,
+            "chunks": self.chunks,
+            "content": _truncate("".join(self._parts)),
+            "content_chars": len("".join(self._parts)),
+        }
+        if self._tool_chunks:
+            resp["tool_calls"] = _mask([v for _, v in sorted(self._tool_chunks.items())])
+        if self._usage:
+            resp["usage"] = _mask(self._usage)
+        if error:
+            resp["error"] = error
+        if interrupted:
+            resp["interrupted"] = True
+        return resp
 
 
 def log_llm_request(
@@ -155,11 +271,15 @@ def log_llm_request(
     provider: str,
     model: str | None,
     run_kind: str,
-    messages: list[BaseMessage],
+    messages: Sequence[Any],
     tools: Sequence[Any] | None,
     params: dict[str, Any],
+    response: dict[str, Any] | None = None,
+    duration_ms: int | None = None,
 ) -> None:
-    """Append one request-body record to today's llm_requests.jsonl (best-effort)."""
+    """Append one complete call record (request + response + duration) to today's
+    llm_requests.jsonl. Written after the call completes so the response and duration
+    land in the same line; best-effort — logging must never break the model call."""
     try:
         cfg = Config.default()
         log_dir = cfg.logs_dir / time.strftime(_LOG_DIR_FORMAT)
@@ -171,10 +291,16 @@ def log_llm_request(
             "provider": provider,
             "model": model,
             "run_kind": run_kind,
-            "messages": [_serialize_message(m) for m in messages],
+            "messages": [
+                m if isinstance(m, dict) else _serialize_message(m) for m in messages
+            ],
             "tools": _serialize_tools(tools),
             "params": params,
         }
+        if duration_ms is not None:
+            record["duration_ms"] = duration_ms
+        if response is not None:
+            record["response"] = response
         line = json.dumps(record, ensure_ascii=False, default=str)
         with _WRITE_LOCK:
             with open(log_dir / _LOG_FILENAME, "a", encoding="utf-8") as fh:
@@ -205,11 +331,13 @@ def _patch_instance(obj: Any, name: str, fn: Any) -> None:
 
 
 def install_llm_logging(llm: Any, provider: str) -> Any:
-    """Monkey-patch a chat-model instance so every call logs its full request body.
+    """Monkey-patch a chat-model instance so every call logs request + response + duration.
 
-    Patches invoke/ainvoke/stream/astream (capturing messages + params) and bind_tools
-    (capturing the tool definitions). Returns the same instance unchanged so callers can
-    chain .bind()/.bind_tools() as usual. Patching is idempotent per instance.
+    Patches invoke/ainvoke/stream/astream (the record is written after the call completes
+    so the response and duration join the same line; a failed call records
+    ``response.error`` and re-raises unchanged) and bind_tools (capturing the tool
+    definitions). Returns the same instance unchanged so callers can chain
+    .bind()/.bind_tools() as usual. Patching is idempotent per instance.
     """
     if getattr(llm, "_gacore_llm_log_installed", False):
         return llm
@@ -220,7 +348,13 @@ def install_llm_logging(llm: Any, provider: str) -> Any:
     original_astream = getattr(llm, "astream", None)
     original_bind_tools = llm.bind_tools
 
-    def _capture(run_kind: str, messages: list[BaseMessage], kwargs: dict[str, Any]) -> None:
+    def _capture(
+        run_kind: str,
+        messages: Sequence[Any],
+        kwargs: dict[str, Any],
+        response: dict[str, Any] | None = None,
+        duration_ms: int | None = None,
+    ) -> None:
         log_llm_request(
             provider=provider,
             model=getattr(llm, "model_name", None) or getattr(llm, "model", None),
@@ -228,26 +362,75 @@ def install_llm_logging(llm: Any, provider: str) -> Any:
             messages=messages,
             tools=getattr(llm, "_gacore_bound_tools", None),
             params=_params_from(llm, kwargs),
+            response=response,
+            duration_ms=duration_ms,
         )
 
     def _invoke(input_: Any, *args: Any, **kwargs: Any) -> Any:
-        _capture("invoke", _extract_messages(input_), kwargs)
-        return original_invoke(input_, *args, **kwargs)
+        msgs = _messages_to_log(input_)
+        t0 = time.monotonic()
+        try:
+            result = original_invoke(input_, *args, **kwargs)
+        except Exception as e:  # noqa: BLE001 — log then re-raise unchanged
+            _capture("invoke", msgs, kwargs, response=_error_response(e), duration_ms=_ms(t0))
+            raise
+        _capture("invoke", msgs, kwargs, response=_serialize_response(result), duration_ms=_ms(t0))
+        return result
 
-    def _ainvoke(input_: Any, *args: Any, **kwargs: Any) -> Any:
-        _capture("ainvoke", _extract_messages(input_), kwargs)
-        return original_ainvoke(input_, *args, **kwargs)
+    async def _ainvoke(input_: Any, *args: Any, **kwargs: Any) -> Any:
+        msgs = _messages_to_log(input_)
+        t0 = time.monotonic()
+        try:
+            result = await original_ainvoke(input_, *args, **kwargs)
+        except Exception as e:  # noqa: BLE001 — log then re-raise unchanged
+            _capture("ainvoke", msgs, kwargs, response=_error_response(e), duration_ms=_ms(t0))
+            raise
+        _capture("ainvoke", msgs, kwargs, response=_serialize_response(result), duration_ms=_ms(t0))
+        return result
 
     async def _astream(*args: Any, **kwargs: Any) -> Any:
-        messages = _extract_messages(kwargs.get("input", kwargs.get("messages", args[0] if args else None)))
-        _capture("astream", messages, kwargs)
-        async for chunk in original_astream(*args, **kwargs):
-            yield chunk
+        msgs = _messages_to_log(kwargs.get("input", kwargs.get("messages", args[0] if args else None)))
+        t0 = time.monotonic()
+        agg = _StreamAgg()
+        error: BaseException | None = None
+        completed = False
+        try:
+            async for chunk in original_astream(*args, **kwargs):
+                agg.add(chunk)
+                yield chunk
+            completed = True
+        except Exception as e:  # noqa: BLE001 — log then re-raise unchanged
+            error = e
+            raise
+        finally:
+            _capture(
+                "astream", msgs, kwargs,
+                response=agg.response(error=_error_response(error)["error"] if error else None,
+                                      interrupted=not completed),
+                duration_ms=_ms(t0),
+            )
 
     def _stream(*args: Any, **kwargs: Any) -> Any:
-        messages = _extract_messages(kwargs.get("input", kwargs.get("messages", args[0] if args else None)))
-        _capture("stream", messages, kwargs)
-        yield from original_stream(*args, **kwargs)
+        msgs = _messages_to_log(kwargs.get("input", kwargs.get("messages", args[0] if args else None)))
+        t0 = time.monotonic()
+        agg = _StreamAgg()
+        error: BaseException | None = None
+        completed = False
+        try:
+            for chunk in original_stream(*args, **kwargs):
+                agg.add(chunk)
+                yield chunk
+            completed = True
+        except Exception as e:  # noqa: BLE001 — log then re-raise unchanged
+            error = e
+            raise
+        finally:
+            _capture(
+                "stream", msgs, kwargs,
+                response=agg.response(error=_error_response(error)["error"] if error else None,
+                                      interrupted=not completed),
+                duration_ms=_ms(t0),
+            )
 
     def _bind_tools(tools: Any, *args: Any, **kwargs: Any) -> Any:
         bound = original_bind_tools(tools, *args, **kwargs)
@@ -266,6 +449,10 @@ def install_llm_logging(llm: Any, provider: str) -> Any:
         _patch_instance(llm, "stream", _stream)
     _patch_instance(llm, "bind_tools", _bind_tools)
     return llm
+
+
+def _ms(t0: float) -> int:
+    return int((time.monotonic() - t0) * 1000)
 
 
 __all__ = ("install_llm_logging", "log_llm_request")
