@@ -218,7 +218,8 @@ class TestApiRevise:
         j = r.json()
         assert j["ok"] is True and j["results"][0]["mode_used"] == "llm"
         updated = (load_delivered(cfg, DATE) or "").rstrip()
-        assert "✎ 人工订正：[工作日志-2]" in updated
+        assert "# 人工订正" in updated  # 原始修改信息独立成节
+        assert "✎ [工作日志-2]（llm 改写）上午实际去了朝阳大悦城" in updated
         recs = json.loads((cfg.root / "data" / "feedback" / "corrections" / f"{DATE}.json").read_text(encoding="utf-8"))
         assert recs[0]["mode"] == "llm"
 
@@ -240,6 +241,27 @@ class TestApiRevise:
         j = r.json()
         assert j["ok"] is False
         assert "no bullet" in j["results"][0]["error"]
+
+    def test_revise_add_op_appends_new_item_and_redelivers(self, tmp_path: Path, monkeypatch):
+        """op=add：点大标题新增子项走 API——锚点自动编序、正文落档、触发重发。"""
+        cfg = Config.for_tests(tmp_path)
+        save_delivered(cfg, DATE, REPORT)
+        deliveries: list[dict] = []
+        monkeypatch.setattr("gacore.scheduler._deliver", lambda job, cfg_, reply, err, **k: deliveries.append(reply))
+        monkeypatch.setattr("gacore.scheduler.load_jobs", lambda cfg_: [SimpleNamespace(name="daily-report")])
+        c = _client(cfg, monkeypatch)
+        r = c.post(
+            "/api/revise",
+            json={"date": DATE, "items": [{"op": "add", "section": "工作日志", "kind": "fact",
+                                           "text": "新增的一条子项"}]},
+            headers=_headers(),
+        )
+        assert r.status_code == 200
+        j = r.json()
+        assert j["ok"] is True and j["results"][0]["mode_used"] == "add"
+        body = (load_delivered(cfg, DATE) or "")
+        assert "- [工作日志-3] 新增的一条子项（人工订正）" in body
+        assert j["redeliver"]["status"] == "ok" and len(deliveries) == 1
 
     def test_revise_pref_item_lands_in_preferences_without_llm_or_mail(self, tmp_path: Path, monkeypatch):
         """pref 只落偏好库：不改正文、不调 LLM、不触发重发。"""
@@ -531,6 +553,14 @@ class TestReviewPage:
         res = c.get("/review", follow_redirects=False)
         assert res.status_code == 307
         assert re.fullmatch(r"/review/\d{4}-\d{2}-\d{2}", res.headers["location"])
+
+    def test_section_headings_clickable_for_add_item(self, tmp_path: Path, monkeypatch):
+        """大标题渲染为可点（新增子项入口）：data-section 属性 + 悬浮提示。"""
+        cfg = Config.for_tests(tmp_path)
+        save_delivered(cfg, DATE, REPORT)
+        c = _client(cfg, monkeypatch)
+        page = c.get(f"/review/{DATE}").text
+        assert 'data-section="工作日志"' in page and "＋ 新增子项" in page
 
     def test_renders_delivered_report_with_anchor_badges(self, tmp_path: Path, monkeypatch):
         cfg = Config.for_tests(tmp_path)

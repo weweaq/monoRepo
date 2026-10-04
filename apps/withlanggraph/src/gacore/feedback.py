@@ -583,7 +583,6 @@ def load_delivered(cfg: Config, date: str) -> str | None:
 
 
 _CORRECTION_MARK: Final = "（人工订正）"
-_LLM_MARK: Final = "✎ 人工订正："
 
 
 def _verbatim_patch(body: str, anchor: str, text: str, intent: str) -> tuple[str, str] | None:
@@ -609,6 +608,71 @@ def _save_delivered_raw(cfg: Config, date: str, updated: str) -> None:
     path = _report_path(cfg, date)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(updated, encoding="utf-8", newline="")
+
+
+_CORR_SECTION: Final = "人工订正"
+
+
+def _split_correction_section(body: str) -> tuple[str, list[str]]:
+    """把文末维护的「# 人工订正」区块拆出来：返回 (不含该区块的正文, 既有条目行)。
+
+    区块条目用 "✎ " 前缀的普通行（非 "- " bullet）——stamp_report_bullets 只盖章
+    bullet，普通行天然免疫。无区块时原样返回。
+    """
+    lines = (body or "").splitlines()
+    idx = next((i for i, ln in enumerate(lines) if ln.strip() == f"# {_CORR_SECTION}"), None)
+    if idx is None:
+        return (body or "").rstrip(), []
+    base = "\n".join(lines[:idx]).rstrip()
+    entries = [ln for ln in lines[idx + 1:] if ln.strip()]
+    return base, entries
+
+
+def _with_correction_entry(base: str, entries: list[str], entry: str) -> str:
+    """重建正文 = base + 维护后的「# 人工订正」区块（既有条目 + 新条目）。"""
+    merged = entries + [entry]
+    return base + f"\n\n# {_CORR_SECTION}\n" + "\n".join(merged)
+
+
+def add_section_item(cfg: Config, date: str, section: str, text: str, *, note: str = "") -> dict:
+    """评审页「点大标题新增子项」：在指定分节末尾追加一条新 bullet，逐字落档。
+
+    新锚点 = [section-{既有最大序号+1}]，文本带（人工订正）标记；审计记录
+    mode=verbatim（与原样替换同语义：无 LLM、逐字生效），并登记进「# 人工订正」
+    区块。section 须为日报中已存在的分节标题。
+    """
+    out: dict = {"status": "error", "mode_used": "add", "date": date, "anchor": "",
+                 "correction": {}, "replaced_from": "", "error": "", "revise": None}
+    body = load_delivered(cfg, date)
+    if body is None:
+        out["error"] = f"no delivered report for {date}"
+        return out
+    if not text.strip():
+        out["error"] = "empty_text"
+        return out
+    section = section.strip()
+    lines = body.splitlines()
+    head_i = next((i for i, ln in enumerate(lines) if ln.strip() == f"# {section}"), None)
+    if head_i is None:
+        out["error"] = f"no section {section!r} in delivered report"
+        return out
+    nums = [int(m.group(1)) for m in re.finditer(rf"\[{re.escape(section)}-(\d+)\]", body)]
+    n = (max(nums) + 1) if nums else 1
+    anchor = f"[{section}-{n}]"
+    end_i = next((i for i in range(head_i + 1, len(lines)) if lines[i].strip().startswith("#")), len(lines))
+    seg = lines[head_i + 1:end_i]
+    while seg and not seg[-1].strip():
+        seg.pop()
+    seg.append(f"- {anchor} {text.strip()}{_CORRECTION_MARK}")
+    lines[head_i + 1:end_i] = seg
+    updated = "\n".join(lines)
+    base, entries = _split_correction_section(updated)
+    entry = f"✎ {anchor}（新增子项）{text.strip()}" + (f"；备注：{note.strip()}" if note.strip() else "")
+    updated = _with_correction_entry(base, entries, entry)
+    _save_delivered_raw(cfg, date, updated)
+    rec = record_correction(cfg, date, anchor, "fact", text, mode="verbatim", note=note)
+    out.update(status="ok", anchor=anchor, correction=rec)
+    return out
 
 
 def apply_correction(
@@ -660,6 +724,10 @@ def apply_correction(
             out["error"] = f"no bullet with {anchor} in delivered report"
             return out
         updated, replaced_from = patched
+        # 同步登记进「# 人工订正」区块（原始修改信息集中展示，见 _split_correction_section）
+        base, entries = _split_correction_section(updated)
+        entry = f"✎ {anchor}（原样替换）{text.strip()}" + (f"；备注：{note.strip()}" if note.strip() else "")
+        updated = _with_correction_entry(base, entries, entry)
         _save_delivered_raw(cfg, date, updated)
         rec = record_correction(cfg, date, anchor, "fact", text,
                                 mode="verbatim", note=note, replaced_from=replaced_from)
@@ -670,12 +738,16 @@ def apply_correction(
         return out
 
     # ---- ② LLM 最小修订 ----
-    res = revise_report_llm(cfg, date, [{"anchor": anchor, "text": text.strip()}])
+    # 先剥离「# 人工订正」区块再喂给 LLM：区块由代码维护，不进 diff 门禁，
+    # 避免 LLM 转写/丢条目导致的门禁噪声；修订完成后带新条目重建。
+    base, entries = _split_correction_section(body)
+    entry = f"✎ {anchor}（llm 改写）{text.strip()}" + (f"；备注：{note.strip()}" if note.strip() else "")
+    res = revise_report_llm(cfg, date, [{"anchor": anchor, "text": text.strip()}], body=base)
     out["revise"] = res
     if not res["ok"]:
         out["error"] = res["error"] or "llm_revise_failed"
         return out
-    marked = res["text"].rstrip() + f"\n\n{_LLM_MARK}{anchor}"
+    marked = _with_correction_entry(res["text"].rstrip(), entries, entry)
     _save_delivered_raw(cfg, date, marked)
     rec = record_correction(cfg, date, anchor, "fact", text, mode="llm", note=note)
     out.update(status="ok", mode_used="llm", correction=rec)
@@ -1023,8 +1095,11 @@ def _revise_user_message(body: str, items: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def revise_report_llm(cfg: Config, date: str, items: list[dict]) -> ReviseResult:
+def revise_report_llm(cfg: Config, date: str, items: list[dict], *, body: str | None = None) -> ReviseResult:
     """C4 ladder ② — LLM minimal revision of the delivered report (the default repair path).
+
+    ``body`` 覆盖待修订全文（apply_correction 剥离「# 人工订正」区块后传入，LLM 不看该
+    区块、diff 门禁也不会被它干扰；区块由 apply_correction 在修订后重建）。
 
     Feeds ONLY the delivered full text plus ``items`` ([{"anchor": "[工作日志-2]", "text": ...}])
     to a zero-tool single-turn call — ``get_llm([], os.environ, bind_tools=False)`` after
@@ -1040,7 +1115,8 @@ def revise_report_llm(cfg: Config, date: str, items: list[dict]) -> ReviseResult
     version tag). An anchor matching no section of the delivered text fails fast with
     error="anchor_not_found:..." — silently dropping a correction is never acceptable.
     """
-    body = load_delivered(cfg, date)
+    if body is None:
+        body = load_delivered(cfg, date)
     if body is None:
         return _revise_error("no_delivered")
     norm: list[dict[str, str]] = []

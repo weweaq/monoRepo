@@ -43,6 +43,7 @@ from pydantic import BaseModel
 from gacore import scheduler
 from gacore.config import Config, load_dotenv
 from gacore.feedback import (
+    add_section_item,
     apply_correction,
     current_report_version,
     list_active_corrections,
@@ -139,6 +140,10 @@ tbody th{font-family:ui-monospace,Consolas,monospace;font-weight:500}
 .report ul{margin:6px 0;padding-left:20px}
 .report p{margin:6px 0}
 .anchor{color:var(--acc);cursor:pointer;font-size:11px;font-family:ui-monospace,Consolas,monospace;border:1px solid #d0d7de;border-radius:4px;padding:0 4px;margin-right:4px;background:#f6f8fa;white-space:nowrap}
+.sec-h{cursor:pointer}
+.sec-h:hover{color:var(--acc)}
+.sec-h .add-hint{display:none;font-size:12px;color:var(--acc);margin-left:8px;font-weight:400}
+.sec-h:hover .add-hint{display:inline}
 .anchor:hover{background:#ddf4ff}
 .actions{display:flex;gap:10px;align-items:center;margin:12px 0}
 #pending .chip{display:inline-block;border:1px solid var(--line);border-radius:12px;padding:1px 10px;margin:2px 4px;font-size:12px;background:#f6f8fa}
@@ -255,7 +260,15 @@ def _render_report_html(text: str) -> str:
         if s.startswith("#"):
             _close_list()
             level = 2 if s.startswith("# ") else 3
-            out.append(f"<h{level}>{html.escape(s.lstrip('#').strip())}</h{level}>")
+            name = s.lstrip("#").strip()
+            if level == 2:  # 大标题可点 → 新增子项（子标题不开放）
+                out.append(
+                    f'<h{level} class="sec-h" data-section="{html.escape(name)}" '
+                    f'title="点此在「{html.escape(name)}」末尾新增一条子项">'
+                    f'{html.escape(name)}<span class="add-hint">＋ 新增子项</span></h{level}>'
+                )
+            else:
+                out.append(f"<h{level}>{html.escape(name)}</h{level}>")
             continue
         m = _ANCHOR_LINE_RE.match(s)
         if m:
@@ -324,24 +337,44 @@ async function post(url, body){
 function renderPending(){
   $("pending").innerHTML = items.length
     ? "待修订 " + items.length + " 条：" + items.map((it,i) =>
-        '<span class="chip">' + esc(it.anchor) + " " + esc(it.kind) + "/" + esc(it.mode || "llm") + " " + esc(it.text.slice(0,12)) +
+        '<span class="chip">' + (it.op === "add" ? "➕新增→" + esc(it.section) : esc(it.anchor)) +
+        " " + esc(it.kind) + "/" + esc(it.mode || "llm") + " " + esc(it.text.slice(0,12)) +
         ' <button data-i="'+i+'" title="移除">×</button></span>').join("")
     : "";
   $("pending").querySelectorAll("button").forEach(b => b.onclick = () => { items.splice(+b.dataset.i,1); renderPending(); });
 }
 
+let addSection = null;  // null=批注既有锚点；分节名=点大标题进入的新增子项模式
+
 document.querySelectorAll(".anchor").forEach(el => el.addEventListener("click", () => {
+  addSection = null;
   $("f-anchor").value = el.dataset.anchor;
   $("f-text").value = "";
+  $("f-note").value = "";
+  $("side").classList.remove("hidden");
+  $("f-text").focus();
+}));
+document.querySelectorAll(".sec-h").forEach(el => el.addEventListener("click", () => {
+  addSection = el.dataset.section;
+  $("f-anchor").value = "➕ 新增子项 → " + addSection;
+  $("f-text").value = "";
+  $("f-note").value = "";
+  $("f-kind").value = "fact";
   $("side").classList.remove("hidden");
   $("f-text").focus();
 }));
 $("side-close").onclick = () => $("side").classList.add("hidden");
 
 $("f-add").onclick = async () => {
-  const item = {anchor: $("f-anchor").value, kind: $("f-kind").value, text: $("f-text").value.trim(),
-                mode: $("f-mode").value, note: $("f-note").value.trim()};
-  if (!item.text) { alert("请填写批注内容"); return; }
+  const text = $("f-text").value.trim();
+  if (!text) { alert("请填写批注内容"); return; }
+  let item;
+  if (addSection) {
+    item = {op: "add", section: addSection, kind: "fact", text, note: $("f-note").value.trim()};
+  } else {
+    item = {op: "revise", anchor: $("f-anchor").value, kind: $("f-kind").value, text,
+            mode: $("f-mode").value, note: $("f-note").value.trim()};
+  }
   if ($("f-only").checked) {
     const r = await post("/api/corrections", {date: DATE, ...item});
     if (!r) return;
@@ -352,6 +385,7 @@ $("f-add").onclick = async () => {
     items.push(item);
     renderPending();
   }
+  addSection = null;
   $("side").classList.add("hidden");
 };
 
@@ -646,14 +680,18 @@ class CorrectionIn(BaseModel):
     text: str
     mode: str = ""
     note: str = ""
+    op: str = "revise"   # revise=锚点订正；add=新增子项（仅落盘）
+    section: str = ""
 
 
 class ReviseItem(BaseModel):
-    anchor: str
+    anchor: str = ""
     kind: str = "fact"
     text: str
     mode: str = "llm"    # llm=语义改写（默认）；verbatim=原样替换（订正词逐字生效）
     note: str = ""
+    op: str = "revise"   # revise=改指定锚点；add=在 section 末尾新增子项（点大标题入口）
+    section: str = ""
 
 
 class ReviseIn(BaseModel):
@@ -776,6 +814,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         guard = _guard(request)
         if guard is not None:
             return guard
+        if payload.op == "add":
+            res = add_section_item(config, payload.date, payload.section, payload.text, note=payload.note)
+            return {"ok": res["status"] == "ok", "record": res.get("correction", {}), "error": res.get("error", "")}
         rec = record_correction(config, payload.date, payload.anchor, payload.kind, payload.text,
                                 mode=payload.mode, note=payload.note)
         return {"ok": True, "record": rec}
@@ -787,12 +828,14 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             return guard
         # 统一入口 apply_correction：与 QQ 确认同语义（auto=能原样就原样、定位不到升级
         # LLM 最小修订；verbatim/llm 强制指定）。pref 只落偏好库不改正文。
-        results = [
-            apply_correction(config, payload.date, it.anchor, it.kind, it.text,
-                             mode=it.mode, note=it.note)
-            for it in payload.items
-        ]
-        changed = [r for r in results if r["status"] == "ok" and r["mode_used"] in ("verbatim", "llm")]
+        results = []
+        for it in payload.items:
+            if it.op == "add":
+                results.append(add_section_item(config, payload.date, it.section, it.text, note=it.note))
+            else:
+                results.append(apply_correction(config, payload.date, it.anchor, it.kind, it.text,
+                                                mode=it.mode, note=it.note))
+        changed = [r for r in results if r["status"] == "ok" and r["mode_used"] in ("verbatim", "llm", "add")]
         rd: dict = {"status": "skipped"}
         if changed:
             rd = _deliver_revised(config, payload.date)

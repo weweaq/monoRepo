@@ -147,7 +147,8 @@ class TestApply:
         body = (cfg.logs_dir / "delivered_report" / "2026-09-09.md").read_text(encoding="utf-8")
         assert "- [工作日志-2] 其实是跑了四段" in body
         assert "上午收 9-08 日报尾巴" not in body
-        assert "✎ 人工订正：[工作日志-2]" in body  # 邮件人工订正标记
+        assert "# 人工订正" in body  # 原始修改信息独立成节
+        assert "✎ [工作日志-2]（llm 改写）其实是跑了四段" in body
 
     def test_appends_addition(self, tmp_path: Path, monkeypatch):
         cfg = Config.for_tests(tmp_path)

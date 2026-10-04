@@ -324,7 +324,8 @@ class TestApplyCorrection:
         )
         res = apply_correction(cfg, DATE, "[工作日志-2]", "fact", "x")
         assert res["status"] == "ok" and res["mode_used"] == "llm"
-        assert "✎ 人工订正：[工作日志-2]" in (load_delivered(cfg, DATE) or "")
+        updated = (load_delivered(cfg, DATE) or "")
+        assert "# 人工订正" in updated and "✎ [工作日志-2]（llm 改写）x" in updated
 
     def test_verbatim_forced_miss_errors_without_llm(self, tmp_path: Path, monkeypatch):
         cfg = Config.for_tests(tmp_path)
@@ -359,6 +360,30 @@ class TestApplyCorrection:
         import json as _json
         prefs = _json.loads((cfg.root / "data" / "feedback" / "preferences.json").read_text(encoding="utf-8"))
         assert prefs[0]["note"] == "排版偏好"
+
+    def test_add_section_item_appends_next_anchor(self, tmp_path: Path, monkeypatch):
+        """点标题新增子项：锚点取该节最大序号+1，追加在节末，登记人工订正区块。"""
+        cfg = Config.for_tests(tmp_path)
+        _deliver(cfg)  # REPORT 工作日志已有 -1/-2
+        from gacore.feedback import add_section_item
+        res = add_section_item(cfg, DATE, "工作日志", "新增的一条：下午去了大悦城", note="补录")
+        assert res["status"] == "ok" and res["anchor"] == "[工作日志-3]"
+        body = (load_delivered(cfg, DATE) or "")
+        assert "- [工作日志-3] 新增的一条：下午去了大悦城（人工订正）" in body
+        assert body.index("[工作日志-3]") < body.index("# 个人观察")  # 追加在节内
+        assert "# 人工订正" in body and "✎ [工作日志-3]（新增子项）新增的一条：下午去了大悦城；备注：补录" in body
+        recs = [r for r in list_active_corrections(cfg, DATE) if r["anchor"] == "[工作日志-3]"]
+        assert recs and recs[0]["mode"] == "verbatim"
+        # 再加一条 → 序号继续递增
+        res2 = add_section_item(cfg, DATE, "工作日志", "又一条")
+        assert res2["anchor"] == "[工作日志-4]"
+
+    def test_add_section_item_unknown_section_errors(self, tmp_path: Path, monkeypatch):
+        from gacore.feedback import add_section_item
+        cfg = Config.for_tests(tmp_path)
+        _deliver(cfg)
+        res = add_section_item(cfg, DATE, "不存在的节", "x")
+        assert res["status"] == "error" and "no section" in res["error"]
 
     def test_no_delivered_report_errors(self, tmp_path: Path, monkeypatch):
         cfg = Config.for_tests(tmp_path)
