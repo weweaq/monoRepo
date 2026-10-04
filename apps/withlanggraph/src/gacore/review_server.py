@@ -517,7 +517,8 @@ def _source_of(rec: dict, key: str) -> dict | None:
     return None
 
 
-def _health_matrix(cfg: Config) -> str:
+def _health_matrix(cfg: Config, end: str | None = None) -> str:
+    """14 天 × 源 状态矩阵。end（YYYY-MM-DD）为窗口末日，默认今天——支持回看历史窗口。"""
     recs = _load_health_records(cfg)
     if not recs:
         return '<p class="empty">暂无数据：data/logs/info_pack_health.jsonl 不存在或为空（daily job 运行后生成）</p>'
@@ -526,9 +527,26 @@ def _health_matrix(cfg: Config) -> str:
         d = str(rec.get("date") or "")
         if d:
             by_date[d] = rec  # 后行覆盖先行 → 同日取最新
-    dates = sorted(by_date, reverse=True)[:_HEALTH_DAYS]
-    if not dates:
+    if not by_date:
         return '<p class="empty">暂无数据：jsonl 内没有可解析的 date 字段</p>'
+    try:
+        end_d = datetime.strptime(end, "%Y-%m-%d") if end else datetime.now().astimezone()
+    except ValueError:
+        end_d = datetime.now().astimezone()
+    end_s = end_d.strftime("%Y-%m-%d")
+    window = {
+        d: by_date[d]
+        for d in by_date
+        if (end_d - timedelta(days=_HEALTH_DAYS - 1)).strftime("%Y-%m-%d") <= d <= end_s
+    }
+    dates = sorted(window, reverse=True)
+    if not dates:
+        empty = (
+            f'<p class="empty">窗口 {end_d.strftime("%Y-%m-%d")} 之前的 {_HEALTH_DAYS} 天内没有体检数据'
+            '（该源/该时段尚未运行 daily job）</p>'
+        )
+        return _page("信息包源体检", f"<h1>信息包源体检</h1>{_matrix_nav(end_s)}{empty}")
+
     newest = by_date[dates[0]]
     rows: list[str] = []
     for s in newest.get("sources", []):
@@ -563,13 +581,33 @@ def _health_matrix(cfg: Config) -> str:
 
     body = (
         "<h1>信息包源体检</h1>"
-        f'<div class="sub">最近 {len(dates)} 天 × 源 状态矩阵 · 点单元格进单源详情 · 行序按最新一天</div>'
+        f'<div class="sub">窗口 {dates[-1]} ~ {dates[0]}（{_HEALTH_DAYS} 天）× 源 · 点单元格进单源详情 · 行序按窗口内最新一天</div>'
+        f"{_matrix_nav(end_s)}"
         '<div class="legend">图例：<span class="cell st-ok">ok</span><span class="cell st-empty">empty</span>'
         '<span class="cell st-failed">failed</span><span class="cell st-missing">missing_data</span>'
         "（单元格文字为 chars）</div>"
         f'<table><thead>{head}</thead><tbody>{"".join(body_rows)}</tbody></table>'
     )
     return _page("信息包源体检", body)
+
+
+def _matrix_nav(end_s: str) -> str:
+    """窗口日期导航：±7 天平移 + 日期选择器 + 回到今天。"""
+    try:
+        e = datetime.strptime(end_s, "%Y-%m-%d")
+    except ValueError:
+        e = datetime.now().astimezone()
+    prev = (e - timedelta(days=7)).strftime("%Y-%m-%d")
+    nxt = (e + timedelta(days=7)).strftime("%Y-%m-%d")
+    today = datetime.now().astimezone().strftime("%Y-%m-%d")
+    return (
+        '<div class="dnav" style="display:flex;gap:10px;align-items:center;margin:6px 0">'
+        f'<a class="dnav-btn" href="/health?end={prev}">‹ 前一周</a>'
+        f'<span class="cur">窗口末日 {end_s}</span>'
+        f'<a class="dnav-btn" href="/health?end={nxt}">后一周 ›</a>'
+        f'<input type="date" value="{end_s}" onchange="location=\'/health?end=\'+this.value">'
+        f'<a class="dnav-btn" href="/health">今天</a></div>'
+    )
 
 
 def _split_h2(text: str) -> list[tuple[str, str]]:
@@ -609,63 +647,202 @@ def _mini_md_html(text: str) -> str:
     return "\n".join(out)
 
 
-def _chars_bars(entry: dict | None) -> str:
-    """三级字符对比条（完整取数 vs 渲染文本 vs 实际进包）；条目缺失时不渲染数字。"""
+def _funnel_bars(entry: dict | None) -> str:
+    """字符漏斗（C+ 版式，sqrt 比例条）：L2b 取数 → L1b 渲染 → L1a 进包，条上标每层差值。"""
     if not isinstance(entry, dict):
         return ""
-    labeled: list[tuple[str, int]] = []
-    for label, field in (("完整取数", "detail_chars"), ("渲染文本", "full_chars"), ("实际进包", "chars")):
+    steps: list[tuple[str, int, str]] = []
+    for label, field, cls in (
+        ("L2b 完整取数", "detail_chars", ""),
+        ("L1b 渲染文本", "full_chars", "bar-l2"),
+        ("L1a 实际进包", "chars", "bar-l3"),
+    ):
         v = entry.get(field)
         if isinstance(v, (int, float)) and v >= 0:
-            labeled.append((label, int(v)))
-    if not labeled:
+            steps.append((label, int(v), cls))
+    if len(steps) < 2:
         return ""
-    mx = max(v for _, v in labeled) or 1
-    rows = "".join(
-        f'<div class="bar-row"><span class="bar-label">{html.escape(label)}</span>'
-        f'<span class="bar-track"><span class="bar-fill" style="width:{int(v * 100 / mx)}%"></span></span>'
-        f"<span class=\"bar-num\">{v}</span></div>"
-        for label, v in labeled
-    )
-    return f'<section class="dsec"><h3>字符量对比（逐层）</h3>{rows}</section>'
+    mx = max(v for _, v, _ in steps) or 1
+    rows: list[str] = []
+    for i, (label, v, cls) in enumerate(steps):
+        cut = ""
+        if i > 0:
+            prev = steps[i - 1][1]
+            if prev > v:
+                cut = f'<span class="small muted">−{prev - v:,}</span>'
+            else:
+                cut = '<span class="small muted">无截断</span>'
+        rows.append(
+            f'<div class="bar-row"><span class="bar-label">{html.escape(label)}</span>'
+            f'<span class="bar-track"><span class="bar-fill {cls}" style="width:{max(3, int(100 * (v ** 0.5 / (mx ** 0.5))))}%"></span></span>'
+            f'<span class="bar-num">{v:,}</span>{cut}</div>'
+        )
+    return f'<section class="dsec"><h3>字符漏斗：从取数到进包</h3>{"".join(rows)}</section>'
+
+
+def _attribute_lines(detail_body: str, pack_body: str) -> list[tuple[str, bool]] | None:
+    """逐行归因（C+ 评审页）：detail 每行是否进入 pack 渲染文本。
+
+    启发式：取该行首个 token（域名/git hash/时间等区分性前缀，去空格）在 pack 文本
+    （去空格）中查找。全部命中或全部未命中 → 返回 None（归因无信息量，页面退化为
+    中性列表，不显示筛选 chips）——避免误导。
+    """
+    lines = [ln.strip() for ln in (detail_body or "").splitlines() if ln.strip()]
+    if not lines or not (pack_body or "").strip():
+        return None
+    pack_ns = pack_body.replace(" ", "")
+    out: list[tuple[str, bool]] = []
+    matched = 0
+    for ln in lines:
+        content = ln.lstrip("-").strip()
+        tok = content.split()[0] if content.split() else ""
+        hit = bool(tok) and tok.replace(" ", "") in pack_ns
+        out.append((ln, hit))
+        matched += 1 if hit else 0
+    if matched == 0 or matched == len(lines):
+        return None
+    return out
 
 
 def _health_source_page(cfg: Config, date: str, key: str) -> str:
     title = _FACT_CARD_TITLE if key == _FACT_CARD_KEY else key
     md_path = _health_root(cfg) / "pack_detail" / date / f"{key}.md"
+    md_text = ""
     if md_path.is_file():
         try:
             md_text = md_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             md_text = ""
-    else:
-        md_text = ""
-    if md_text.strip():
-        parts = [
-            f'<section class="dsec"><h3>{html.escape(name or "（引言）")}</h3>{_mini_md_html(body)}</section>'
-            for name, body in _split_h2(md_text)
-        ]
-        detail_html = "".join(parts)
-    else:
-        detail_html = (
-            f'<p class="empty">暂无数据：data/logs/pack_detail/{html.escape(date)}/{html.escape(key)}.md 不存在'
-            "（daily job 运行该日后生成）</p>"
-        )
 
     recs = [r for r in _load_health_records(cfg) if str(r.get("date") or "") == date]
     entry = _source_of(recs[-1], key) if recs else None
 
-    links = [f'<a href="/review/{html.escape(date)}">查看最终 LLM 输入：{html.escape(date)} scheduled 存档（评审页）</a>']
+    # ---- 三节内容（按 pack_detail md 的 H2 切；_split_h2 的 body 已是 join 好的字符串）----
+    sec: dict[str, str] = {}
+    for name, body in _split_h2(md_text):
+        if name:
+            sec[name] = body.strip()
+    detail_body = sec.get("完整取数详情", "")
+    full_body = sec.get("渲染文本", "")
+    packed_body = sec.get("实际进包", "")
+    has_md = bool(md_text.strip())
+
+    # ---- 逐行归因（启发式；无信息量时退化为中性列表）----
+    attrs = _attribute_lines(detail_body, packed_body or full_body)
+    kept_n = sum(1 for _, hit in attrs if hit) if attrs else 0
+    dropped_n = len(attrs) - kept_n if attrs else 0
+
+    def _neutral_list(text: str) -> str:
+        return "".join(
+            f'<div class="li">{html.escape(ln.strip())}</div>'
+            for ln in text.splitlines()
+            if ln.strip()
+        )
+
+    if attrs:
+        chips = (
+            '<button class="f active" data-f="all">全部 %d</button>'
+            '<button class="f" data-f="kept">✓ 进包 %d</button>'
+            '<button class="f" data-f="dropped">✂ 被剔除 %d</button>' % (len(attrs), kept_n, dropped_n)
+        )
+        left = "".join(
+            f'<div class="li {"hit" if hit else "missrow"}" data-f="{"kept" if hit else "dropped"}">{html.escape(ln)}</div>'
+            for ln, hit in attrs
+        )
+        chips_html = f'<div class="chips">{chips}</div>'
+    else:
+        left = _neutral_list(detail_body)
+        chips_html = ""
+
+    # ---- 右栏动态合并：渲染==进包 → 单栏 +「无截断」徽章；否则并列双 Tab ----
+    right_badge = ""
+    if full_body and packed_body:
+        same = full_body.replace(" ", "") == packed_body.replace(" ", "")
+        if same:
+            right_badge = (
+                f'<span class="pill ok" style="font-size:11px">渲染文本与进包一致'
+                f"（{len(full_body):,} = {len(packed_body):,}，无截断）</span>"
+            )
+    if right_badge:
+        right_html = f'<div class="scroll alt">{_mini_md_html(packed_body)}</div>'
+    else:
+        right_html = (
+            '<div class="tabbtns"><button class="tb active" data-t="pk">实际进包</button>'
+            '<button class="tb" data-t="rd">渲染文本</button></div>'
+            f'<div id="t-pk" class="scroll alt">{_mini_md_html(packed_body)}</div>'
+            f'<div id="t-rd" class="scroll alt hidden">{_mini_md_html(full_body)}</div>'
+            '<div class="small muted" style="padding:6px 16px">两节不一致 = 发生了挑选/截断，Tab 对照查看</div>'
+        )
+
+    # ---- 日期导航 ----
+    try:
+        d0 = datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        d0 = datetime.now()
+    prev_d = (d0 - timedelta(days=1)).strftime("%Y-%m-%d")
+    next_d = (d0 + timedelta(days=1)).strftime("%Y-%m-%d")
+    nav = (
+        f'<div class="dnav"><a class="dnav-btn" href="/health/source/{prev_d}/{html.escape(key)}">‹</a>'
+        f"<span class=\"cur\">{html.escape(date)}</span>"
+        f'<a class="dnav-btn" href="/health/source/{next_d}/{html.escape(key)}">›</a></div>'
+    )
+
+    links = [f'<a href="/review/{html.escape(date)}">查最终 LLM 输入：scheduled 存档（评审页）</a>']
     llm_req = cfg.logs_dir / date / "llm_requests.jsonl"
     if llm_req.is_file():
-        links.append(f'<a href="/logs/{html.escape(date)}/llm_requests.jsonl">查看最终 LLM 输入：{html.escape(date)}/llm_requests.jsonl</a>')
+        links.append(f'<a href="/logs/{html.escape(date)}/llm_requests.jsonl">llm_requests.jsonl</a>')
+    links.append('<a href="/health">← 总览矩阵</a>')
+
+    if not has_md:
+        body = (
+            f"<h1>源体检 · {html.escape(title)}</h1>{nav}"
+            f'<div class="sub">key <code>{html.escape(key)}</code></div>'
+            f'<p class="empty">暂无数据：data/logs/pack_detail/{html.escape(date)}/{html.escape(key)}.md 不存在'
+            "（daily job 运行该日后生成）</p>"
+        )
+        return _page(f"源体检 · {title} · {date}", body)
 
     body = (
-        f"<h1>源体检 · {html.escape(title)}</h1>"
-        f'<div class="sub">{html.escape(date)} · key <code>{html.escape(key)}</code></div>'
+        f"<h1>源体检 · {html.escape(title)}</h1>{nav}"
+        f'<div class="sub">key <code>{html.escape(key)}</code></div>'
         f'<div class="links">{" ".join(links)}</div>'
-        f"{_chars_bars(entry)}"
-        f"{detail_html}"
+        f"{_funnel_bars(entry)}"
+        '<div class="dual">'
+        '<section class="dsec" style="flex:1.4">'
+        f'<h3>完整取数详情 <span class="small muted">{len(attrs) if attrs else len([l for l in detail_body.splitlines() if l.strip()])} 行 · 灰色删除线 = 未进渲染文本</span></h3>'
+        f"{chips_html}"
+        f'<div class="scroll">{left}</div>'
+        "</section>"
+        '<section class="dsec" style="flex:1">'
+        f"<h3>实际进包 {right_badge}</h3>"
+        f"{right_html}"
+        "</section>"
+        "</div>"
+        '<style>.dual{display:flex;gap:14px;align-items:stretch}.chips{display:flex;gap:6px;flex-wrap:wrap;margin:6px 0}'
+        '.f{border:1px solid #d0d7de;background:#fff;border-radius:99px;padding:2px 11px;cursor:pointer;font-size:12px}'
+        '.f.active{background:#0969da;color:#fff;border-color:#0969da}'
+        '.scroll{max-height:520px;overflow:auto;background:#f6f8fa;border-radius:8px}'
+        '.li{padding:6px 12px;border-bottom:1px solid #eaeef2;font-size:13px}'
+        '.li.hit{background:#f0fdf4}.li.missrow{color:#8c959f;text-decoration:line-through}'
+        '.bar-row{display:flex;align-items:center;gap:10px;margin:7px 0}'
+        '.bar-label{width:120px;text-align:right;color:#57606a;font-size:12px}'
+        '.bar-track{flex:1;background:#eaeef2;border-radius:5px;height:20px;overflow:hidden}'
+        '.bar-fill{display:block;height:20px;background:#0969da}.bar-fill.bar-l2{background:#3fb950}.bar-fill.bar-l3{background:#8250df}'
+        '.bar-num{font-variant-numeric:tabular-nums;font-weight:600;min-width:52px}'
+        '.dnav{display:flex;align-items:center;gap:10px;margin:4px 0}'
+        '.dnav-btn{border:1px solid #d0d7de;background:#fff;border-radius:6px;padding:1px 10px;text-decoration:none}'
+        '.cur{font-weight:600;font-variant-numeric:tabular-nums}'
+        '.tabbtns{display:flex;gap:4px;margin-bottom:6px}'
+        '.tb{border:1px solid #d0d7de;background:#fff;border-radius:6px;padding:2px 12px;cursor:pointer;font-size:13px}'
+        '.tb.active{background:#0969da;color:#fff;border-color:#0969da}.hidden{display:none}</style>'
+        '<script>document.querySelectorAll(".f").forEach(function(b){b.onclick=function(){'
+        'document.querySelectorAll(".f").forEach(function(x){x.classList.remove("active")});b.classList.add("active");'
+        'var f=b.dataset.f;document.querySelectorAll(".dual .li").forEach(function(li){'
+        'li.style.display=f==="all"||li.dataset.f===f?"":"none";});};});'
+        'document.querySelectorAll(".tb").forEach(function(b){b.onclick=function(){'
+        'document.querySelectorAll(".tb").forEach(function(x){x.classList.remove("active")});b.classList.add("active");'
+        'document.getElementById("t-pk").classList.toggle("hidden",b.dataset.t!=="pk");'
+        'document.getElementById("t-rd").classList.toggle("hidden",b.dataset.t!=="rd");};});</script>'
     )
     return _page(f"源体检 · {title} · {date}", body)
 
@@ -773,8 +950,11 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         return HTMLResponse(_review_page(config, date))
 
     @app.get("/health", response_class=HTMLResponse)
-    def health_page() -> Response:
-        return HTMLResponse(_health_matrix(config))
+    def health_page(request: Request) -> Response:
+        end = request.query_params.get("end") or ""
+        if not _DATE_RE.fullmatch(end):
+            end = None
+        return HTMLResponse(_health_matrix(config, end))
 
     @app.get("/health/source/{date}/{key}", response_class=HTMLResponse)
     def health_source_page(date: str, key: str) -> Response:
