@@ -559,7 +559,14 @@ def _health_matrix(cfg: Config, end: str | None = None) -> str:
             if key and key not in rows:
                 rows.append(key)
 
-    head = "<tr><th>源</th>" + "".join(f"<th>{html.escape(d)}</th>" for d in dates) + "</tr>"
+    head = (
+        "<tr><th>源</th>"
+        + "".join(
+            f'<th style="{"background:#ddf4ff" if d == end_s else ""}">{"▼ " if d == end_s else ""}{html.escape(d)}</th>'
+            for d in dates
+        )
+        + "</tr>"
+    )
     body_rows: list[str] = []
     for key in rows:
         cells: list[str] = []
