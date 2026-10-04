@@ -1058,3 +1058,20 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 **待办更新**：
 - [ ] dev-console 重启 review 服务后从导航「运行回放」进正式页；观察今晚 23:50 例行日报的新格式记录（response/usage/duration_ms）在回放中的呈现。
 - [ ] 可选：ERROR 计数阈值告警、token 成本按日汇总（接 ROADMAP 既有观测待办）。
+
+## [2026-10-04] v3.2.3 /data 数据目录页：手机采集数据资产盘点（demo 选型 → review_server 正式页）
+
+**背景**：用户提出"没有一个好用的页面看手机上报了哪些数据，不知道有哪些数据就没法分析接哪些源"——原料层可观测缺口。盘点确认 langTrack.db 219MB（16 种事件 10.7 万条）中仅 music_play 被 _MEDIA 消费，notification/sms/input/location 轨迹等大量未进日报；fact_card/daily notes 走 system prompt 旁路不受 /health·/config 管辖。经 3 个交互 demo（长卷/主从/行展开，真实数据烘焙）评审：**定交互为主从式**，吸收长卷密度与行展开钻取，融合为 demo4 定稿。
+
+**已完成**：
+- 新建 `src/gacore/data_catalog.py`：纯读数据层——langTrack.db 只读 URI 连接（不触发 ETL 不写文件），盘点表资产（行数/日期覆盖/影子·备份·空表分类）、事件类型（总量/近 7 日逐日/最新 10 条 payload 样本截 220 字/非法 JSON 原样兜底）、库外文件（memory/*.jsonl、weather_cache、daily notes，带消费方映射）；db 缺失/损坏降级空态不抛异常。`CONSUMERS`/`CONSUMER_SHORT` 消费方映射为"未接自动浮出"的依据，模块 docstring 明确"新增源/工具/旁路后必须同步更新，否则误报未接"；sms（验证码）/input/clipboard 在映射中明确"永不进包"负清单。
+- `review_server.py`：`GET /data`（导航加「数据目录」）——demo4 形态：左目录（内嵌 7 日迷你柱状+消费方短标+最新时间+过滤框+键盘 ↑↓+URL `#type=` 定位）、右详情（KV+近 7 日逐日柱+payload 样本下拉切换）、底部表资产（隐藏影子/备份/空表开关）+库外文件；DATA 服务端内嵌 JSON（`</` 转义防 script 逃逸），CSS 以 `dc-` 前缀作用域隔离，复用 `_html()` no-store。
+- 测试：`test_review_server.py` 新增 TestDataSource 4 项（真实渲染+no-store+导航互通/db 缺失空态/样本截断与非法 JSON 兜底/影子表分类与行数）。
+
+**实测验证**：全仓门禁 `ruff check apps packages tests` 全绿 + `pytest` 1249 passed 1 skipped；真实数据快照（16 事件类型、41 表、6 库外文件）在 demo 阶段已由用户浏览器逐页评审交互。
+
+**偏差说明**：payload 样本未脱敏（含微信消息/验证码，本机自查页性质，页头标注）；demo 生成器与产物在 `data/demos/`（gitignore，一次性原型不入库）；表资产"覆盖"取 ts/day 列 min-max，无该列的表显示 "-"。
+
+**待办更新**：
+- [ ] 用户逛 /data 后拍板 `_PHONE_PLACE`（位置轨迹）/`_PHONE_USAGE`（手机使用）两源接入（cap/priority/builder 设计已议：复用 report.py 查询函数、措辞口径借 fact_card 保证不失真）；`_PHONE_NOTIF`（通知内容）涉私信进邮件，单独立项。
+- [ ] fact_card/daily notes 的 system prompt 旁路收编评估（daily notes 摘要优先）。
