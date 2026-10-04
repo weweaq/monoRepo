@@ -55,6 +55,16 @@ _SESSION_ID: Final = uuid.uuid4().hex[:8]
 _PID: Final = os.getpid()
 
 
+def session_id() -> str:
+    """Return this process's session id — the single source for all gacore logs.
+
+    Other log sinks (e.g. llm_request_log's llm_requests.jsonl) reuse this id so
+    their lines join app.jsonl lines of the same process exactly, instead of
+    relying on the pid heuristic (pids get reused across process restarts).
+    """
+    return _SESSION_ID
+
+
 def _mask_value(key: str, value: object) -> object:
     """Mask sensitive values; pass everything else through unchanged."""
     if key.lower() in _SECRET_KEYS and isinstance(value, str):

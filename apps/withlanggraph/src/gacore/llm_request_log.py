@@ -8,6 +8,8 @@ the existing ``app.jsonl`` so a failing turn can be replayed.
 
 What is captured per request:
 - ts / session / pid / provider / model
+  (session is the SAME per-process id as app.jsonl's — see jsonl_logger.session_id —
+  so a request line joins the system-side lines of its process exactly)
 - run kind (invoke|ainvoke|stream|astream)
 - the full message list (SYSTEM / HUMAN / AI / TOOL payloads, role + content + tool_calls)
 - tool definitions (name / description / args schema) captured at bind_tools time
@@ -28,20 +30,21 @@ import json
 import os
 import threading
 import time
-import uuid
 from collections.abc import Sequence
 from typing import Any, Final
 
 from langchain_core.messages import BaseMessage, ToolMessage
 
 from gacore.config import Config
-from gacore.jsonl_logger import _SECRET_KEYS
+from gacore.jsonl_logger import _SECRET_KEYS, session_id
 
 _LOG_FILENAME: Final = "llm_requests.jsonl"
 _LOG_DIR_FORMAT: Final = "%Y-%m-%d"
 _MAX_MESSAGE_CHARS: Final = 30000
 
-_SESSION_ID: Final = uuid.uuid4().hex[:8]
+# Same per-process session id as app.jsonl (jsonl_logger is the single source), so
+# request lines join system-side lines of the same process exactly — no pid guessing.
+_SESSION_ID: Final = session_id()
 _PID: Final = os.getpid()
 _WRITE_LOCK: threading.RLock = threading.RLock()
 
