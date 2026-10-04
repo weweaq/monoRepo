@@ -1058,20 +1058,45 @@ def _data_page(cfg: Config) -> str:
         "var bars=e.daily.map(function(v,k){return '<div style=\"font-size:11px;color:#57606a\">'+e.days[k]+'</div>'"
         "+'<div style=\"display:flex;align-items:center;gap:6px\"><span class=\"bar\" style=\"width:'+Math.max(v*120/mx,1)+'px\"></span>'"
         "+'<span class=\"num\" style=\"font-size:12px\">'+v+'</span></div>';}).join('');"
-        "var sel=e.samples.map(function(s,k){return '<option value='+k+'>'+(k+1)+'. '+s.ts+'</option>';}).join('');"
         "p.innerHTML='<h2 style=\"margin-top:0\">events / '+esc(e.type)+' '"
         "+(e.consumer.indexOf('无')===0?'<span class=\"tag none\">无消费方·潜在新源</span>':'')+'</h2>'"
         "+'<div class=\"dc-kv\"><span class=\"k\">总量</span><b>'+e.total.toLocaleString()+' 条</b>'"
         "+'<span class=\"k\">最新事件</span><span>'+esc(e.last)+'</span>'"
         "+'<span class=\"k\">消费方</span><span>'+esc(e.consumer)+'</span>'"
         "+'<span class=\"k\">近7日逐日</span><div style=\"display:grid;grid-template-columns:auto 1fr;gap:2px 10px;align-items:center\">'+bars+'</div></div>'"
-        "+'<div style=\"font-size:12px;color:#57606a;margin:8px 0 4px\">payload 样本（最近 '+e.samples.length+' 条，下拉切换；未脱敏）'"
-        "+'<select id=\"dcsel\" style=\"margin-left:8px;font:inherit;padding:2px 6px\">'+sel+'</select></div>'"
-        "+'<pre id=\"dcpv\"></pre>';"
-        "var pv=document.getElementById('dcpv');"
-        "function show(){pv.textContent=C.events[cur].samples[document.getElementById('dcsel').value].payload;}"
-        "document.getElementById('dcsel').onchange=show;show();"
-        "var on=nav.querySelector('button.on');if(on)on.scrollIntoView({block:'nearest'});}"
+        "+'<div style=\"font-size:12px;color:#57606a;margin:8px 0 4px\">按日查看（点日期拉取当日全部 payload，未脱敏）</div>'"
+        "+'<div id=\"dcdays\" style=\"display:flex;flex-wrap:wrap;gap:4px;max-height:96px;overflow:auto;margin-bottom:8px\"></div>'"
+        "+'<div id=\"dcnote\" style=\"font-size:12px;color:#57606a;margin:4px 0\"></div>'"
+        "+'<div id=\"dcloads\"></div>';"
+        "var on=nav.querySelector('button.on');if(on)on.scrollIntoView({block:'nearest'});"
+        "var ds=document.getElementById('dcdays');"
+        "if(!e.hist.length){ds.innerHTML='<span style=\"font-size:12px;color:#9a6700\">该类型无 2026 年以来的按日数据</span>';return;}"
+        "e.hist.slice().reverse().forEach(function(hc){var d=hc[0],n=hc[1];"
+        "var c=document.createElement('button');c.textContent=d.slice(5)+' '+n;"
+        "c.style.cssText='font:inherit;font-size:12px;padding:1px 8px;border:1px solid #d0d7de;border-radius:10px;cursor:pointer;background:#fff';"
+        "c.onclick=function(){dcDay(e.type,d,c);};ds.appendChild(c);});"
+        "ds.firstChild.onclick();}"
+        "window.dcDay=function(etype,day,chip){"
+        "document.querySelectorAll('#dcdays button').forEach(function(b){b.style.background=b===chip?'#ddf4ff':'#fff';});"
+        "document.getElementById('dcnote').textContent='加载 '+day+' …';"
+        "document.getElementById('dcloads').innerHTML='';"
+        "fetch('/api/data/events?type='+encodeURIComponent(etype)+'&day='+day)"
+        ".then(function(r){return r.json();})"
+        ".then(function(j){if(!j.ok){document.getElementById('dcnote').textContent='失败：'+(j.error||'');return;}"
+        "var note='该日共 '+j.total.toLocaleString()+' 条，展示最近 '+j.returned.toLocaleString()+' 条（按时间倒序）';"
+        "if(j.truncated)note+=' <a href=\"#\" id=\"dcall\" style=\"color:#0969da\">加载全部</a>';"
+        "document.getElementById('dcnote').innerHTML=note;"
+        "if(j.truncated)document.getElementById('dcall').onclick=function(ev){ev.preventDefault();"
+        "dcFetch(etype,day,20000);};"
+        "var html=j.samples.map(function(s){return '<pre>'+s.ts+'  '+esc(s.payload)+'</pre>';}).join('');"
+        "document.getElementById('dcloads').innerHTML=html||'<div style=\"font-size:12px;color:#57606a\">该日无事件</div>';});};"
+        "window.dcFetch=function(etype,day,limit){"
+        "document.getElementById('dcnote').textContent='加载全部中…';"
+        "fetch('/api/data/events?type='+encodeURIComponent(etype)+'&day='+day+'&limit='+limit)"
+        ".then(function(r){return r.json();})"
+        ".then(function(j){if(!j.ok)return;"
+        "document.getElementById('dcnote').textContent='该日共 '+j.total.toLocaleString()+' 条，已全部展示（按时间倒序）';"
+        "document.getElementById('dcloads').innerHTML=j.samples.map(function(s){return '<pre>'+s.ts+'  '+esc(s.payload)+'</pre>';}).join('');});};}"
         "C.events.forEach(function(e,i){var mx=Math.max.apply(null,e.daily.concat([1]));"
         "var spark=e.daily.map(function(v){return '<i style=\"height:'+Math.max(v*12/mx,1)+'px\" class=\"'+(v===mx&&v?'hot':'')+'\"></i>';}).join('');"
         "var none=e.consumer.indexOf('无')===0;"
@@ -1134,7 +1159,7 @@ _LLMV_CSS = """
 #llmv .chip{display:inline-block;background:#f6f8fa;border:1px solid var(--line);border-radius:4px;padding:0 6px;font-size:11px;margin:1px 2px;color:#57606a}
 #llmv .call{background:#fff;border:1px solid var(--line);border-radius:10px;margin-bottom:12px;overflow:hidden}
 #llmv .call>.hd{padding:8px 12px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center;flex-wrap:wrap;cursor:pointer}
-#llmv .call>.bd{padding:10px 12px;display:none}.call.open>.bd{display:block}
+#llmv .call>.bd{padding:10px 12px;display:none}#llmv .call.open>.bd{display:block}
 #llmv .call.toolhit{border-color:#d4a72c;box-shadow:0 0 0 2px #fff8c5}
 #llmv .msgline{padding:4px 6px;border-radius:6px;margin:2px 0;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #llmv .msgline.dim{opacity:.45}
@@ -1142,7 +1167,7 @@ _LLMV_CSS = """
 #llmv .newbadge{display:inline-block;background:#1a7f37;color:#fff;font-size:9px;font-weight:700;border-radius:3px;padding:0 4px;margin-left:4px;vertical-align:1px}
 #llmv .tcard{border:1px solid #d4a72c;border-radius:8px;margin:8px 0;overflow:hidden}
 #llmv .tcard>.th{background:#fff8c5;padding:6px 10px;font-weight:600;cursor:pointer}
-#llmv .tcard>.tb{display:none;padding:8px 10px}.tcard.open>.tb{display:block}
+#llmv .tcard>.tb{display:none;padding:8px 10px}#llmv .tcard.open>.tb{display:block}
 #llmv .exp{cursor:pointer}
 #llmv pre{white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Consolas,monospace;font-size:12px;margin:4px 0;background:#0d1117;color:#e6edf3;border:none;border-radius:6px;padding:10px;max-height:380px;overflow:auto}
 #llmv .hrow{background:#fff;border:1px solid var(--line);border-radius:8px;padding:8px 12px;margin-bottom:8px;cursor:pointer}
@@ -1504,6 +1529,20 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     @app.get("/data", response_class=HTMLResponse)
     def data_page() -> Response:
         return _html(_data_page(config))
+
+    @app.get("/api/data/events")
+    def api_data_events(type: str, day: str, limit: int = 500):
+        """某事件类型某天全部 payload（/data 右详情"按天"取数）。day/type 非法 → 400。"""
+        import sqlite3
+
+        from gacore.data_catalog import events_for_day
+
+        try:
+            return events_for_day(config, type, day, limit)
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        except sqlite3.Error as exc:
+            return JSONResponse({"ok": False, "error": str(exc)[:160]}, status_code=500)
 
     @app.post("/api/config/sources")
     def api_config_sources(request: Request, payload: SourceConfigIn):

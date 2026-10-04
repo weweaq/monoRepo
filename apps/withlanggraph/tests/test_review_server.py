@@ -12,6 +12,7 @@ writer side (S1) is a separate workstream — this module only reads.
 
 from __future__ import annotations
 
+import datetime
 import json
 import re
 import threading
@@ -831,16 +832,20 @@ class TestDataPage:
         assert r.status_code == 200
         assert "langTrack.db 不存在" in r.text
 
-    def test_samples_truncated_and_bad_json_kept(self, tmp_path: Path) -> None:
+    def test_collect_shape(self, tmp_path: Path) -> None:
         from gacore.data_catalog import collect
 
         cfg = Config.for_tests(tmp_path)
         self._make_langtrack_db(cfg)
         cat = collect(cfg)
         by_type = {e["type"]: e for e in cat["events"]}
-        assert by_type["bad_json"]["samples"][0]["payload"].startswith("not-json{")
+        # payload 不再内嵌页面，按日取数走 /api/data/events（events_for_day）
+        assert "samples" not in by_type["music_play"]
         assert by_type["music_play"]["last"] != "-"
         assert by_type["sms"]["consumer"].startswith("无消费方")
+        # hist：全量按日直方图（升序），近7日 daily 由 hist 派生
+        assert by_type["bad_json"]["hist"][-1][0] == datetime.date.today().isoformat()
+        assert sum(c for _, c in by_type["bad_json"]["hist"]) == 1
         # 库外文件：daily notes 计数
         notes = cfg.memory_dir / "daily"
         notes.mkdir(parents=True)
@@ -848,6 +853,48 @@ class TestDataPage:
         cat2 = collect(cfg)
         files = {f["name"]: f for f in cat2["files"]}
         assert files["memory/daily/*.md"]["lines"] == 1
+
+    def test_events_for_day_api(self, tmp_path: Path, monkeypatch) -> None:
+        cfg = Config.for_tests(tmp_path)
+        self._make_langtrack_db(cfg)
+        c = _client(cfg, monkeypatch)
+        today = datetime.date.today().isoformat()
+        r = c.get("/api/data/events", params={"type": "sms", "day": today})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is True and body["type"] == "sms" and body["day"] == today
+        assert body["total"] == 1 and body["returned"] == 1 and body["truncated"] is False
+        assert "验证码 1" in body["samples"][0]["payload"]
+        # 非法 day / type → 400
+        assert c.get("/api/data/events", params={"type": "sms", "day": "bad"}).status_code == 400
+        assert c.get("/api/data/events", params={"type": "bad;drop", "day": today}).status_code == 400
+        # limit 截断：补插至单日 3 条，limit=1 → truncated
+        import sqlite3 as _sq
+
+        con = _sq.connect(cfg.root / "data" / "langTrack.db")
+        now_ms = int(time.time() * 1000)
+        con.executemany(
+            "INSERT INTO events (ts, type, payload) VALUES (?, ?, ?)",
+            [(now_ms - 60_000 * k, "music_play", "{}") for k in (1, 2)],
+        )
+        con.commit()
+        con.close()
+        r2 = c.get("/api/data/events", params={"type": "music_play", "day": today, "limit": 1})
+        body2 = r2.json()
+        assert body2["total"] == 3 and body2["returned"] == 1 and body2["truncated"] is True
+
+    def test_events_for_day_bad_json_and_history(self, tmp_path: Path) -> None:
+        from gacore.data_catalog import events_for_day
+
+        cfg = Config.for_tests(tmp_path)
+        self._make_langtrack_db(cfg)
+        today = datetime.date.today().isoformat()
+        body = events_for_day(cfg, "bad_json", today)
+        assert body["samples"][0]["payload"].startswith("not-json{")
+        # 历史日（两天前 location）
+        older = (datetime.date.today() - datetime.timedelta(days=2)).isoformat()
+        body2 = events_for_day(cfg, "location", older)
+        assert body2["total"] == 1 and body2["samples"][0]["payload"].startswith("{")
 
     def test_tables_shadow_rows_counted(self, tmp_path: Path) -> None:
         from gacore.data_catalog import collect
@@ -858,3 +905,14 @@ class TestDataPage:
         assert tables["shadow_places_v2"]["kind"] == "影子表"
         assert tables["events"]["kind"] == "事实/过程"
         assert tables["events"]["rows"] == 4
+
+    def test_fold_open_css_scoped(self, tmp_path: Path, monkeypatch) -> None:
+        """/data 修复教训的回归：折叠展开规则必须与基础规则同优先级（#llmv 前缀），
+        否则 .open 展开规则输给 ID 选择器的 display:none，点击调用/工具卡片无反应。"""
+        c = _client(Config.for_tests(tmp_path), monkeypatch)
+        text = c.get("/llm-requests").text
+        assert "#llmv .call.open>.bd{display:block}" in text
+        assert "#llmv .tcard.open>.tb{display:block}" in text
+        # 不允许再出现无前缀的 .open 展开规则
+        assert ".call.open>.bd{display:block}" not in text.replace("#llmv .call.open>.bd{display:block}", "")
+        assert ".tcard.open>.tb{display:block}" not in text.replace("#llmv .tcard.open>.tb{display:block}", "")

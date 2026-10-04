@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any, Final
@@ -20,8 +21,10 @@ from gacore.config import Config
 
 _TZ = datetime.timezone(datetime.timedelta(hours=8))
 _DAYS_WINDOW: Final = 7
-_SAMPLE_LIMIT: Final = 10
-_PAYLOAD_MAX_CHARS: Final = 220
+_PAYLOAD_MAX_CHARS: Final = 1000  # 单条 payload 展示截断（长载荷防刷屏）
+_DAY_LIMIT_DEFAULT: Final = 500  # 单日 payload 取回条数默认值（防万级日渲染卡顿）
+_DAY_LIMIT_MAX: Final = 20000
+_HIST_EPOCH_MS: Final = 1767225600000  # 2026-01-01：早于该时间的事件 ts 视为脏数据不入直方图
 
 # 事件类型 → 消费方完整描述（/data 右详情展示）
 CONSUMERS: Final[dict[str, str]] = {
@@ -97,22 +100,19 @@ def _collect_tables(conn: sqlite3.Connection) -> list[dict[str, Any]]:
 
 
 def _collect_events(conn: sqlite3.Connection) -> list[dict[str, Any]]:
-    today = datetime.datetime.now(_TZ).date()
-    week_start_ms = int(
-        datetime.datetime.combine(
-            today - datetime.timedelta(days=_DAYS_WINDOW - 1),
-            datetime.time.min,
-            _TZ,
-        ).timestamp()
-        * 1000
-    )
-    daily: dict[str, dict[str, int]] = {}
-    for t, ts in conn.execute(
-        "SELECT type, ts FROM events WHERE ts >= ? ORDER BY ts", (week_start_ms,)
+    """事件类型盘点：总量/最新时间 + 全量按日直方图（右详情"按天"视图的数据源）。
+
+    hist 为升序 [YYYY-MM-DD, count] 列表（ts 早于 2026 的脏数据不入图）；
+    daily/days 为近 7 日窗口（左目录迷你柱状用），由 hist 派生。
+    """
+    grouped: dict[str, dict[str, int]] = {}
+    for t, d, c in conn.execute(
+        "SELECT type, strftime('%Y-%m-%d', ts/1000.0, 'unixepoch', '+8 hours') d, COUNT(*)"
+        " FROM events WHERE ts >= ? GROUP BY type, d ORDER BY d",
+        (_HIST_EPOCH_MS,),
     ):
-        d = datetime.datetime.fromtimestamp(int(ts) / 1000, _TZ).strftime("%m-%d")
-        daily.setdefault(t, {})
-        daily[t][d] = daily[t].get(d, 0) + 1
+        grouped.setdefault(t, {})[d] = int(c)
+    today = datetime.datetime.now(_TZ).date()
     days = [
         (today - datetime.timedelta(days=i)).strftime("%m-%d")
         for i in range(_DAYS_WINDOW - 1, -1, -1)
@@ -121,30 +121,79 @@ def _collect_events(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     for t, total, last_ts in conn.execute(
         "SELECT type, COUNT(*), MAX(ts) FROM events GROUP BY type ORDER BY COUNT(*) DESC"
     ):
-        samples: list[dict[str, str]] = []
-        for ts, payload in conn.execute(
-            "SELECT ts, payload FROM events WHERE type=? ORDER BY ts DESC LIMIT ?",
-            (t, _SAMPLE_LIMIT),
-        ):
-            try:
-                text = json.dumps(json.loads(payload), ensure_ascii=False)
-            except Exception:  # noqa: BLE001 — 非法 JSON 原样截断展示
-                text = str(payload)
-            if len(text) > _PAYLOAD_MAX_CHARS:
-                text = text[:_PAYLOAD_MAX_CHARS] + "…"
-            samples.append({"ts": _hhmm_from_ms(int(ts)), "payload": text})
+        hist = sorted(grouped.get(t, {}).items())
+        day_full = {d[-5:]: c for d, c in hist}  # MM-DD → count（近7日窗取用）
         consumer = CONSUMERS.get(t, _UNKNOWN_CONSUMER)
         out.append({
             "type": t,
             "total": int(total),
             "last": _hhmm_from_ms(int(last_ts)) if last_ts else "-",
-            "daily": [daily.get(t, {}).get(d, 0) for d in days],
+            "daily": [day_full.get(d, 0) for d in days],
             "days": days,
+            "hist": hist,
             "consumer": consumer,
             "short": CONSUMER_SHORT.get(t, "未接"),
-            "samples": samples,
         })
     return out
+
+
+def events_for_day(cfg: Config, etype: str, day: str, limit: int = _DAY_LIMIT_DEFAULT) -> dict[str, Any]:
+    """取某事件类型某天的全部 payload（/data 右详情"按天"取数，GET /api/data/events）。
+
+    limit 默认 500、上限 20000（audio_env 曾有单日 1.3 万条突发，全量渲染需用户显式点击）。
+    day/etype 非法抛 ValueError（路由层转 400）。
+    """
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+        raise ValueError(f"bad day: {day!r}")
+    if not re.fullmatch(r"[a-z_]{1,40}", etype):
+        raise ValueError(f"bad type: {etype!r}")
+    limit = max(1, min(int(limit), _DAY_LIMIT_MAX))
+    start_ms = int(
+        datetime.datetime.strptime(day, "%Y-%m-%d")
+        .replace(tzinfo=_TZ)
+        .timestamp()
+        * 1000
+    )
+    end_ms = start_ms + 86_400_000
+    db_path = cfg.root / "data" / "langTrack.db"
+    if not db_path.is_file():
+        raise ValueError("langTrack.db 不存在")
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    try:
+        total = int(
+            conn.execute(
+                "SELECT COUNT(*) FROM events WHERE type=? AND ts>=? AND ts<?",
+                (etype, start_ms, end_ms),
+            ).fetchone()[0]
+        )
+        rows = conn.execute(
+            "SELECT ts, payload FROM events WHERE type=? AND ts>=? AND ts<?"
+            " ORDER BY ts DESC LIMIT ?",
+            (etype, start_ms, end_ms, limit),
+        ).fetchall()
+    finally:
+        conn.close()
+    samples = []
+    for ts, payload in rows:
+        try:
+            text = json.dumps(json.loads(payload), ensure_ascii=False)
+        except Exception:  # noqa: BLE001 — 非法 JSON 原样截断展示
+            text = str(payload)
+        if len(text) > _PAYLOAD_MAX_CHARS:
+            text = text[:_PAYLOAD_MAX_CHARS] + "…"
+        samples.append({
+            "ts": datetime.datetime.fromtimestamp(int(ts) / 1000, _TZ).strftime("%H:%M:%S"),
+            "payload": text,
+        })
+    return {
+        "ok": True,
+        "type": etype,
+        "day": day,
+        "total": total,
+        "returned": len(samples),
+        "truncated": len(samples) < total,
+        "samples": samples,
+    }
 
 
 def _collect_files(cfg: Config) -> list[dict[str, Any]]:
