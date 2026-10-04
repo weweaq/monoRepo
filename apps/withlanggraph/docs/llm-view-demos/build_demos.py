@@ -253,6 +253,48 @@ def attach_system_events(runs: list[dict], events: list[dict]) -> None:
             run["systemEvents"] = sorted(evs, key=lambda x: x["ts"])
 
 
+def load_output_archives(date: str) -> list[dict]:
+    """Scheduled-job output archives (logs/scheduled/{job}_{ts}.md) for this date.
+
+    The final LLM reply is a RESPONSE, never in llm_requests.jsonl — for daily-report
+    jobs it lands here with sections: System Prompt / User Prompt / Reply. Filename
+    timestamp = job-finish time.
+    """
+    out = []
+    for p in sorted((ROOT / "logs" / "scheduled").glob(f"*_{date.replace('-', '')}_*.md")):
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        m = re.search(r"## Reply[^\n]*\n(.*?)(?=\n## |\Z)", text, re.S)
+        if not m:
+            continue
+        ts_match = re.search(r"_((?:19|20)\d{6}_\d{6})\.md$", p.name)
+        if not ts_match:
+            continue
+        out.append({
+            "file": p.name,
+            "ts": datetime.strptime(ts_match.group(1), "%Y%m%d_%H%M%S").isoformat(),
+            "replyChars": len(m.group(1).strip()),
+            "reply": m.group(1).strip(),
+        })
+    return out
+
+
+def attach_output_archives(runs: list[dict], archives: list[dict]) -> None:
+    """Attach an output archive to the run it belongs to (finish ts within 300s of run end)."""
+    for run in runs:
+        end = _parse_ts(run["end"])
+        best = None
+        for a in archives:
+            ts = _parse_ts(a["ts"])
+            if end <= ts <= end + timedelta(seconds=300):
+                if best is None or ts < _parse_ts(best["ts"]):
+                    best = a
+        if best is not None:
+            run["output"] = best
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--date", default="2026-10-03")
@@ -263,10 +305,11 @@ def main() -> int:
         sys.exit("no parseable records")
     runs = build_runs(records)
     attach_system_events(runs, load_system_events(args.date))
+    attach_output_archives(runs, load_output_archives(args.date))
     data = {
         "date": args.date,
         "generated": datetime.now().isoformat(timespec="seconds"),
-        "source": f"logs/{args.date}/llm_requests.jsonl + logs/{args.date}/app.jsonl(投递)",
+        "source": f"logs/{args.date}/llm_requests.jsonl + app.jsonl(系统动作) + scheduled/（产出存档）",
         "runs": runs,
     }
     blob = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
