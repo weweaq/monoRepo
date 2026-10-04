@@ -956,3 +956,7 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 ### [2026-10-04] v3.1.2 追补：源体检页 C+ 版式 + 总览日期窗口（`3fecebb`/`a18b7f2`）
 
 用户评审三个 UI demo 后选定 C（双栏对照）并吸收 A/B：字符漏斗条（sqrt 比例 + 每层差值/无截断标注）、逐行归因（首 token 启发式 + 全部/进包/被剔除筛选 chips + 全中/全不中退化中性）、渲染==进包合并徽章/不一致双 Tab、日期 ‹› 导航；总览矩阵加 `?end=` 窗口参数与前后一周/日期选择器。修复 `_split_h2` 结果被二次 join 致正文逐字符拆开的 bug。demo 三版（docs/health-demos）评审后清理。
+
+### [2026-10-04] v3.1.3 追补：体检历史补录 CLI（`079e3ad`）
+
+用户问"10-02 为什么没有、能都补全吗"——体检 jsonl 10-04 才上线，此前日期无产物。新增 `gacore/backfill_health.py`（`python -m gacore.backfill_health --from --to`）：逐日重放 build_info_pack_report（取数源全部支持按天查询），trigger=backfill 区分真实运行；当日/未来跳过、单日失败不断链；事实卡支线一并补录。诚实边界：补的是"以当前数据回看该日"（_LONG_TERM/_MEMORY 为当前态；B站/Edge 受历史窗口限制，查不到如实 missing_data）。已执行 2026-08-05 ~ 2026-10-02：**59/59 天全部成功**，jsonl 60 天完整覆盖；早于 09-05 的日期 CHAT 如实 missing_data（QQ 日志 09-05 才开始）。测试 3 项。
