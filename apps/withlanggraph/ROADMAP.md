@@ -1040,3 +1040,21 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 ### [2026-10-04] v3.2.2 追补：HTML 页统一 no-store 禁缓存
 
 用户实测「↻ 重算体检」成功后页面不自动更新、需手动再刷——根因是浏览器对无 Cache-Control 的 GET 页面启发式缓存，location.reload() 命中旧页。review_server 加 `_html()` 统一出口（Cache-Control: no-store），/review、/health、/health/source、/config 四类页面全覆盖；新增 TestNoStore 断言 4 页响应头。46 项测试全绿，8010 已重启验证。
+
+## [2026-10-04] /llm-requests 运行回放落地：demo 选型 → review_server 正式页
+
+**背景**：LLM 运行可视化经 3 个 demo 评审选定 A（运行回放）并吸收 B/C 优点（搜索定位/NEW 增量/复制 JSON），用户确认不新建 app（数据引力在 gacore，跨 app 依赖不合 R2，R3 无第三消费者），落地为 review_server 的兄弟页（与 /review、/health 同源同鉴权模式）。
+
+**已完成**：
+- 新建 `src/gacore/llm_runview.py`：run 重建单一实现（自 build_demos.py 下沉）——run 边界（session+10min）、工具往返配对（tool_call_id）、类型分类启发式（日报/推送/快答/内部）、投递归属（session 精确+pid 兜底、多主题爆发=批量重发）、ERROR 泳道（module+message 聚合计数）、产出存档归属（Job finished 后 300s）；`run_view(cfg, date)` 单一入口，全部容错缺文件。
+- `review_server.py`：`GET /llm-requests`（`?date=` 缺省最近有数日期，‹› 日期导航；DATA 服务端内嵌，CSS 作用域限定 #llmv）、`GET /api/llm-runs/{date}`（JSON）；导航栏加「运行回放」。
+- `docs/llm-view-demos/build_demos.py` 改为复用 llm_runview（消除双份逻辑）；B/C 模板反提取为 .tmpl；demo_a 离线快照保留（A 已移植，脚本不再重建）；`template_a.html.tmpl` 改名防误开。
+- 测试：`test_llm_runview.py` 8 项（分组/配对/分类/session精确+pid兜底/批量重发判别/ERROR窗口/存档归属/缺文件空态）+ `test_review_server.py` 新增 5 项路由测试。
+
+**实测验证**：新测试 13 passed + 既有 59 review_server 测试回归通过；TestClient 真实数据（2026-10-03：6 runs/47 calls 关联正确）；临时实例（:8011）浏览器截图确认今日真实数据渲染——**页面首日即浮出真实运维问题**（send_email 535 auth failed ×2、bili_history 超时、Edge DB not found、ncm_login 无法启动、QQ on_message error 等红色 ERROR 聚合行）。
+
+**偏差说明**：ERROR 聚合为 module+message 计数（开发日窗口内 74 条同类错误逐条渲染会淹没时间轴），首条时间展示、详情在 app.jsonl；run 边界与投递窗口为启发式（文档化于 llm_runview docstring）；demo A 的离线快照不再由脚本重建（正式页为准）。
+
+**待办更新**：
+- [ ] dev-console 重启 review 服务后从导航「运行回放」进正式页；观察今晚 23:50 例行日报的新格式记录（response/usage/duration_ms）在回放中的呈现。
+- [ ] 可选：ERROR 计数阈值告警、token 成本按日汇总（接 ROADMAP 既有观测待办）。
