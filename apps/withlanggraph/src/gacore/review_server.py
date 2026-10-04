@@ -191,7 +191,7 @@ _PAGE_TMPL = """<!doctype html>
 <body>
 <header><div class="wrap">
 <span class="brand"><a href="/review">日报评审</a></span>
-<nav><a href="/review">日报评审</a><a href="/health">源体检</a><a href="/llm-requests">运行回放</a><a href="/config">源预算</a></nav>
+<nav><a href="/review">日报评审</a><a href="/health">源体检</a><a href="/llm-requests">运行回放</a><a href="/config">源预算</a><a href="/data">数据目录</a></nav>
 </div></header>
 <main class="wrap">
 __BODY__
@@ -982,6 +982,126 @@ def _config_page(cfg: Config) -> str:
     return _page("源预算配置", body)
 
 
+# --------------------------------------------------------------------------- /data 数据目录
+
+
+_DC_CSS = """
+.layout{display:flex;gap:14px;align-items:flex-start}
+.dc-nav{width:250px;background:var(--card,#fff);border:1px solid var(--line,#d0d7de);border-radius:6px;position:sticky;top:12px;max-height:calc(100vh - 24px);overflow:auto}
+.dc-nav .search{padding:8px;border-bottom:1px solid var(--line,#d0d7de)}
+.dc-nav input{width:100%;padding:4px 8px;border:1px solid var(--line,#d0d7de);border-radius:4px;font:inherit}
+.dc-nav button{display:block;width:100%;border:0;background:none;padding:6px 10px;font:inherit;text-align:left;cursor:pointer;border-bottom:1px solid var(--line,#d0d7de)}
+.dc-nav button:hover{background:#eff2f5}.dc-nav button.on{background:#ddf4ff}
+.dc-nav .row1{display:flex;justify-content:space-between;align-items:baseline}
+.dc-nav .spark{display:flex;gap:2px;align-items:flex-end;height:12px;margin-top:3px}
+.dc-nav .spark i{display:inline-block;width:14px;background:#a5cff5;border-radius:1px}
+.dc-nav .spark i.hot{background:var(--acc,#0969da)}
+.dc-nav .meta{display:flex;justify-content:space-between;align-items:center;margin-top:3px;gap:6px}
+.dc-nav .meta .cs{font-size:11px;color:var(--mut,#57606a);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dc-nav .meta .cs.none{color:var(--bad,#cf222e)}
+.dc-nav .meta .lt{font-size:11px;color:var(--mut,#57606a);flex-shrink:0}
+.dc-pane{flex:1;background:var(--card,#fff);border:1px solid var(--line,#d0d7de);border-radius:6px;padding:14px 18px;min-height:420px;position:sticky;top:12px;max-height:calc(100vh - 24px);overflow:auto}
+.dc-kv{display:grid;grid-template-columns:110px 1fr;gap:6px 12px;margin:10px 0}
+.dc-kv .k{color:var(--mut,#57606a)}
+.dc-blocks{margin-top:22px}
+label.dc-chk{font-size:12px;color:var(--mut,#57606a);cursor:pointer;user-select:none;font-weight:400}
+tr.dc-hid{display:none}
+.dc-note{color:var(--warn,#9a6700);font-size:13px;margin:6px 0}
+"""
+
+
+def _data_page(cfg: Config) -> str:
+    """数据目录页：手机采集（langTrack.db 事件/表）+ 库外文件资产盘点。
+
+    形态为 demo4 融合定稿（主从式 + 密度 + 钻取）：左目录内嵌 7 日迷你柱状/消费方短标，
+    右详情下拉切换 payload 样本；底部为表资产（可隐藏影子/备份/空表）与库外文件。
+    数据层在 gacore.data_catalog（纯读），消费方映射随源/工具/旁路接入同步维护。
+    """
+    from gacore.data_catalog import collect
+
+    cat = collect(cfg)
+    payload = json.dumps(cat, ensure_ascii=False).replace("</", "<\\/")  # 防 </script> 提前闭合
+    note = f'<div class="dc-note">{html.escape(cat["db_note"])}</div>' if cat["db_note"] else ""
+    body = (
+        "<h1>数据目录 · 手机采集数据资产</h1>"
+        '<div class="sub">纯读盘点，不触发 ETL。蓝色 tag=已有消费方；红色=无消费方（潜在新源）；'
+        "黄色=system prompt 旁路。消费方映射见 gacore.data_catalog。"
+        f'快照 {html.escape(cat["generated_at"])} · payload 未脱敏，本机自查页。</div>'
+        + note
+        + "<style>" + _DC_CSS + "</style>"
+        '<div class="layout"><div class="dc-nav">'
+        '<div class="search"><input id="dcq" placeholder="过滤事件类型…" oninput="dcFilter()"></div>'
+        '<div id="dcnav"></div></div><div class="dc-pane" id="dcpane"></div></div>'
+        '<section class="dc-blocks">'
+        '<h2 style="margin-top:0">数据表资产 <label class="dc-chk"><input type="checkbox" id="dcck" checked onchange="dcFil()"> 隐藏影子/备份/空表</label></h2>'
+        '<table id="dctb"><thead><tr><th>表</th><th>行数</th><th>覆盖</th><th>性质</th></tr></thead><tbody></tbody></table>'
+        "<h2>库外文件</h2>"
+        '<table id="dcfiles"><thead><tr><th>文件</th><th>行数/个数</th><th>最后写入</th><th>消费方</th></tr></thead><tbody></tbody></table>'
+        "</section>"
+        "<script>(function(){"
+        "var C=" + payload + ";"
+        "function esc(s){var d=document.createElement('div');d.textContent=String(s);return d.innerHTML;}"
+        "function tag(c){var none=c.indexOf('无')===0,side=c.indexOf('system prompt')>=0;"
+        "return '<span class=\"tag'+(none?' none':(side?' side':''))+'\">'+esc(c)+'</span>';}"
+        "var nav=document.getElementById('dcnav'),tb=document.querySelector('#dctb tbody'),ftb=document.querySelector('#dcfiles tbody');"
+        "C.tables.forEach(function(t){var fact=t.kind==='事实/过程';"
+        "var tr=document.createElement('tr');tr.dataset.k=t.kind;if(!fact)tr.className='dc-hid';"
+        "tr.innerHTML='<td>'+esc(t.name)+'</td><td class=\"num\">'+t.rows.toLocaleString()+'</td><td>'+esc(t.range)+'</td><td>'+esc(t.kind)+'</td>';"
+        "tb.appendChild(tr);});"
+        "C.files.forEach(function(f){var tr=document.createElement('tr');"
+        "tr.innerHTML='<td>'+esc(f.name)+'</td><td class=\"num\">'+f.lines+'</td><td>'+esc(f.mtime)+'</td><td>'+tag(f.consumer)+'</td>';"
+        "ftb.appendChild(tr);});"
+        "var cur=-1,vis=[];"
+        "function pick(i){cur=i;location.hash='type='+encodeURIComponent(C.events[i].type);"
+        "var bs=nav.querySelectorAll('button');bs.forEach(function(b,j){b.classList.toggle('on',+b.dataset.i===i);});"
+        "var e=C.events[i],p=document.getElementById('dcpane'),mx=Math.max.apply(null,e.daily.concat([1]));"
+        "var bars=e.daily.map(function(v,k){return '<div style=\"font-size:11px;color:#57606a\">'+e.days[k]+'</div>'"
+        "+'<div style=\"display:flex;align-items:center;gap:6px\"><span class=\"bar\" style=\"width:'+Math.max(v*120/mx,1)+'px\"></span>'"
+        "+'<span class=\"num\" style=\"font-size:12px\">'+v+'</span></div>';}).join('');"
+        "var sel=e.samples.map(function(s,k){return '<option value='+k+'>'+(k+1)+'. '+s.ts+'</option>';}).join('');"
+        "p.innerHTML='<h2 style=\"margin-top:0\">events / '+esc(e.type)+' '"
+        "+(e.consumer.indexOf('无')===0?'<span class=\"tag none\">无消费方·潜在新源</span>':'')+'</h2>'"
+        "+'<div class=\"dc-kv\"><span class=\"k\">总量</span><b>'+e.total.toLocaleString()+' 条</b>'"
+        "+'<span class=\"k\">最新事件</span><span>'+esc(e.last)+'</span>'"
+        "+'<span class=\"k\">消费方</span><span>'+esc(e.consumer)+'</span>'"
+        "+'<span class=\"k\">近7日逐日</span><div style=\"display:grid;grid-template-columns:auto 1fr;gap:2px 10px;align-items:center\">'+bars+'</div></div>'"
+        "+'<div style=\"font-size:12px;color:#57606a;margin:8px 0 4px\">payload 样本（最近 '+e.samples.length+' 条，下拉切换；未脱敏）'"
+        "+'<select id=\"dcsel\" style=\"margin-left:8px;font:inherit;padding:2px 6px\">'+sel+'</select></div>'"
+        "+'<pre id=\"dcpv\"></pre>';"
+        "var pv=document.getElementById('dcpv');"
+        "function show(){pv.textContent=C.events[cur].samples[document.getElementById('dcsel').value].payload;}"
+        "document.getElementById('dcsel').onchange=show;show();"
+        "var on=nav.querySelector('button.on');if(on)on.scrollIntoView({block:'nearest'});}"
+        "C.events.forEach(function(e,i){var mx=Math.max.apply(null,e.daily.concat([1]));"
+        "var spark=e.daily.map(function(v){return '<i style=\"height:'+Math.max(v*12/mx,1)+'px\" class=\"'+(v===mx&&v?'hot':'')+'\"></i>';}).join('');"
+        "var none=e.consumer.indexOf('无')===0;"
+        "var b=document.createElement('button');b.dataset.i=i;b.dataset.t=e.type;"
+        "b.innerHTML='<span class=\"row1\"><span>'+esc(e.type)+(none?' <span class=\"tag none\">未接</span>':'')+'</span>'"
+        "+'<span class=\"num\">'+e.total.toLocaleString()+'</span></span>'"
+        "+'<span class=\"spark\">'+spark+'</span>'"
+        "+'<span class=\"meta\"><span class=\"cs'+(none?' none':'')+'\">→ '+esc(e.short)+'</span>'"
+        "+'<span class=\"lt\">'+esc(e.last)+'</span></span>';"
+        "b.onclick=function(){pick(i);};nav.appendChild(b);});"
+        "window.dcFilter=function(){var q=document.getElementById('dcq').value.toLowerCase();vis=[];"
+        "nav.querySelectorAll('button').forEach(function(b){var hit=!q||b.dataset.t.toLowerCase().indexOf(q)>=0;"
+        "b.style.display=hit?'':'none';if(hit)vis.push(+b.dataset.i);});"
+        "if(vis.length&&!vis.includes(cur))pick(vis[0]);};"
+        "window.dcFil=function(){var ck=document.getElementById('dcck').checked;"
+        "tb.querySelectorAll('tr[data-k]').forEach(function(r){"
+        "r.style.display=(ck&&r.dataset.k!=='事实/过程')?'none':'';});};"
+        "document.addEventListener('keydown',function(ev){if(ev.target.tagName==='INPUT'||ev.target.tagName==='SELECT')return;"
+        "if(!vis.length)return;var p=vis.indexOf(cur);"
+        "if(ev.key==='ArrowDown'){ev.preventDefault();pick(vis[(p+1)%vis.length]);}"
+        "if(ev.key==='ArrowUp'){ev.preventDefault();pick(vis[(p-1+vis.length)%vis.length]);}});"
+        "if(C.events.length){var h=location.hash.match(/type=([^&]+)/);var idx=0;"
+        "if(h)idx=C.events.findIndex(function(x){return x.type===decodeURIComponent(h[1]);});"
+        "pick(idx>=0?idx:0);}else{document.getElementById('dcpane').innerHTML="
+        "'<div class=\"dc-note\">langTrack.db 无事件数据</div>';}"
+        "})();</script>"
+    )
+    return _page("数据目录", body)
+
+
 # --------------------------------------------------------------------------- FastAPI app
 
 
@@ -1380,6 +1500,10 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     @app.get("/config", response_class=HTMLResponse)
     def config_page() -> Response:
         return _html(_config_page(config))
+
+    @app.get("/data", response_class=HTMLResponse)
+    def data_page() -> Response:
+        return _html(_data_page(config))
 
     @app.post("/api/config/sources")
     def api_config_sources(request: Request, payload: SourceConfigIn):

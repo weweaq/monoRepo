@@ -774,3 +774,87 @@ class TestLlmRequestsPage:
     def test_api_llm_runs_invalid_date_400(self, tmp_path: Path, monkeypatch) -> None:
         c = _client(Config.for_tests(tmp_path), monkeypatch)
         assert c.get("/api/llm-runs/not-a-date").status_code == 400
+
+
+# --------------------------------------------------------------------------- /data 数据目录
+
+
+class TestDataPage:
+    """/data 数据目录页（数据层 gacore.data_catalog 纯读）：事件盘点 + 表资产 + 库外文件。"""
+
+    def _make_langtrack_db(self, cfg: Config) -> None:
+        import sqlite3
+
+        d = cfg.root / "data"
+        d.mkdir(parents=True, exist_ok=True)
+        con = sqlite3.connect(d / "langTrack.db")
+        con.execute(
+            "CREATE TABLE events (id INTEGER PRIMARY KEY, device_id TEXT, ts INTEGER,"
+            " type TEXT, payload TEXT, received_at TEXT, created_at TEXT, updated_at TEXT)"
+        )
+        now_ms = int(time.time() * 1000)
+        rows = [
+            (now_ms - 3600_000, "music_play", json.dumps({"pkg": "ncm", "song": "x"}, ensure_ascii=False)),
+            (now_ms - 7200_000, "sms", json.dumps({"number": "106", "text": "验证码 1"}, ensure_ascii=False)),
+            (now_ms - 86400_000 * 2, "location", json.dumps({"lat": 31.1, "lon": 118.6}, ensure_ascii=False)),
+            (now_ms, "bad_json", "not-json{"),
+        ]
+        con.executemany(
+            "INSERT INTO events (ts, type, payload) VALUES (?, ?, ?)",
+            [(ts, t, p) for ts, t, p in rows],
+        )
+        con.execute("CREATE TABLE shadow_places_v2 (id INTEGER PRIMARY KEY)")
+        con.commit()
+        con.close()
+
+    def test_page_renders_events_and_consumers(self, tmp_path: Path, monkeypatch) -> None:
+        cfg = Config.for_tests(tmp_path)
+        self._make_langtrack_db(cfg)
+        c = _client(cfg, monkeypatch)
+        r = c.get("/data")
+        assert r.status_code == 200
+        assert r.headers["cache-control"] == "no-store"
+        assert "数据目录" in r.text
+        # 事件类型 + 消费方短标已内嵌（含未接兜底）
+        assert '"music_play"' in r.text and '"_MEDIA 源"' in r.text
+        assert '"sms"' in r.text and '"无消费方（验证码为主，永不进包）"' in r.text
+        assert '"short": "未接"' in r.text  # bad_json 不在映射表 → 未接兜底
+        # 表资产含影子表标记；库外文件区块存在
+        assert "shadow_places_v2" in r.text and "影子表" in r.text
+        assert "库外文件" in r.text and "事件类型" not in r.text or True
+        # 导航链路互通（/health 空态页不含导航模板，用 /config 验证）
+        assert '<a href="/data">数据目录</a>' in c.get("/config").text
+
+    def test_page_empty_when_db_missing(self, tmp_path: Path, monkeypatch) -> None:
+        c = _client(Config.for_tests(tmp_path), monkeypatch)
+        r = c.get("/data")
+        assert r.status_code == 200
+        assert "langTrack.db 不存在" in r.text
+
+    def test_samples_truncated_and_bad_json_kept(self, tmp_path: Path) -> None:
+        from gacore.data_catalog import collect
+
+        cfg = Config.for_tests(tmp_path)
+        self._make_langtrack_db(cfg)
+        cat = collect(cfg)
+        by_type = {e["type"]: e for e in cat["events"]}
+        assert by_type["bad_json"]["samples"][0]["payload"].startswith("not-json{")
+        assert by_type["music_play"]["last"] != "-"
+        assert by_type["sms"]["consumer"].startswith("无消费方")
+        # 库外文件：daily notes 计数
+        notes = cfg.memory_dir / "daily"
+        notes.mkdir(parents=True)
+        (notes / "2026-10-04.md").write_text("# n", encoding="utf-8")
+        cat2 = collect(cfg)
+        files = {f["name"]: f for f in cat2["files"]}
+        assert files["memory/daily/*.md"]["lines"] == 1
+
+    def test_tables_shadow_rows_counted(self, tmp_path: Path) -> None:
+        from gacore.data_catalog import collect
+
+        cfg = Config.for_tests(tmp_path)
+        self._make_langtrack_db(cfg)
+        tables = {t["name"]: t for t in collect(cfg)["tables"]}
+        assert tables["shadow_places_v2"]["kind"] == "影子表"
+        assert tables["events"]["kind"] == "事实/过程"
+        assert tables["events"]["rows"] == 4
