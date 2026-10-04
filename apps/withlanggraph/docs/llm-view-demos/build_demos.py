@@ -383,7 +383,7 @@ def main() -> int:
     blob = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
 
     out_dir = Path(__file__).resolve().parent
-    tpl_a_file = out_dir / "template_a.html"
+    tpl_a_file = out_dir / "template_a.html.tmpl"
     for name, tpl in TEMPLATES.items():
         if name == "demo_a_timeline.html" and tpl_a_file.is_file():
             tpl = tpl_a_file.read_text(encoding="utf-8")
