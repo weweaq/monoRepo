@@ -1000,3 +1000,7 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 
 **待办更新**：
 - [ ] 观察下次重启后（2026-10-05 起）的新日志：同一天内多进程的 session 应与各自 app.jsonl 行一致（精确 join 生效的直接证据）。
+
+### [2026-10-04] v3.2.1 追补：体检手动刷新按钮（`POST /api/health/refresh`）
+
+用户问体检刷新怎么触发（当时仅 日报生成自动落盘 / backfill CLI 两路）并建议页面加按钮。`backfill_health` 抽出单日重放原语 `refresh_day(cfg, date)`（允许当日=以当前数据回看，拒未来；当日跳过策略保留在 CLI 的 backfill_range）；review_server 新增 `POST /api/health/refresh`（token 保护、同步秒级、零 LLM 零邮件），`/health` 矩阵导航与 `/health/source` 单源页（含空态）挂「↻ 重算体检」按钮（token 存 localStorage 与评审页共用，401 自动提示重输）。矩阵同日 jsonl 后行覆盖先行，刷新即时生效，服务无需重启。测试 +6（refresh_day 3 + 路由 5 内含按钮渲染断言，合计 test_backfill_health 6 / test_review_server 40 项全绿）；ruff 全仓通过。实测：8011 临时实例闭环验证（401/真实 token 重算 2026-10-02）后重启 8010 正式实例，按钮渲染与当日（10-04）刷新均真实验证通过。
