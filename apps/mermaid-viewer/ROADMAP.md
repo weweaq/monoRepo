@@ -8,6 +8,16 @@
 
 ## 执行记录
 
+### 2026-10-04 · tests/check_prompt_logic.js 期望行号随架构图 v3 改版同步
+
+**背景**：withlanggraph 日报链路 v3 改版重写了 `architecture-flow.mmd`（FB 节点移至行 87、`CU -. 日报正文 .-> FB` 移至行 111），该测试对真实 .mmd 硬编码的期望行号（70/94）失效，2 项断言 FAIL。图改版属合法变更，属测试 fixture 机械漂移。
+
+**已完成**：`tests/check_prompt_logic.js` 两处期望值 70→87、94→111，并加注释说明"行号跟随架构图，图变则同步"。
+
+**实测验证**：node tests/check_prompt_logic.js 13 项全过。
+
+**待办更新**：无（已知遗留：架构图大改时此测试会再失效，属预期）。
+
 ### 2026-09-13 · 修复「一键复制 LLM 修复提示词」定位失效（DOM id 当锚点）
 
 **背景**：用户拿 viewer 导出的 LLM 修复提示词去修 `apps/withlanggraph/docs/architecture-flow.mmd` 完全不起作用。导出的 loc 形如 `节点 flowchart-RC-2（proactive / cli / rerun）`——`flowchart-RC-2` 是 mermaid 渲染后的 SVG DOM id，源码里根本搜不到，LLM 无法定位；边锚点更是只有 `连线 edge label（edge label）`（当时边标签文本提取失败）。
