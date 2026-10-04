@@ -709,3 +709,68 @@ class TestNoStore:
             r = c.get(url)
             assert r.status_code == 200, url
             assert r.headers.get("cache-control") == "no-store", url
+
+
+class TestLlmRequestsPage:
+    """/llm-requests 运行回放页 + /api/llm-runs/{date}（数据重建在 llm_runview，已单测）。"""
+
+    def _seed(self, cfg: Config) -> None:
+        d = cfg.logs_dir / DATE
+        d.mkdir(parents=True)
+        req = {"ts": f"{DATE}T23:50:46", "session": "s1", "pid": 7, "provider": "fake",
+               "model": "m-1", "run_kind": "invoke",
+               "messages": [{"role": "system", "content": "基本要求"},
+                            {"role": "human", "content": "〔当日信息包·2026-10-03〕写日报"},
+                            {"role": "ai", "content": "", "tool_calls": [{"id": "c1", "name": "get_time", "args": {}}]},
+                            {"role": "tool", "tool_call_id": "c1", "content": "23:50"}],
+               "tools": [{"name": "get_time"}], "params": {"temperature": 0},
+               "duration_ms": 1234, "response": {"content": "done", "content_chars": 4}}
+        (d / "llm_requests.jsonl").write_text(json.dumps(req, ensure_ascii=False), encoding="utf-8")
+        (d / "app.jsonl").write_text(json.dumps(
+            {"ts": f"{DATE}T23:52:00", "level": "INFO", "module": "scheduler", "message": "deliver_email sent",
+             "session": "s1", "pid": 7, "subject": "[gacore] daily-report · 2026-10-03"}, ensure_ascii=False),
+            encoding="utf-8")
+
+    def test_page_renders_runs_delivery_and_nav(self, tmp_path: Path, monkeypatch) -> None:
+        cfg = Config.for_tests(tmp_path)
+        self._seed(cfg)
+        c = _client(cfg, monkeypatch)
+        r = c.get("/llm-requests")
+        assert r.status_code == 200
+        assert "日报任务 · 数据日 2026-10-03" in r.text
+        assert "📬 已投递" in r.text or "已投递" in r.text
+        assert "/llm-requests?date=2026-10-02" in r.text  # ‹ 前一天导航
+        assert "const DATA=" in r.text
+
+    def test_page_empty_state_when_no_data(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setattr("gacore.review_server.load_dotenv", lambda: None)
+        c = TestClient(create_app(Config.for_tests(tmp_path)))
+        r = c.get("/llm-requests")
+        assert r.status_code == 200
+        assert "暂无 llm_requests.jsonl" in r.text
+
+    def test_page_rejects_bad_date_param(self, tmp_path: Path, monkeypatch) -> None:
+        cfg = Config.for_tests(tmp_path)
+        self._seed(cfg)
+        c = _client(cfg, monkeypatch)
+        # 非法 ?date= 回落到最近有数日期而不是 400（参数仅用于选日期，路径无注入面）
+        r = c.get("/llm-requests?date=..%2Fetc")
+        assert r.status_code == 200
+
+    def test_api_llm_runs_json_shape(self, tmp_path: Path, monkeypatch) -> None:
+        cfg = Config.for_tests(tmp_path)
+        self._seed(cfg)
+        c = _client(cfg, monkeypatch)
+        r = c.get(f"/api/llm-runs/{DATE}")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is True and body["date"] == DATE
+        assert body["counts"]["runs"] == 1 and body["counts"]["calls"] == 1
+        run = body["runs"][0]
+        assert run["kind"] == "daily"
+        assert run["calls"][0]["resp"]["chars"] == 4
+        assert run["systemEvents"][0]["subject"].endswith("2026-10-03")
+
+    def test_api_llm_runs_invalid_date_400(self, tmp_path: Path, monkeypatch) -> None:
+        c = _client(Config.for_tests(tmp_path), monkeypatch)
+        assert c.get("/api/llm-runs/not-a-date").status_code == 400

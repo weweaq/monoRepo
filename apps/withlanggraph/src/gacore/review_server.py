@@ -43,6 +43,7 @@ from pydantic import BaseModel
 
 from gacore import scheduler
 from gacore.config import Config, load_dotenv
+from gacore import llm_runview
 from gacore.feedback import (
     add_section_item,
     apply_correction,
@@ -190,7 +191,7 @@ _PAGE_TMPL = """<!doctype html>
 <body>
 <header><div class="wrap">
 <span class="brand"><a href="/review">日报评审</a></span>
-<nav><a href="/review">日报评审</a><a href="/health">源体检</a><a href="/config">源预算</a></nav>
+<nav><a href="/review">日报评审</a><a href="/health">源体检</a><a href="/llm-requests">运行回放</a><a href="/config">源预算</a></nav>
 </div></header>
 <main class="wrap">
 __BODY__
@@ -984,6 +985,171 @@ def _config_page(cfg: Config) -> str:
 # --------------------------------------------------------------------------- FastAPI app
 
 
+# --------------------------------------------------------------------------- /llm-requests 运行回放
+#
+# 数据重建在 gacore.llm_runview（与 llm-view-demos 共用单一实现）；页面为
+# template_a demo 的服务端移植：DATA 服务端内嵌（无前端依赖），CSS 作用域限定
+# 在 #llmv 下避免与共享样式互染。
+
+_LLMV_CSS = """
+#llmv{font-size:13px}
+#llmv .lbar{padding:8px 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+#llmv .lbar input,#llmv .lbar select{border:1px solid var(--line);border-radius:6px;padding:4px 8px;font:inherit;font-size:13px}
+#llmv .lbar input.q{width:300px}
+#llmv .lwrap{display:flex;gap:14px;align-items:flex-start}
+#llmv #side{width:300px;flex:none;background:#f6f8fa;border:1px solid var(--line);border-radius:8px;padding:8px;max-height:78vh;overflow:auto}
+#llmv #main{flex:1;min-width:0}
+#llmv .run{padding:9px;border-radius:8px;cursor:pointer;margin-bottom:6px;border:1px solid transparent}
+#llmv .run:hover{background:#f6f8fa}#llmv .run.on{background:#ddf4ff;border-color:#0969da}
+#llmv .run .t{font-weight:600;margin-bottom:2px}
+#llmv .run .q{font-size:11px;color:var(--mut);margin-bottom:3px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+#llmv .run .s{font-size:11px;color:var(--miss)}
+#llmv .badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;margin-right:4px}
+#llmv .kind-daily{background:#ddf4ff;color:#0969da}#llmv .kind-proactive{background:#fff1e5;color:#bc4c00}
+#llmv .kind-chat{background:#dafbe1;color:#1a7f37}#llmv .kind-internal{background:#eaeef2;color:#57606a}
+#llmv .kind-other{background:#fbefff;color:#8250df}
+#llmv .role-system{background:#fbefff;color:#8250df}#llmv .role-human{background:#ddf4ff;color:#0969da}
+#llmv .role-ai{background:#dafbe1;color:#1a7f37}#llmv .role-tool{background:#fff1e5;color:#bc4c00}
+#llmv .role-user{background:#eaeef2;color:#57606a}
+#llmv .chip{display:inline-block;background:#f6f8fa;border:1px solid var(--line);border-radius:4px;padding:0 6px;font-size:11px;margin:1px 2px;color:#57606a}
+#llmv .call{background:#fff;border:1px solid var(--line);border-radius:10px;margin-bottom:12px;overflow:hidden}
+#llmv .call>.hd{padding:8px 12px;border-bottom:1px solid var(--line);display:flex;gap:8px;align-items:center;flex-wrap:wrap;cursor:pointer}
+#llmv .call>.bd{padding:10px 12px;display:none}.call.open>.bd{display:block}
+#llmv .call.toolhit{border-color:#d4a72c;box-shadow:0 0 0 2px #fff8c5}
+#llmv .msgline{padding:4px 6px;border-radius:6px;margin:2px 0;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#llmv .msgline.dim{opacity:.45}
+#llmv .msgline.hit{background:#fff8c5;outline:1px solid #d4a72c}
+#llmv .newbadge{display:inline-block;background:#1a7f37;color:#fff;font-size:9px;font-weight:700;border-radius:3px;padding:0 4px;margin-left:4px;vertical-align:1px}
+#llmv .tcard{border:1px solid #d4a72c;border-radius:8px;margin:8px 0;overflow:hidden}
+#llmv .tcard>.th{background:#fff8c5;padding:6px 10px;font-weight:600;cursor:pointer}
+#llmv .tcard>.tb{display:none;padding:8px 10px}.tcard.open>.tb{display:block}
+#llmv .exp{cursor:pointer}
+#llmv pre{white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,Consolas,monospace;font-size:12px;margin:4px 0;background:#0d1117;color:#e6edf3;border:none;border-radius:6px;padding:10px;max-height:380px;overflow:auto}
+#llmv .hrow{background:#fff;border:1px solid var(--line);border-radius:8px;padding:8px 12px;margin-bottom:8px;cursor:pointer}
+#llmv .hrow:hover{background:#f6f8fa}
+#llmv mark{background:#fff8c5;padding:0 1px}
+#llmv #drawer{position:fixed;right:0;top:0;width:52%;max-width:860px;height:100%;background:#fff;border-left:1px solid var(--line);box-shadow:-4px 0 16px rgba(0,0,0,.12);display:none;flex-direction:column;z-index:20}
+#llmv #drawer .dh{padding:10px 14px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:8px;align-items:center}
+#llmv #drawer .db{flex:1;overflow:auto;padding:14px}
+#llmv .sysline{font-size:12px;margin-top:4px}
+#llmv .mut{color:var(--mut)}
+"""
+
+_LLMV_JS = """
+function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}
+function fmtC(n){return n>=1000?(n/1000).toFixed(1)+"k":n}
+function pretty(o){try{return JSON.stringify(o,null,2)}catch(e){return String(o)}}
+function hh(ts){return (ts||"").replace("T"," ").slice(5,19)}
+function badge(role){return '<span class="badge role-'+role+'">'+esc(role)+'</span>'}
+function tg(e){e.closest(".fold").classList.toggle("open")}
+function copyText(t){if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(function(){toast("已复制")},function(){fallbackCopy(t)})}else{fallbackCopy(t)}}
+function fallbackCopy(t){var ta=document.createElement("textarea");ta.value=t;document.body.appendChild(ta);ta.select();try{document.execCommand("copy");toast("已复制")}catch(e){}document.body.removeChild(ta)}
+function toast(msg){var d=document.createElement("div");d.textContent=msg;d.style.cssText="position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#1f2328;color:#fff;padding:6px 18px;border-radius:20px;z-index:99";document.body.appendChild(d);setTimeout(function(){d.remove()},1600)}
+const FLAT=[];DATA.runs.forEach(function(r){r.calls.forEach(function(c){c.run=r.id;FLAT.push(c)})});
+let CUR=null,TOOLF="*";
+function drawer(t, html){document.getElementById("dt").textContent=t;document.getElementById("db").innerHTML=html;document.getElementById("drawer").style.display="flex"}
+function showMsg(ri,ci,mi){var c=DATA.runs[ri-1].calls[ci-1];var m=c.msgs[mi];
+drawer("run"+ri+" 调用#"+ci+" · 第"+(mi+1)+"条 · "+esc(m.role)+" · "+fmtC(m.chars)+"字","<pre>"+esc(m.text)+"</pre>"+(m.toolCalls&&m.toolCalls.length?"<h4>tool_calls</h4><pre>"+esc(pretty(m.toolCalls))+"</pre>":""))}
+function copyCall(){if(CUR)copyText(JSON.stringify(CUR,null,2))}
+function callHead(c){var dur=c.durationMs!=null?(c.durationMs/1000).toFixed(1)+"s":null;
+var respChip=null;
+if(c.resp){respChip=c.resp.error?'<span class=chip style="background:#FFEBEE;color:#C62828">❌ 调用失败</span>':'<span class=chip style="background:#DAFBE1;color:#1a7f37">响应 '+fmtC(c.resp.chars)+"字</span>";}
+return "<b>调用 #"+c.i+"</b><span class=chip>"+hh(c.ts)+"</span><span class=chip>"+esc(c.provider)+"/"+esc(c.model)+"</span><span class=chip>"+(c.msgsCount?("消息 "+c.msgsCount+" 条"):"内部调用（judge 等，输入非消息列表）")+"</span><span class=chip>新增 "+c.newCount+"</span><span class=chip>绑定工具 "+c.toolsBound+"</span>"+(dur?"<span class=chip>"+dur+"</span>":"")+(respChip||"")+(c.runKind?"<span class=chip>"+esc(c.runKind)+"</span>":"")}
+function msgHtml(ri,ci,c,i){var m=c.msgs[i];var isNew=i>=c.newIdxStart;
+return '<div class="msgline exp'+(isNew?"":" dim")+'" id="m_'+ri+"_"+ci+"_"+i+'" onclick="showMsg('+ri+","+ci+","+i+')">'+badge(m.role)+(m.name?' <span class=chip>'+esc(m.name)+"</span>":"")+(m.toolCallId?' <span class=chip>id:'+esc(String(m.toolCallId).slice(0,10))+"</span>":"")+' <span class=muted>'+fmtC(m.chars)+"字</span> "+esc(m.text.slice(0,150))+(isNew?'<span class=newbadge>NEW</span>':"")+"</div>"}
+function tcardHtml(ri,ci,j,tc){return '<div class="tcard fold'+(TOOLF!=="*"&&tc.name===TOOLF?" toolhit":"")+'" id="tc_'+ri+"_"+ci+"_"+j+'"><div class="th exp" onclick="tg(this)">🔧 '+esc(tc.name)+' <span class=muted>'+(tc.result?tc.resultChars+"字结果":"（无结果记录）")+'</span></div><div class="tb"><div><b>args</b></div><pre>'+esc(pretty(tc.args))+"</pre><div><b>result</b></div><pre>"+esc(tc.result==null?"（无）":tc.result)+"</pre></div></div>"}
+function renderMain(){var run=CUR;var el=document.getElementById("main");var h="";
+h+='<div class=mut style="margin-bottom:10px">运行 '+run.id+" · "+esc(run.title)+" · "+hh(run.start)+" → "+hh(run.end)+" · "+run.calls.length+" 次调用"+(TOOLF!=="*"?" · 工具筛选:"+esc(TOOLF):"");
+if(run.systemEvents&&run.systemEvents.length){h+='<div style="margin:6px 0 0">';
+run.systemEvents.forEach(function(e){h+='<div class=sysline style="color:'+(e.failed?"#cf222e":"#1a7f37")+'">系统侧：'+(e.failed?"❌ 失败通知已发":"📬 已投递")+" · "+hh(e.ts)+" · <span class=chip>"+esc(e.subject)+"</span><span class=mut>（scheduler 经 SMTP，非 LLM 调用）</span></div>"});h+="</div>";}
+if(run.systemBatch){h+='<div class=sysline style="color:var(--mut)">系统侧：🔁 run 结束后发生批量重发 '+run.systemBatch.count+" 封（QQ 反馈触发，含旧报，略）</div>";}
+if(run.errors&&run.errors.length){run.errors.forEach(function(e){h+='<div class=sysline style="color:#cf222e">⚠ ERROR ['+esc(e.module)+"] "+hh(e.ts)+(e.count>1?" ×"+e.count:"")+" · "+esc(e.message)+(e.detail?" — "+esc(e.detail):"")+"</div>";});}
+h+="</div>";
+if(run.output){h+='<div class="call fold open" id="out"><div class="hd exp" onclick="tg(this)">📄 产出存档（最终回复正文 '+fmtC(run.output.replyChars)+"字 · 对 "+run.calls.length+' 次调用的最终响应，不在请求日志里） <span class=mut>'+esc(run.output.file)+"</span></div><div class=\\"bd\\"><pre>"+esc(run.output.reply)+"</pre></div></div>";}
+run.calls.forEach(function(c){var toolhit=TOOLF!=="*"&&c.turnToolCalls.some(function(t){return t.name===TOOLF});
+h+='<div class="call fold'+(toolhit?" open toolhit":"")+'" id="call_'+run.id+"_"+c.i+'"><div class="hd exp" onclick="tg(this)">'+callHead(c)+'</div><div class="bd">';
+h+=c.msgs.map(function(m,i){return msgHtml(run.id,c.i,c,i)}).join("");
+if(c.resp&&(c.resp.text||c.resp.error)){var style=c.resp.error?"color:#cf222e":"";
+h+='<div class="tcard fold" style="border-color:'+(c.resp.error?"#ef9a9a":"#a5d6a7")+'"><div class="th exp" onclick="tg(this)" style="'+style+'">💬 模型响应 '+fmtC(c.resp.chars)+"字"+(c.resp.toolCalls?" · 发起 "+c.resp.toolCalls+" 个工具调用":"")+(c.resp.error?" · 调用失败":"")+"</div>"+'<div class="tb"><pre style="'+(c.resp.error?"background:#B71C1C":"")+'">'+esc(c.resp.error||c.resp.text)+"</pre>"+(c.resp.usage?'<div class=mut>tokens: '+esc(pretty(c.resp.usage))+"</div>":"")+"</div></div>";}
+if(c.turnToolCalls.length){h+='<h4 style="margin:8px 0 2px">工具往返 '+c.turnToolCalls.length+" 次（模型响应发起 → 工具结果随本请求到达）</h4>";
+c.turnToolCalls.forEach(function(tc,j){h+=tcardHtml(run.id,c.i,j,tc)});}
+else h+='<div class=mut style="margin-top:6px">本请求无工具往返</div>';
+h+="</div></div>";});
+el.innerHTML=h;applyOnlyNew();}
+function applyOnlyNew(){var on=document.getElementById("onlynew").checked;document.querySelectorAll("#main .msgline.dim").forEach(function(e){e.style.display=on?"none":""})}
+function renderSide(){document.getElementById("side").innerHTML=DATA.runs.map(function(r){if(TOOLF!=="*"&&!r.calls.some(function(c){return c.turnToolCalls.some(function(t){return t.name===TOOLF})}))return"";
+return '<div class="run" id="run'+r.id+'" onclick="pick('+r.id+')"><div class="t"><span class="badge kind-'+r.kind+'">'+esc(r.title)+"</span></div>"+'<div class="q">'+esc(r.task)+"</div>"+(r.lastAi?'<div class="q">↳ 末条AI: '+esc(r.lastAi)+"</div>":"")+'<div class="s">'+r.calls.length+" 次调用 · "+hh(r.start).slice(0,11)+" · 工具: "+(r.toolsUsed.map(function(t){return esc(t)}).join(" ")||"无")+"</div>"+sysHtml(r)+"</div>"}).join("")||'<div class=mut style="padding:10px">无匹配 run</div>'}
+function sysHtml(r){var out="";
+if(r.systemEvents&&r.systemEvents.length){out+=r.systemEvents.map(function(e){var hh1=hh(e.ts).slice(6);var lab=e.failed?"❌ 失败通知":"📬 系统已投递";
+return '<div class="s" style="color:'+(e.failed?"#cf222e":"#1a7f37")+'">→ '+lab+" "+hh1+" · "+esc(e.subject)+"</div>"}).join("");}
+if(r.systemBatch){out+='<div class=s style="color:var(--mut)">→ 🔁 run 结束后发生批量重发 '+r.systemBatch.count+" 封（QQ 反馈触发，含旧报，略）</div>";}
+return out}
+function pick(id){document.querySelectorAll(".run").forEach(function(e){e.classList.remove("on")});var card=document.getElementById("run"+id);if(card)card.classList.add("on");CUR=DATA.runs[id-1];exitSearch();renderMain();document.getElementById("main").scrollTop=0}
+function onTool(){TOOLF=document.getElementById("ftool").value;var q=document.getElementById("q");if(q.value.trim().length>=2){onSearch()}else{renderSide();if(CUR)renderMain()}}
+function onSearch(){var q=document.getElementById("q").value.trim();if(q.length<2){document.getElementById("stat").textContent="";if(CUR){renderSide();renderMain()}return}
+var ql=q.toLowerCase();var hits=[];
+FLAT.forEach(function(c){c.msgs.forEach(function(m,i){var t=m.text.toLowerCase();var idx=t.indexOf(ql);while(idx>=0&&hits.length<400){hits.push({ri:c.run,ci:c.i,mi:i,m:m,at:idx});idx=t.indexOf(ql,idx+1)}})});
+var el=document.getElementById("main");var h='<div style="margin-bottom:10px"><b>搜索 "'+esc(q)+'"</b> · '+hits.length+" 处命中 <button onclick=\\"exitSearch();renderMain()\\">返回回放</button></div>";
+hits.slice(0,200).forEach(function(x){var s=Math.max(0,x.at-60);
+h+='<div class=hrow onclick="jump('+x.ri+","+x.ci+","+x.mi+')"><span class=chip>run'+x.ri+" #"+x.ci+"</span>"+badge(x.m.role)+'<span class=muted>'+fmtC(x.m.chars)+"字</span><div style=\\"margin-top:3px;font-size:12px\\">…"+esc(x.m.text.slice(s,x.at))+"<mark>"+esc(x.m.text.substr(x.at,q.length))+"</mark>"+esc(x.m.text.substr(x.at+q.length,90))+"…</div></div>"});
+el.innerHTML="<div id=hits>"+h+"</div>";document.getElementById("stat").textContent="搜索模式 · 点击命中跳回时间轴"}
+function jump(ri,ci,mi){var run=DATA.runs[ri-1];CUR=run;
+document.querySelectorAll(".run").forEach(function(e){e.classList.remove("on")});var card=document.getElementById("run"+ri);if(card)card.classList.add("on");
+exitSearch();document.getElementById("onlynew").checked=false;renderMain();
+var callEl=document.getElementById("call_"+ri+"_"+ci);if(callEl)callEl.classList.add("open");
+var msgEl=document.getElementById("m_"+ri+"_"+ci+"_"+mi);if(msgEl){msgEl.classList.add("hit");msgEl.scrollIntoView({block:"center"});}
+document.getElementById("stat").textContent="已定位 run"+ri+" 调用#"+ci}
+function exitSearch(){document.getElementById("stat").textContent=""}
+(function(){var tools={};FLAT.forEach(function(c){c.turnToolCalls.forEach(function(t){tools[t.name]=1})});var ts=Object.keys(tools).sort();
+document.getElementById("ftool").innerHTML='<option value="*">全部工具</option>'+ts.map(function(t){return "<option>"+esc(t)+"</option>"}).join("");
+renderSide();if(DATA.runs.length)pick(DATA.runs[DATA.runs.length-1].id);})();
+"""
+
+
+def _latest_llm_requests_date(cfg: Config, back: int = 14) -> str:
+    """最近一个有 llm_requests.jsonl 的日期（今天起往回找，无则空串）。"""
+    today = datetime.now(_UTC8).date()
+    for i in range(back):
+        d = (today - timedelta(days=i)).isoformat()
+        if (cfg.logs_dir / d / "llm_requests.jsonl").is_file():
+            return d
+    return ""
+
+
+def _llm_nav(date: str) -> str:
+    d = datetime.strptime(date, "%Y-%m-%d").date()
+    prev = (d - timedelta(days=1)).isoformat()
+    nxt = (d + timedelta(days=1)).isoformat()
+    today = datetime.now(_UTC8).date().isoformat()
+    nxt_html = f'<a href="/llm-requests?date={nxt}">后一天 ›</a>' if nxt <= today else '<span class="mut">后一天 ›</span>'
+    return f'<a href="/llm-requests?date={prev}">‹ 前一天</a>　<b>{date}</b>　{nxt_html}'
+
+
+def _llm_requests_page(cfg: Config, date: str) -> str:
+    view = llm_runview.run_view(cfg, date)
+    blob = json.dumps(view, ensure_ascii=False).replace("</", "<\\/")
+    body = (
+        '<div id="llmv">'
+        f'<style>{_LLMV_CSS}</style>'
+        f'<div class="sub">{_llm_nav(date)} · 数据源：logs/{{date}}/llm_requests.jsonl + app.jsonl（系统动作/ERROR）'
+        f' + scheduled/（产出存档）· 数据重建见 gacore/llm_runview.py</div>'
+        '<div class="lbar">'
+        '<input class="q" id="q" placeholder="全局搜索消息内容…" oninput="onSearch()">'
+        '<select id="ftool" onchange="onTool()"></select>'
+        '<label><input type="checkbox" id="onlynew" checked onchange="applyOnlyNew()"> 只看新增</label>'
+        '<span class="mut" id="stat"></span>'
+        "</div>"
+        '<div class="lwrap"><div id="side"></div><div id="main"></div></div>'
+        '<div id="drawer"><div class="dh"><b id="dt"></b><span>'
+        '<button onclick="copyCall()">复制调用 JSON</button> '
+        '<button onclick="document.getElementById(\'drawer\').style.display=\'none\'">关闭</button>'
+        "</span></div><div class=\"db\" id=\"db\"></div></div>"
+        f"<script>const DATA={blob};\n{_LLMV_JS}</script>"
+        "</div>"
+    )
+    return _page(f"LLM 运行回放 · {date}", body)
+
+
 class CorrectionIn(BaseModel):
     date: str
     anchor: str = ""
@@ -1104,6 +1270,25 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         if not _DATE_RE.fullmatch(date) or not _KEY_RE.fullmatch(key):
             return JSONResponse({"ok": False, "error": "invalid path param"}, status_code=400)
         return _html(_health_source_page(config, date, key))
+
+    @app.get("/llm-requests", response_class=HTMLResponse)
+    def llm_requests_page(request: Request) -> Response:
+        """LLM 运行回放：?date= 缺省取最近一个有 llm_requests.jsonl 的日期。"""
+        date = request.query_params.get("date") or ""
+        if not _DATE_RE.fullmatch(date):
+            date = _latest_llm_requests_date(config)
+        if not date:
+            return _html(_page("LLM 运行回放", '<div class="empty">暂无 llm_requests.jsonl 数据'
+                                                "（gacore 服务产生过 LLM 调用后此页可用）</div>"))
+        return _html(_llm_requests_page(config, date))
+
+    @app.get("/api/llm-runs/{date}")
+    def api_llm_runs(date: str) -> dict:
+        """运行视图 JSON（run_view），供测试与未来消费者；GET 公开。"""
+        if not _DATE_RE.fullmatch(date):
+            return JSONResponse({"ok": False, "error": "invalid date"}, status_code=400)
+        view = llm_runview.run_view(config, date)
+        return {"ok": True, **view}
 
     @app.get("/logs/{path:path}")
     def logs_file(path: str) -> Response:
