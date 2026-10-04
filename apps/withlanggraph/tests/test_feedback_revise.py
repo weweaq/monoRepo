@@ -13,21 +13,18 @@ import json
 import os
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 from gacore.config import Config
 from gacore.feedback import (
-    Feedback,
+    apply_correction,
     current_report_version,
-    escalate_revise,
     list_active_corrections,
     load_delivered,
-    load_pending,
     next_report_version,
     record_correction,
-    revise_from_pending,
     revise_report_llm,
     save_delivered,
-    save_pending,
 )
 
 # Pre-stamped delivered report: every bullet already carries its [节-序号] anchor and the
@@ -296,96 +293,74 @@ class TestReviseReportLlm:
         assert model.calls == []
 
 
-class TestReviseFromPending:
-    def test_pending_drafts_become_items(self, tmp_path: Path, monkeypatch):
+class TestApplyCorrection:
+    """统一订正入口（QQ 确认与评审页共用）：auto=原样替换优先、定位不到升级 ②。"""
+
+    def test_auto_anchor_hit_replaces_verbatim_with_mark(self, tmp_path: Path, monkeypatch):
         cfg = Config.for_tests(tmp_path)
         _deliver(cfg)
-        save_pending(
-            cfg,
-            Feedback(id="p1", date=DATE, section="工作日志", index=2, intent="fix",
-                     content="改成上午去了朝阳大悦城", status="pending"),
+        monkeypatch.setattr(
+            "gacore.feedback.get_llm",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("LLM must not be called")),
         )
-        revised = REPORT.replace("- [工作日志-2] 上午收 9-08 日报尾巴", "- [工作日志-2] 改成上午去了朝阳大悦城")
-        model, _seen = _patch_llm(monkeypatch, [revised])
-        res = revise_from_pending(cfg, DATE)
-        assert res["ok"] is True
-        assert res["diff_ok"] is True
-        assert res["fallback"] is False
-        user = model.calls[0][1].content
-        assert "[工作日志-2]" in user and "改成上午去了朝阳大悦城" in user
+        res = apply_correction(cfg, DATE, "[工作日志-2]", "fact", "上午实际去了朝阳大悦城")
+        assert res["status"] == "ok" and res["mode_used"] == "verbatim"
+        updated = (load_delivered(cfg, DATE) or "").rstrip()
+        assert "- [工作日志-2] 上午实际去了朝阳大悦城（人工订正）" in updated
+        assert "收 9-08 日报尾巴" in res["replaced_from"]
+        assert res["correction"]["mode"] == "verbatim" and res["correction"]["replaced_from"]
 
-    def test_no_pending_drafts_errors(self, tmp_path: Path, monkeypatch):
+    def test_auto_anchor_miss_falls_back_to_llm(self, tmp_path: Path, monkeypatch):
+        """锚点存在但不是标准 bullet（原样替换定位不到）→ auto 自动升级 ②。"""
         cfg = Config.for_tests(tmp_path)
-        _deliver(cfg)
-        model, _seen = _patch_llm(monkeypatch, ["不应被消费"])
-        res = revise_from_pending(cfg, DATE)
-        assert res["ok"] is False
-        assert res["error"] == "no_pending"
-        assert model.calls == []
-
-    def test_applied_drafts_are_ignored(self, tmp_path: Path, monkeypatch):
-        cfg = Config.for_tests(tmp_path)
-        _deliver(cfg)
-        save_pending(
-            cfg,
-            Feedback(id="p2", date=DATE, section="工作日志", index=1, intent="fix",
-                     content="x", status="applied"),
+        # 把锚点行改成非 "- " 开头的引用行：_verbatim_patch 定位不到，但锚点仍在文中
+        quoted = REPORT.replace(
+            "- [工作日志-2] 上午收 9-08 日报尾巴", "> 引用：[工作日志-2] 上午收 9-08 日报尾巴"
         )
-        model, _seen = _patch_llm(monkeypatch, ["不应被消费"])
-        res = revise_from_pending(cfg, DATE)
-        assert res["ok"] is False
-        assert res["error"] == "no_pending"
-        assert model.calls == []
+        save_delivered(cfg, DATE, quoted)
+        monkeypatch.setattr(
+            "gacore.feedback.get_llm",
+            lambda *a, **k: SimpleNamespace(invoke=lambda m: SimpleNamespace(content=quoted)),
+        )
+        res = apply_correction(cfg, DATE, "[工作日志-2]", "fact", "x")
+        assert res["status"] == "ok" and res["mode_used"] == "llm"
+        assert "✎ 人工订正：[工作日志-2]" in (load_delivered(cfg, DATE) or "")
 
-
-# --------------------------------------------------------------------------- ladder ①→② escalation
-
-
-class TestEscalateRevise:
-    """escalate_revise: revise minimally, replace the archive, mark the draft applied."""
-
-    @staticmethod
-    def _draft() -> Feedback:
-        return Feedback(id="p9", date=DATE, section="工作日志", index=2, intent="fix",
-                        content="上午实际去了朝阳大悦城", status="pending")
-
-    def test_success_updates_archive_and_marks_applied(self, tmp_path: Path, monkeypatch):
+    def test_verbatim_forced_miss_errors_without_llm(self, tmp_path: Path, monkeypatch):
         cfg = Config.for_tests(tmp_path)
         _deliver(cfg)
-        fb = self._draft()
-        save_pending(cfg, fb)
-        revised = REPORT.replace("- [工作日志-2] 上午收 9-08 日报尾巴", "- [工作日志-2] 上午实际去了朝阳大悦城")
-        model, seen = _patch_llm(monkeypatch, [revised])
-        res = escalate_revise(cfg, fb)
-        assert res["ok"] is True and res["diff_ok"] is True and res["fallback"] is False
-        assert seen["kwargs"].get("bind_tools") is False  # zero-tool guarantee holds on the ladder too
-        # Delivered archive now carries the revised section...
-        assert load_delivered(cfg, DATE).rstrip() == revised.rstrip()
-        # ...and the draft is applied so 确认重发's ledger logic sees unsent work.
-        assert [d.status for d in load_pending(cfg) if d.id == "p9"] == ["applied"]
-        assert len(model.calls) == 1
+        monkeypatch.setattr(
+            "gacore.feedback.get_llm",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("LLM must not be called")),
+        )
+        res = apply_correction(cfg, DATE, "[不存在-9]", "fact", "x", mode="verbatim")
+        assert res["status"] == "error" and "no bullet" in res["error"]
+        assert res["mode_used"] == ""
 
-    def test_fallback_result_still_books_kept(self, tmp_path: Path, monkeypatch):
+    def test_append_intent_keeps_sub_bullet_semantics(self, tmp_path: Path, monkeypatch):
         cfg = Config.for_tests(tmp_path)
         _deliver(cfg)
-        fb = self._draft()
-        save_pending(cfg, fb)
-        bad = REPORT.replace(
-            "- [工作日志-2] 上午收 9-08 日报尾巴", "- [工作日志-2] 上午实际去了朝阳大悦城"
-        ).replace("- [个人观察-1] LPL 老线再加深", "- [个人观察-1] 关注IG了")
-        model, _seen = _patch_llm(monkeypatch, [bad, bad])
-        res = escalate_revise(cfg, fb)
-        assert res["ok"] is True and res["fallback"] is True
-        work = _section_of(load_delivered(cfg, DATE), "工作日志")
-        assert work.rstrip().endswith("> （人工订正）上午实际去了朝阳大悦城")
-        assert [d.status for d in load_pending(cfg) if d.id == "p9"] == ["applied"]
+        monkeypatch.setattr(
+            "gacore.feedback.get_llm",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("LLM must not be called")),
+        )
+        res = apply_correction(cfg, DATE, "[工作日志-1]", "fact", "补一条：下午去了大悦城", intent="append")
+        assert res["status"] == "ok" and res["mode_used"] == "verbatim"
+        updated = (load_delivered(cfg, DATE) or "")
+        assert "- [反馈] 补一条：下午去了大悦城（人工订正）" in updated
 
-    def test_no_delivered_leaves_draft_pending(self, tmp_path: Path, monkeypatch):
+    def test_pref_records_only_without_touching_report(self, tmp_path: Path, monkeypatch):
         cfg = Config.for_tests(tmp_path)
-        fb = self._draft()
-        save_pending(cfg, fb)
-        model, _seen = _patch_llm(monkeypatch, ["不应被消费"])
-        res = escalate_revise(cfg, fb)
-        assert res["ok"] is False and res["error"] == "no_delivered"
-        assert [d.status for d in load_pending(cfg) if d.id == "p9"] == ["pending"]
-        assert model.calls == []
+        _deliver(cfg)
+        before = load_delivered(cfg, DATE)
+        res = apply_correction(cfg, DATE, "-", "pref", "个人观察节不要罗列数据", note="排版偏好")
+        assert res["status"] == "ok" and res["mode_used"] == "recorded"
+        assert (load_delivered(cfg, DATE) or "") == before
+        import json as _json
+        prefs = _json.loads((cfg.root / "data" / "feedback" / "preferences.json").read_text(encoding="utf-8"))
+        assert prefs[0]["note"] == "排版偏好"
+
+    def test_no_delivered_report_errors(self, tmp_path: Path, monkeypatch):
+        cfg = Config.for_tests(tmp_path)
+        res = apply_correction(cfg, DATE, "[工作日志-1]", "fact", "x")
+        assert res["status"] == "error" and "no delivered report" in res["error"]

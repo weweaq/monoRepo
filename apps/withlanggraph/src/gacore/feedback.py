@@ -381,7 +381,17 @@ def _next_seq(records: list[dict], prefix: str) -> int:
     return mx + 1
 
 
-def record_correction(cfg: Config, date: str, anchor: str, kind: str, text: str) -> dict:
+def record_correction(
+    cfg: Config,
+    date: str,
+    anchor: str,
+    kind: str,
+    text: str,
+    *,
+    mode: str = "",
+    note: str = "",
+    replaced_from: str = "",
+) -> dict:
     """Persist a correction (kind="fact") or a preference (kind="pref") from QQ or the review page.
 
     Shared audit base of the C4 repair ladder: ladders ①② write it, ladder ③ (whole-report
@@ -390,6 +400,9 @@ def record_correction(cfg: Config, date: str, anchor: str, kind: str, text: str)
     is marked "superseded" so only the newest correction per anchor stays active. pref records
     are day-independent and appended to data/feedback/preferences.json. Timestamps use
     Asia/Shanghai "%Y-%m-%d %H:%M:%S". Returns the record that was written.
+
+    mode/note/replaced_from 是统一入口 apply_correction 的审计扩展：mode 记录实际走的
+    修复方式（verbatim/llm），replaced_from 保存被原样替换掉的原句，note 是操作者备注。
     """
     now = anchor_now()
     compact = date.replace("-", "")
@@ -403,6 +416,8 @@ def record_correction(cfg: Config, date: str, anchor: str, kind: str, text: str)
             "created_at": now,
             "updated_at": now,
         }
+        if note:
+            rec["note"] = note.strip()
         recs.append(rec)
         _write_json_array(_preferences_file(cfg), recs)
         return rec
@@ -416,6 +431,12 @@ def record_correction(cfg: Config, date: str, anchor: str, kind: str, text: str)
         "created_at": now,
         "updated_at": now,
     }
+    if mode:
+        rec["mode"] = mode
+    if note:
+        rec["note"] = note.strip()
+    if replaced_from:
+        rec["replaced_from"] = replaced_from.strip()
     for old in recs:
         if old.get("kind") == "fact" and old.get("anchor") == rec["anchor"] and old.get("status") == "active":
             old["status"] = "superseded"
@@ -561,21 +582,13 @@ def load_delivered(cfg: Config, date: str) -> str | None:
         return None
 
 
-def apply_feedback(cfg: Config, fb: Feedback) -> dict:
-    """Apply an approved feedback draft to the delivered report (source of truth only).
+_CORRECTION_MARK: Final = "（人工订正）"
+_LLM_MARK: Final = "✎ 人工订正："
 
-    Locates the target bullet by its [节-序号] anchor, replaces it with the correction
-    (or appends the addition), writes back to logs/delivered_report/{date}.md and marks
-    the draft applied. It does NOT re-deliver: the QQ flow batches edits and a single
-    "确认重发" calls redeliver_day() to send one consolidated revision.
 
-    Returns a status dict for the caller; callers wrap in tolerance as this is best-effort.
-    """
-    body = load_delivered(cfg, fb.date)
-    if body is None:
-        return {"status": "error", "msg": f"no delivered report for {fb.date}"}
-
-    anchor = f"[{fb.section}-{fb.index}]"
+def _verbatim_patch(body: str, anchor: str, text: str, intent: str) -> tuple[str, str] | None:
+    """确定性原样替换：定位锚点 bullet 并逐字改写。返回 (新全文, 被替换原句)；
+    锚点定位不到返回 None（调用方决定升级 ② 还是显式报错）。"""
     lines = body.splitlines()
     target_i = None
     for i, ln in enumerate(lines):
@@ -583,18 +596,109 @@ def apply_feedback(cfg: Config, fb: Feedback) -> dict:
             target_i = i
             break
     if target_i is None:
-        return {"status": "error", "msg": f"no bullet with {anchor} in delivered report"}
-
-    if fb.intent == "append":
-        new_block = lines[target_i] + "\n- [反馈] " + fb.content
-        lines[target_i] = new_block
+        return None
+    replaced_from = lines[target_i].strip()
+    if intent == "append":
+        lines[target_i] = lines[target_i] + f"\n- [反馈] {text}{_CORRECTION_MARK}"
     else:
-        lines[target_i] = f"- {anchor} {fb.content}"
+        lines[target_i] = f"- {anchor} {text}{_CORRECTION_MARK}"
+    return "\n".join(lines), replaced_from
 
-    updated = "\n".join(lines)
-    path = _report_path(cfg, fb.date)
+
+def _save_delivered_raw(cfg: Config, date: str, updated: str) -> None:
+    path = _report_path(cfg, date)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(updated, encoding="utf-8", newline="")
+
+
+def apply_correction(
+    cfg: Config,
+    date: str,
+    anchor: str,
+    kind: str = "fact",
+    text: str = "",
+    *,
+    mode: str = "auto",
+    note: str = "",
+    intent: str = "fix",
+) -> dict:
+    """统一订正入口（C4 内聚）：QQ 确认与评审页 /api/revise 共用，两端对外语义一致。
+
+    kind="pref"：仅落偏好库（含 note），不改日报正文、不投递。
+    kind="fact" 按 mode 分派：
+      - "auto"（两端默认）：先尝试 ① 原样替换；锚点定位失败自动升级 ② LLM 最小修订。
+      - "verbatim"：强制 ①，定位失败显式报错（用户明确要原样时不得静默转写）。
+      - "llm"：强制 ②（语义改写，如"把这条说得委婉一点"）。
+    ① 成功的 bullet 尾部追加（人工订正）标记；② 成功在文末追加 ✎ 脚注列出锚点——
+    收件人一眼可见哪些内容经过人手。审计记录统一带 mode/replaced_from/note。
+    投递不在本函数内：QQ 批量「确认重发」、评审页即时发送，由调用方决定。
+
+    Returns: {"status": "ok"|"error", "mode_used": "verbatim"|"llm"|"recorded",
+              "date", "anchor", "correction": rec, "replaced_from", "error", "revise"}
+    （revise 仅 ② 路径携带 ReviseResult。）
+    """
+    anchor = anchor.strip()
+    out: dict = {"status": "error", "mode_used": "", "date": date, "anchor": anchor,
+                 "correction": {}, "replaced_from": "", "error": "", "revise": None}
+    if kind == "pref":
+        rec = record_correction(cfg, date, anchor, "pref", text, note=note)
+        out.update(status="ok", mode_used="recorded", correction=rec)
+        return out
+    if not text.strip():
+        out["error"] = "empty_text"
+        return out
+
+    body = load_delivered(cfg, date)
+    if body is None:
+        out["error"] = f"no delivered report for {date}"
+        return out
+
+    if mode in ("auto", "verbatim"):
+        patched = _verbatim_patch(body, anchor, text.strip(), intent)
+        if patched is not None:
+            updated, replaced_from = patched
+            _save_delivered_raw(cfg, date, updated)
+            rec = record_correction(cfg, date, anchor, "fact", text,
+                                    mode="verbatim", note=note, replaced_from=replaced_from)
+            out.update(status="ok", mode_used="verbatim", correction=rec, replaced_from=replaced_from)
+            return out
+        if mode == "verbatim":
+            out["error"] = f"no bullet with {anchor} in delivered report"
+            return out
+        # auto：锚点定位失败 → 自动升级 ②
+    elif mode == "llm":
+        pass  # 强制改写，直接走下方 ②
+    else:
+        out["error"] = f"invalid mode {mode!r} (auto|verbatim|llm)"
+        return out
+
+    # ---- ② LLM 最小修订 ----
+    res = revise_report_llm(cfg, date, [{"anchor": anchor, "text": text.strip()}])
+    out["revise"] = res
+    if not res["ok"]:
+        out["error"] = res["error"] or "llm_revise_failed"
+        return out
+    marked = res["text"].rstrip() + f"\n\n{_LLM_MARK}{anchor}"
+    _save_delivered_raw(cfg, date, marked)
+    rec = record_correction(cfg, date, anchor, "fact", text, mode="llm", note=note)
+    out.update(status="ok", mode_used="llm", correction=rec)
+    return out
+
+
+def apply_feedback(cfg: Config, fb: Feedback) -> dict:
+    """Apply an approved feedback draft to the delivered report (source of truth only).
+
+    QQ 确认路径的薄包装：委托统一入口 apply_correction（auto=先原样替换、失败自动升级
+    ②），成功后把草稿标记 applied。它不重投——QQ 批量「确认重发」调 redeliver_day()
+    一次合并发送。返回结构保持向后兼容（status/date/section/index/intent/applied_at），
+    另附 mode_used 供前端提示实际走了哪条路径。
+    """
+    res = apply_correction(
+        cfg, fb.date, f"[{fb.section}-{fb.index}]", "fact", fb.content,
+        mode="auto", intent=fb.intent,
+    )
+    if res["status"] != "ok":
+        return {"status": "error", "msg": res["error"]}
 
     fb.status = "applied"
     fb.applied_at = datetime.now(_UT8).isoformat(timespec="seconds")
@@ -607,6 +711,7 @@ def apply_feedback(cfg: Config, fb: Feedback) -> dict:
         "index": fb.index,
         "intent": fb.intent,
         "applied_at": fb.applied_at,
+        "mode_used": res["mode_used"],
     }
 
 
@@ -1012,40 +1117,6 @@ def revise_report_llm(cfg: Config, date: str, items: list[dict]) -> ReviseResult
     return _finish(_append_corrections(body, norm, targets), diff_ok=False, fallback=True)
 
 
-def revise_from_pending(cfg: Config, date: str) -> ReviseResult:
-    """Ladder ①→② upgrade hook: turn a day's still-pending feedback drafts into a minimal revision.
-
-    Callers (QQ flow) use this when apply_feedback's deterministic patch has no exact match
-    for the draft. Builds items from the pending drafts ([节-序号] anchor + content) and
-    delegates to revise_report_llm; error="no_pending" when the day has no pending drafts.
-    """
-    drafts = [d for d in load_pending(cfg) if d.date == date and d.status == "pending"]
-    if not drafts:
-        return _revise_error("no_pending")
-    items = [{"anchor": f"[{d.section}-{d.index}]", "text": d.content} for d in drafts]
-    return revise_report_llm(cfg, date, items)
-
-
-def escalate_revise(cfg: Config, fb: Feedback) -> ReviseResult:
-    """Ladder ①→② upgrade for ONE draft: revise the delivered report minimally and bookkeep.
-
-    Called by the QQ flow when apply_feedback's deterministic patch cannot locate the anchor
-    bullet. On success the revised text replaces the delivered archive (stamp_report_bullets
-    is idempotent on the already-stamped revision) and the draft is marked applied so the
-    existing 确认重发 ledger logic treats it as unsent work; the caller triggers the actual
-    re-send via redeliver_day. The revise result is returned unchanged (ok/error/fallback
-    flags) — the caller owns user-facing messaging.
-    """
-    res = revise_report_llm(cfg, fb.date, [{"anchor": f"[{fb.section}-{fb.index}]", "text": fb.content}])
-    if not res["ok"]:
-        return res
-    save_delivered(cfg, fb.date, res["text"])
-    fb.status = "applied"
-    fb.applied_at = anchor_now()
-    update_pending(cfg, fb)
-    return res
-
-
 # --------------------------------------------------------------------------- timing
 
 
@@ -1059,12 +1130,12 @@ __all__ = (
     "FeedbackContext",
     "ReviseResult",
     "analyze_feedback",
+    "apply_correction",
     "apply_feedback",
     "clarify_feedback",
     "confirm_feedback",
     "current_report_version",
     "draft_from_context",
-    "escalate_revise",
     "feedback_route",
     "is_feedback_intent",
     "latest_pending",
@@ -1076,7 +1147,6 @@ __all__ = (
     "record_correction",
     "redeliver_day",
     "redeliver_latest",
-    "revise_from_pending",
     "revise_report_llm",
     "save_delivered",
     "stamp_report_bullets",

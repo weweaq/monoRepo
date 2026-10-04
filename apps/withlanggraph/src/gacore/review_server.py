@@ -10,7 +10,9 @@ FastAPI 单文件服务，骨架沿用 langTrack/server.py（工厂函数 create
 - GET  /logs/{path:path}               白名单静态文件（scheduled/*.md、{date}/llm_requests.jsonl）
 - GET  /api/corrections/{date}         当日订正（active + all）
 - POST /api/corrections                仅落盘一条订正/偏好（不触发修订）
-- POST /api/revise                     默认动作：逐条落盘 → LLM 最小修订 → save_delivered → redeliver
+- POST /api/revise                     默认动作：统一入口 apply_correction 逐条生效
+                                       （auto=能原样就原样替换、定位不到自动升级 LLM 最小修订；
+                                       verbatim/llm 强制指定）→ 任一正文变更即时重发
 - POST /api/rerun                      整体重生成（后台线程 run_job(for_day=date)）
 - GET  /api/rerun/{date}/status        重生成任务状态
 
@@ -41,13 +43,11 @@ from pydantic import BaseModel
 from gacore import scheduler
 from gacore.config import Config, load_dotenv
 from gacore.feedback import (
+    apply_correction,
     current_report_version,
     list_active_corrections,
     load_delivered,
     record_correction,
-    revise_report_llm,
-    save_delivered,
-    # 单一真源约定：订正存储的路径与容错读逻辑只活在 feedback.py，这里复用其内部函数。
     _corrections_file,
     _read_json_array,
 )
@@ -290,7 +290,9 @@ __REPORT__
   <h3>批注 <button id="side-close" style="float:right">×</button></h3>
   <label>锚点<input type="text" id="f-anchor" readonly></label>
   <label>类型<select id="f-kind"><option value="fact">事实订正</option><option value="pref">偏好</option></select></label>
+  <label>替换方式<select id="f-mode"><option value="auto">自动（能原样就原样，否则 LLM 改写）</option><option value="verbatim">原样替换（订正词逐字生效）</option><option value="llm">LLM 改写（语义润色）</option></select></label>
   <label>内容<textarea id="f-text" rows="5" placeholder="改成什么 / 补充什么 / 偏好描述"></textarea></label>
+  <label>备注（可选，仅入审计记录）<input type="text" id="f-note" placeholder="为什么改 / 备注"></label>
   <label class="chk"><input type="checkbox" id="f-only">仅落盘不修订（record_correction）</label>
   <div class="actions"><button id="f-add" class="primary">提交</button></div>
 </aside>
@@ -322,7 +324,7 @@ async function post(url, body){
 function renderPending(){
   $("pending").innerHTML = items.length
     ? "待修订 " + items.length + " 条：" + items.map((it,i) =>
-        '<span class="chip">' + esc(it.anchor) + " " + esc(it.kind) + " " + esc(it.text.slice(0,12)) +
+        '<span class="chip">' + esc(it.anchor) + " " + esc(it.kind) + "/" + esc(it.mode || "auto") + " " + esc(it.text.slice(0,12)) +
         ' <button data-i="'+i+'" title="移除">×</button></span>').join("")
     : "";
   $("pending").querySelectorAll("button").forEach(b => b.onclick = () => { items.splice(+b.dataset.i,1); renderPending(); });
@@ -337,7 +339,8 @@ document.querySelectorAll(".anchor").forEach(el => el.addEventListener("click", 
 $("side-close").onclick = () => $("side").classList.add("hidden");
 
 $("f-add").onclick = async () => {
-  const item = {anchor: $("f-anchor").value, kind: $("f-kind").value, text: $("f-text").value.trim()};
+  const item = {anchor: $("f-anchor").value, kind: $("f-kind").value, text: $("f-text").value.trim(),
+                mode: $("f-mode").value, note: $("f-note").value.trim()};
   if (!item.text) { alert("请填写批注内容"); return; }
   if ($("f-only").checked) {
     const r = await post("/api/corrections", {date: DATE, ...item});
@@ -641,12 +644,16 @@ class CorrectionIn(BaseModel):
     anchor: str = ""
     kind: str = "fact"
     text: str
+    mode: str = ""
+    note: str = ""
 
 
 class ReviseItem(BaseModel):
     anchor: str
     kind: str = "fact"
     text: str
+    mode: str = "auto"   # auto=能原样就原样、定位不到升级 LLM；verbatim=强制原样；llm=强制改写
+    note: str = ""
 
 
 class ReviseIn(BaseModel):
@@ -769,7 +776,8 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         guard = _guard(request)
         if guard is not None:
             return guard
-        rec = record_correction(config, payload.date, payload.anchor, payload.kind, payload.text)
+        rec = record_correction(config, payload.date, payload.anchor, payload.kind, payload.text,
+                                mode=payload.mode, note=payload.note)
         return {"ok": True, "record": rec}
 
     @app.post("/api/revise")
@@ -777,15 +785,27 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         guard = _guard(request)
         if guard is not None:
             return guard
-        items = [{"anchor": it.anchor, "kind": it.kind, "text": it.text} for it in payload.items]
-        for it in items:  # 先逐条落盘（审计底座；kind=pref 亦入偏好库）
-            record_correction(config, payload.date, it["anchor"], it["kind"], it["text"])
-        res = revise_report_llm(config, payload.date, items)
+        # 统一入口 apply_correction：与 QQ 确认同语义（auto=能原样就原样、定位不到升级
+        # LLM 最小修订；verbatim/llm 强制指定）。pref 只落偏好库不改正文。
+        results = [
+            apply_correction(config, payload.date, it.anchor, it.kind, it.text,
+                             mode=it.mode, note=it.note)
+            for it in payload.items
+        ]
+        changed = [r for r in results if r["status"] == "ok" and r["mode_used"] in ("verbatim", "llm")]
         rd: dict = {"status": "skipped"}
-        if res["ok"]:
-            save_delivered(config, payload.date, res["text"])
+        if changed:
             rd = _deliver_revised(config, payload.date)
-        return {"ok": bool(res["ok"]), "revise": res, "redeliver": rd}
+        # revise 聚合字段保持前端 diff 视图的既有形状（text=最新存档全文）
+        revise = {
+            "ok": all(r["status"] == "ok" for r in results),
+            "error": next((r["error"] for r in results if r["status"] != "ok"), ""),
+            "text": load_delivered(config, payload.date) or "" if changed else "",
+            "sections_changed": [r["anchor"] for r in changed],
+            "diff_ok": bool(changed),
+            "fallback": any((r.get("revise") or {}).get("fallback", False) for r in results),
+        }
+        return {"ok": revise["ok"], "results": results, "revise": revise, "redeliver": rd}
 
     @app.post("/api/rerun")
     def api_rerun(request: Request, payload: RerunIn):

@@ -151,28 +151,26 @@ class TestApiCorrections:
 
 
 class TestApiRevise:
-    def test_revise_records_revises_saves_and_redelivers(self, tmp_path: Path, monkeypatch):
+    def test_revise_auto_mode_verbatim_replaces_and_redelivers(self, tmp_path: Path, monkeypatch):
+        """auto（默认）：锚点能定位 → 原样替换（不走 LLM），bullet 带（人工订正）标记，
+        replaced_from 入审计，重投命中 mock 的 _deliver。"""
         cfg = Config.for_tests(tmp_path)
         save_delivered(cfg, DATE, REPORT)
-
-        class _FakeResp:
-            content = REVISED
-
-        def _fake_llm(tool_list, env=None, **kwargs):
-            assert list(tool_list) == [] and kwargs.get("bind_tools") is False
-            return SimpleNamespace(invoke=lambda messages: _FakeResp())
-
-        monkeypatch.setattr("gacore.feedback.get_llm", _fake_llm)
         deliveries: list[dict] = []
 
         def _fake_deliver(job, cfg_, reply, error, for_day=None):
             deliveries.append({"name": job.name, "for_day": for_day, "reply": reply})
 
         monkeypatch.setattr("gacore.scheduler._deliver", _fake_deliver)
-        # _deliver_revised 还要 load_jobs 找 daily-report job——tmp cfg 无 schedule.json，mock 之
         monkeypatch.setattr(
             "gacore.scheduler.load_jobs",
             lambda cfg_: [SimpleNamespace(name="daily-report")],
+        )
+        # get_llm 不 mock——auto+锚点可定位时必须零 LLM 调用；误调用会打到真实 API，
+        # 这里塞一个会炸的 fake 让问题立刻显形
+        monkeypatch.setattr(
+            "gacore.feedback.get_llm",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("LLM must not be called")),
         )
 
         c = _client(cfg, monkeypatch)
@@ -184,40 +182,88 @@ class TestApiRevise:
         assert r.status_code == 200
         j = r.json()
         assert j["ok"] is True
-        assert j["revise"]["ok"] is True and j["revise"]["diff_ok"] is True and j["revise"]["fallback"] is False
-        assert j["revise"]["sections_changed"] == ["工作日志"]
-        # 存档已更新为修订后的全文
-        assert (load_delivered(cfg, DATE) or "").rstrip() == REVISED.rstrip()
-        # 订正已落盘（审计底座）
+        assert j["results"][0]["mode_used"] == "verbatim"
+        assert j["revise"]["diff_ok"] is True
+        # 存档 = 订正词原文 + （人工订正）标记
+        updated = (load_delivered(cfg, DATE) or "").rstrip()
+        assert "- [工作日志-2] 上午实际去了朝阳大悦城（人工订正）" in updated
+        # 审计含 mode 与被替换原句
         recs = json.loads((cfg.root / "data" / "feedback" / "corrections" / f"{DATE}.json").read_text(encoding="utf-8"))
-        assert len(recs) == 1 and recs[0]["anchor"] == "[工作日志-2]" and recs[0]["status"] == "active"
-        # redeliver_day 走到了 mock 的 _deliver，重投的是修订后的存档
+        assert recs[0]["mode"] == "verbatim"
+        assert "收 9-08 日报尾巴" in recs[0]["replaced_from"]
+        # 重投的是修订后的存档
         assert j["redeliver"]["status"] == "ok"
-        assert len(deliveries) == 1
-        assert deliveries[0]["for_day"] == DATE
-        assert deliveries[0]["reply"].rstrip() == REVISED.rstrip()
+        assert len(deliveries) == 1 and deliveries[0]["for_day"] == DATE
+        assert "朝阳大悦城" in deliveries[0]["reply"]
 
-    def test_revise_pref_item_lands_in_preferences(self, tmp_path: Path, monkeypatch):
+    def test_revise_llm_mode_rewrites_with_footer_mark(self, tmp_path: Path, monkeypatch):
+        """llm 强制改写：走零工具修订，文末追加 ✎ 人工订正脚注，审计 mode=llm。"""
         cfg = Config.for_tests(tmp_path)
         save_delivered(cfg, DATE, REPORT)
-
-        class _FakeResp:
-            content = REPORT  # LLM 原样返回（偏好不要求改动正文）
-
         monkeypatch.setattr(
             "gacore.feedback.get_llm",
-            lambda *a, **k: SimpleNamespace(invoke=lambda messages: _FakeResp()),
+            lambda *a, **k: SimpleNamespace(invoke=lambda messages: SimpleNamespace(content=REVISED)),
+        )
+        monkeypatch.setattr("gacore.scheduler._deliver", lambda *a, **k: None)
+        monkeypatch.setattr(
+            "gacore.scheduler.load_jobs", lambda cfg_: [SimpleNamespace(name="daily-report")]
         )
         c = _client(cfg, monkeypatch)
         r = c.post(
             "/api/revise",
-            json={"date": DATE, "items": [{"anchor": "[个人观察-1]", "kind": "pref", "text": "个人观察节不要罗列数据"}]},
+            json={"date": DATE, "items": [{"anchor": "[工作日志-2]", "kind": "fact", "text": "上午实际去了朝阳大悦城", "mode": "llm"}]},
             headers=_headers(),
         )
         assert r.status_code == 200
+        j = r.json()
+        assert j["ok"] is True and j["results"][0]["mode_used"] == "llm"
+        updated = (load_delivered(cfg, DATE) or "").rstrip()
+        assert "✎ 人工订正：[工作日志-2]" in updated
+        recs = json.loads((cfg.root / "data" / "feedback" / "corrections" / f"{DATE}.json").read_text(encoding="utf-8"))
+        assert recs[0]["mode"] == "llm"
+
+    def test_revise_verbatim_forced_miss_errors_without_llm(self, tmp_path: Path, monkeypatch):
+        """verbatim 强制模式锚点定位不到 → 显式报错，不静默转 LLM。"""
+        cfg = Config.for_tests(tmp_path)
+        save_delivered(cfg, DATE, REPORT)
+        monkeypatch.setattr(
+            "gacore.feedback.get_llm",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("LLM must not be called")),
+        )
+        c = _client(cfg, monkeypatch)
+        r = c.post(
+            "/api/revise",
+            json={"date": DATE, "items": [{"anchor": "[不存在-9]", "kind": "fact", "text": "x", "mode": "verbatim"}]},
+            headers=_headers(),
+        )
+        assert r.status_code == 200
+        j = r.json()
+        assert j["ok"] is False
+        assert "no bullet" in j["results"][0]["error"]
+
+    def test_revise_pref_item_lands_in_preferences_without_llm_or_mail(self, tmp_path: Path, monkeypatch):
+        """pref 只落偏好库：不改正文、不调 LLM、不触发重发。"""
+        cfg = Config.for_tests(tmp_path)
+        save_delivered(cfg, DATE, REPORT)
+        monkeypatch.setattr(
+            "gacore.feedback.get_llm",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("LLM must not be called")),
+        )
+        deliveries: list[dict] = []
+        monkeypatch.setattr("gacore.scheduler._deliver", lambda *a, **k: deliveries.append(a))
+        c = _client(cfg, monkeypatch)
+        r = c.post(
+            "/api/revise",
+            json={"date": DATE, "items": [{"anchor": "[个人观察-1]", "kind": "pref", "text": "个人观察节不要罗列数据", "note": "排版偏好"}]},
+            headers=_headers(),
+        )
+        assert r.status_code == 200
+        j = r.json()
+        assert j["ok"] is True and j["results"][0]["mode_used"] == "recorded"
         prefs = json.loads((cfg.root / "data" / "feedback" / "preferences.json").read_text(encoding="utf-8"))
-        assert len(prefs) == 1 and prefs[0]["kind"] == "pref"
+        assert len(prefs) == 1 and prefs[0]["kind"] == "pref" and prefs[0]["note"] == "排版偏好"
         assert not (cfg.root / "data" / "feedback" / "corrections" / f"{DATE}.json").exists()
+        assert deliveries == []  # 无正文变更 → 不重发
 
     def test_revise_llm_failure_still_records_and_reports_error(self, tmp_path: Path, monkeypatch):
         cfg = Config.for_tests(tmp_path)
@@ -231,7 +277,7 @@ class TestApiRevise:
         c = _client(cfg, monkeypatch)
         r = c.post(
             "/api/revise",
-            json={"date": DATE, "items": [{"anchor": "[工作日志-1]", "kind": "fact", "text": "x"}]},
+            json={"date": DATE, "items": [{"anchor": "[工作日志-1]", "kind": "fact", "text": "x", "mode": "llm"}]},
             headers=_headers(),
         )
         assert r.status_code == 200
@@ -239,9 +285,10 @@ class TestApiRevise:
         assert j["ok"] is False
         assert "RuntimeError" in j["revise"]["error"]
         assert j["redeliver"]["status"] == "skipped"
-        # 订正审计记录仍已落盘（阶梯①②③共用的事实底座）
-        recs = json.loads((cfg.root / "data" / "feedback" / "corrections" / f"{DATE}.json").read_text(encoding="utf-8"))
-        assert len(recs) == 1
+        # LLM 失败不落 corrections：该文件语义是「已生效订正的事实底座」（③ 注入只认
+        # active 记录），失败的尝试只体现在响应错误里，存档保持原样。
+        assert not (cfg.root / "data" / "feedback" / "corrections" / f"{DATE}.json").exists()
+        assert (load_delivered(cfg, DATE) or "").rstrip() == REPORT.rstrip()
 
 
 # --------------------------------------------------------------------------- POST /api/rerun
