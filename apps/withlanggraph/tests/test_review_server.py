@@ -732,6 +732,19 @@ class TestLlmRequestsPage:
              "session": "s1", "pid": 7, "subject": "[gacore] daily-report · 2026-10-03"}, ensure_ascii=False),
             encoding="utf-8")
 
+    def test_fold_open_css_scoped(self, tmp_path: Path, monkeypatch) -> None:
+        """/data 修复教训的回归：折叠展开规则必须与基础规则同优先级（#llmv 前缀），
+        否则 .open 展开规则输给 ID 选择器的 display:none，点击调用/工具卡片无反应。"""
+        cfg = Config.for_tests(tmp_path)
+        self._seed(cfg)
+        c = _client(cfg, monkeypatch)
+        text = c.get(f"/llm-requests?date={DATE}").text
+        assert "#llmv .call.open>.bd{display:block}" in text
+        assert "#llmv .tcard.open>.tb{display:block}" in text
+        # 不允许再出现无前缀的 .open 展开规则
+        assert ".call.open>.bd{display:block}" not in text.replace("#llmv .call.open>.bd{display:block}", "")
+        assert ".tcard.open>.tb{display:block}" not in text.replace("#llmv .tcard.open>.tb{display:block}", "")
+
     def test_page_renders_runs_delivery_and_nav(self, tmp_path: Path, monkeypatch) -> None:
         cfg = Config.for_tests(tmp_path)
         self._seed(cfg)
@@ -905,14 +918,3 @@ class TestDataPage:
         assert tables["shadow_places_v2"]["kind"] == "影子表"
         assert tables["events"]["kind"] == "事实/过程"
         assert tables["events"]["rows"] == 4
-
-    def test_fold_open_css_scoped(self, tmp_path: Path, monkeypatch) -> None:
-        """/data 修复教训的回归：折叠展开规则必须与基础规则同优先级（#llmv 前缀），
-        否则 .open 展开规则输给 ID 选择器的 display:none，点击调用/工具卡片无反应。"""
-        c = _client(Config.for_tests(tmp_path), monkeypatch)
-        text = c.get("/llm-requests").text
-        assert "#llmv .call.open>.bd{display:block}" in text
-        assert "#llmv .tcard.open>.tb{display:block}" in text
-        # 不允许再出现无前缀的 .open 展开规则
-        assert ".call.open>.bd{display:block}" not in text.replace("#llmv .call.open>.bd{display:block}", "")
-        assert ".tcard.open>.tb{display:block}" not in text.replace("#llmv .tcard.open>.tb{display:block}", "")

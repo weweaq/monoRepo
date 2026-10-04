@@ -1079,3 +1079,7 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 ### [2026-10-04] v3.2.3 追补：/data 右详情改"按天"——全量按日直方图 + payload 全量取数
 
 用户反馈：payload 下拉框不够看、要能看全部；且按天组织更符合排查习惯。改造：`collect` 每事件类型内嵌**全量按日直方图** `hist`（单条 SQL 按 UTC+8 分日 GROUP BY，ts<2026-01-01 脏数据不入图），右详情渲染为日历 chips（最新在前），点日期经新路由 **`GET /api/data/events?type=&day=&limit=`** 拉当日全部 payload（`data_catalog.events_for_day`：day/type 正则校验→非法 400，limit 默认 500 上限 20000，超限页内"加载全部"显式拉全量，单条截 1000 字，按时间倒序）。实测真实数据：session 2026-10-03 全 266 条；audio_env 2026-08-19 突发日 13,577 条全量拉取正常；非法 day 400。测试 57 项全绿（TestDataSource 改/增：collect 形态、API 取数/校验/截断、历史日、非法 JSON 兜底），8010 已重启验证。
+
+### [2026-10-04] 追补：运行回放页折叠展开修复（CSS 优先级）
+
+用户实测 /llm-requests 点击「调用 #2」无反应。浏览器实测定位：点击本身生效（class 正确切到 `call fold open`），但 `#llmv .call>.bd{display:none}`（ID 选择器）压过无前缀的 `.call.open>.bd{display:block}`——.open 展开规则漏加 `#llmv` 前缀，**全页所有折叠（调用/工具卡片）自上线起均不可展开**。修复两条规则补 `#llmv` 前缀并加回归测试（断言带前缀规则存在、无前缀规则不存在）；同页其余状态规则（.run.on/.toolhit）核查无同类问题。58 项 review_server 测试全绿（全仓 1252 passed），8010 已重启并浏览器复验展开正常。
