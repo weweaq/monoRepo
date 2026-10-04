@@ -104,6 +104,7 @@ def load_system_events(date: str) -> list[dict]:
             events.append({
                 "ts": e.get("ts"),
                 "pid": e.get("pid"),
+                "session": e.get("session"),
                 "subject": str(e.get("subject") or ""),
                 "failed": "[FAILED]" in str(e.get("subject") or ""),
             })
@@ -197,6 +198,7 @@ def build_runs(records: list[dict]) -> list[dict]:
                 break
         kind, title, task = classify_run(calls)
         run_pids = {c.get("pid") for c in calls if c.get("pid")}
+        run_sessions = {c.get("session") for c in calls if c.get("session")}
         run_end = calls[-1].get("ts")
         out.append({
             "id": ri,
@@ -207,6 +209,7 @@ def build_runs(records: list[dict]) -> list[dict]:
             "start": calls[0].get("ts"),
             "end": run_end,
             "pids": sorted(run_pids),
+            "sessions": sorted(run_sessions),
             "toolsUsed": tools_used,
             "calls": call_objs,
         })
@@ -214,7 +217,12 @@ def build_runs(records: list[dict]) -> list[dict]:
 
 
 def attach_system_events(runs: list[dict], events: list[dict]) -> None:
-    """Attach post-run system deliveries to runs: same pid + within 300s after run end.
+    """Attach post-run system deliveries to runs, within 300s after run end.
+
+    Process matching: session join when possible (post jsonl_logger.session_id
+    unification — llm_requests.jsonl and app.jsonl share one id); pid fallback keeps
+    legacy logs working, where the two sinks generated independent uuids (there a
+    session mismatch is NOT evidence of a different process).
 
     A run's own delivery = a single distinct subject in the window. Multiple distinct
     subjects within seconds = a QQ-feedback redeliver batch (old reports resent) —
@@ -226,7 +234,8 @@ def attach_system_events(runs: list[dict], events: list[dict]) -> None:
         seen: set[tuple[str, str]] = set()
         evs: list[dict] = []
         for e in events:
-            if e["pid"] not in run["pids"]:
+            same_proc = e["session"] in run["sessions"] or e["pid"] in run["pids"]
+            if not same_proc:
                 continue
             ts = _parse_ts(e["ts"])
             if not (end <= ts <= end + timedelta(seconds=300)):
