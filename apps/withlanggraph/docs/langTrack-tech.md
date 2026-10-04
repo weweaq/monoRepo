@@ -1496,7 +1496,7 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 - **corrections 存储**：`record_correction(cfg,date,anchor,kind,text,*,mode,note,replaced_from)`——fact → `data/feedback/corrections/{date}.json`（同锚点 superseded 去重），pref → `data/feedback/preferences.json`；`list_active_corrections`/`list_active_preferences` 供 ③ 注入与偏好块。
 - **scheduler 注入（③路径）**：`_build_job_prompt` 包首拼〔人工订正·{date}〕(cap 600) 与〔用户偏好〕(cap 400)，独立于 PACK_BUDGET，块顺序=优先级。
 - **C5 版本号**：`_deliver_email` 对历史天每次真实发送递增 `next_report_version`，主题 `{date}（重生成 vN）`（v≥2），正文头部加「本版为 vN 重生成，依据 M 条人工订正」；当天例行投递无标记。
-- **评审页** `gacore/review_server.py`（:8010，`REVIEW_TOKEN` 保护 POST）：`GET /review`（307 跳最近一篇 delivered）、`GET /review/{date}`（锚点批注：替换方式下拉 自动/原样替换/LLM 改写 + 备注；分节 diff 视图）、`GET /health`（14 天×源状态矩阵）、`GET /health/source/{date}/{key}`（三节详情 + 三级字符对比 + L0 外链）、`POST /api/revise|rerun|corrections`、`GET /api/rerun/{date}/status`。dev-console services.json 注册 `review` 受管服务。
+- **评审页** `gacore/review_server.py`（:8010，`REVIEW_TOKEN` 保护 POST）：`GET /review`（307 跳最近一篇 delivered）、`GET /review/{date}`（锚点批注 + **点大标题新增子项**：`add_section_item` 自动取该节最大序号+1 逐字落档；替换方式下拉 LLM 改写/原样替换 + 备注；分节 diff 视图）、`GET /health`（14 天×源状态矩阵）、`GET /health/source/{date}/{key}`（三节详情 + 三级字符对比 + L0 外链）、`POST /api/revise|rerun|corrections`、`GET /api/rerun/{date}/status`。dev-console services.json 注册 `review` 受管服务。
 
 ### prompt（C7，`config/schedule.json` + `_instruction_head`）
 
