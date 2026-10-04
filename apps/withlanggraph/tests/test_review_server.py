@@ -698,3 +698,14 @@ class TestSourceConfig:
         # 构建现读现用：新 cap 直接生效（无需重启）
         _, stats = dip.build_info_pack_report("2026-09-08", cfg)
         assert stats[0]["chars"] <= 340 and stats[0]["full_chars"] > 300
+
+
+class TestNoStore:
+    """HTML 页统一 no-store：重算体检后 location.reload() 必须拿到新页（v3.2.2 追补）。"""
+
+    def test_health_pages_no_store(self, tmp_path: Path, monkeypatch):
+        c = _client(Config.for_tests(tmp_path), monkeypatch)
+        for url in ("/health", f"/health/source/{DATE}/_CHAT", "/config", f"/review/{DATE}"):
+            r = c.get(url)
+            assert r.status_code == 200, url
+            assert r.headers.get("cache-control") == "no-store", url

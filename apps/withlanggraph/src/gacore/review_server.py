@@ -203,6 +203,12 @@ def _page(title: str, body: str) -> str:
     return _PAGE_TMPL.replace("__TITLE__", html.escape(title)).replace("__CSS__", _CSS).replace("__BODY__", body)
 
 
+def _html(body: str) -> HTMLResponse:
+    """HTML 页统一出口：no-store 禁缓存——体检/评审数据随操作即时变化，缓存会导致
+    「↻ 重算体检」后 location.reload() 拿到旧页（用户需手动再刷才更新）。"""
+    return HTMLResponse(body, headers={"Cache-Control": "no-store"})
+
+
 # --------------------------------------------------------------------------- /review 评审页
 
 
@@ -1084,20 +1090,20 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     def review_page(date: str) -> Response:
         if not _DATE_RE.fullmatch(date):
             return JSONResponse({"ok": False, "error": "invalid date"}, status_code=400)
-        return HTMLResponse(_review_page(config, date))
+        return _html(_review_page(config, date))
 
     @app.get("/health", response_class=HTMLResponse)
     def health_page(request: Request) -> Response:
         end = request.query_params.get("end") or ""
         if not _DATE_RE.fullmatch(end):
             end = None
-        return HTMLResponse(_health_matrix(config, end))
+        return _html(_health_matrix(config, end))
 
     @app.get("/health/source/{date}/{key}", response_class=HTMLResponse)
     def health_source_page(date: str, key: str) -> Response:
         if not _DATE_RE.fullmatch(date) or not _KEY_RE.fullmatch(key):
             return JSONResponse({"ok": False, "error": "invalid path param"}, status_code=400)
-        return HTMLResponse(_health_source_page(config, date, key))
+        return _html(_health_source_page(config, date, key))
 
     @app.get("/logs/{path:path}")
     def logs_file(path: str) -> Response:
@@ -1188,7 +1194,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
     @app.get("/config", response_class=HTMLResponse)
     def config_page() -> Response:
-        return HTMLResponse(_config_page(config))
+        return _html(_config_page(config))
 
     @app.post("/api/config/sources")
     def api_config_sources(request: Request, payload: SourceConfigIn):

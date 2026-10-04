@@ -1036,3 +1036,7 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 ### [2026-10-04] v3.2.2 追补：顶部导航补「日报评审」回链
 
 用户在 /health 发现回不去日报评审页——页面骨架 brand 链接误指向 /health。修正：brand 与导航均指向 /review（/review 无日期自动 307 跳最近一篇已投递日报），导航现为 日报评审｜源体检｜源预算 三入口。45 项测试全绿，8010 已重启验证。
+
+### [2026-10-04] v3.2.2 追补：HTML 页统一 no-store 禁缓存
+
+用户实测「↻ 重算体检」成功后页面不自动更新、需手动再刷——根因是浏览器对无 Cache-Control 的 GET 页面启发式缓存，location.reload() 命中旧页。review_server 加 `_html()` 统一出口（Cache-Control: no-store），/review、/health、/health/source、/config 四类页面全覆盖；新增 TestNoStore 断言 4 页响应头。46 项测试全绿，8010 已重启验证。
