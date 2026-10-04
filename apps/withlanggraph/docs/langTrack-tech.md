@@ -872,8 +872,9 @@ flowchart LR
 - daily-report 三层：`config/schedule.json` jobs[0].prompt → `scheduler.py:run_job`（23:50）→ `logs/scheduled/daily-report_<ts>.md`；运行证据见 `daily-report_20260827_000050.md`（摘要"三层产出完成"，Reply 以人物速写为主体）。
 ### LLM 请求体日志（`llm.py` + 新增 `src/gacore/llm_request_log.py`）
 - 配置：`get_llm`（`src/gacore/llm.py`）返回实例前统一 `install_llm_logging(llm, provider)`——单挂点覆盖主 agent graph / scheduler job / qq trivial 三路，不侵入各调用点。
-- 机制：`install_llm_logging` 对模型实例 monkey-patch `invoke/ainvoke/stream/astream/bind_tools`，capture 后原样转发；`bind_tools` 把工具定义暂存到实例（`_gacore_bound_tools`），后续调用随记录写入；调用前拦截任意方法拼完整记录（messages / tools / params / provider / model / run_kind / timestamp / thread?）。
+- 机制：`install_llm_logging` 对模型实例 monkey-patch `invoke/ainvoke/stream/astream/bind_tools`，capture 后原样转发；`bind_tools` 把工具定义暂存到实例（`_gacore_bound_tools`），后续调用随记录写入；记录在**调用完成后**拼完整单元（请求 + 响应 + 耗时，2026-10-04 前为调用前仅请求）。
 - 落盘：`logs/{YYYY-MM-DD}/llm_requests.jsonl`，JSONL 追加写，`ensure_ascii=False`，utf-8。
+- **响应捕获（2026-10-04）**：一行 = 一次完整调用单元——请求（messages/tools/params）+ `response`（content/content_chars/tool_calls/`usage` tokens/finish_reason）+ `duration_ms`。失败调用记 `response.error`（类型+消息，截 500 字）并原样重抛原异常；流式（stream/astream）转发 chunk 的同时聚合（文本 + tool_call_chunks 按 index 拼接 + usage 取末次），消费方提前关闭标 `interrupted: true`。非消息输入（memory judge 等的字符串 prompt，`structured.invoke(prompt)`）包装为单条 user 消息记录，不再记空。旧记录（2026-10-03 前）无 `response`/`duration_ms` 字段，消费侧需容忍缺省。
 - **session 同源（2026-10-04）**：记录的 `session` 即 `jsonl_logger.session_id()`（app.jsonl 的进程级 id）。此前两套 sink 各自 `uuid4()` 生成，跨日志只能按 pid+时间窗启发式关联（pid 会被进程重启复用）；现在同一进程的请求行与系统侧行**精确 join**，历史日志（两 id 不同期）由消费侧按 pid 兜底（`docs/llm-view-demos/build_demos.py` 的 attach_system_events，session 命中或 pid 命中均接受）。
 - 脱敏：递归遍历结构，键名命中 `api_key|access_token|Authorization|secret|token`（大小写不敏感）的值 → `***`；超长字符串（>2000 字符）截断；`messages` 内 image 内容只记元数据不记 base64。
 - 兜底：登录全程 try/except，失败仅 best-effort 静默（不阻断模型调用）；线程安全借 `threading.Lock`。

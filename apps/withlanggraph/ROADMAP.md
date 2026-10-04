@@ -1013,3 +1013,22 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 - **评审服务**：`GET /config` 源预算页（每源显示最近一天 进包/截断前 用量辅助定预算；token 存 localStorage 与评审页共用）+ `POST /api/config/sources`（token 保护，未知源 key 400、预算越界 400、原子写 .tmp→replace）。矩阵状态样式新增 disabled（灰）。
 - **实测闭环**（8011 临时实例 → 8010 正式实例重启后复核）：页面渲染 ✓；保存 `_FILES cap=600 + _NCM disabled` ✓；重算 2026-10-03 体检后 NCM=disabled、FILES chars=565/full=704（新 cap 生效）✓；验证后已删除测试配置文件恢复默认。
 - 测试 +11（config 层 5 + 路由/页面 6），test_daily_info_pack 47 / test_review_server 45 项全绿；ruff 全仓通过。
+
+## [2026-10-04] llm_requests.jsonl 补响应捕获：一行 = 请求+响应+耗时完整单元
+
+**背景**：LLM 运行可视化 demo（docs/llm-view-demos）暴露运维盲区——llm_requests.jsonl 只记请求不记响应，"模型到底答了什么、调用了多久、失败原因"全部不可见；且 memory judge 的字符串 prompt 输入被记成空行（调用 #4"无消息列表输入"的根源）。从运维视角看，没有状态码和耗时的访问日志不合格。
+
+**已完成**：
+- `llm_request_log.py` 重写拦截器：`invoke/ainvoke` 调用完成后写盘，一行含请求 + `response`（content/content_chars/tool_calls/usage tokens/finish_reason，截断与掩码同请求侧）+ `duration_ms`；失败记 `response.error` 并原样重抛。
+- 流式 `stream/astream`：转发 chunk 的同时 `_StreamAgg` 聚合（文本 + tool_call_chunks 按 index 拼接 + usage 取末次），结束/异常/提前关闭（`interrupted: true`）均在 finally 落盘。
+- 非消息输入：`_messages_to_log` 把字符串 prompt 包装为单条 user 消息，judge/structured 调用不再记空。
+- 消费侧 demo（docs/llm-view-demos）：调用头增耗时与响应徽章（失败红色）、💬 模型响应折叠块（含 tokens）；系统泳道纳入 app.jsonl 的 ERROR 级事件（红色高亮，run 视图内自动浮现）。
+- 测试：新增 `tests/test_llm_request_log.py` 5 项（invoke 响应+duration、失败 error+重抛、字符串输入包装、stream 聚合 4 chunks、提前关闭 interrupted）。
+
+**实测验证**：新测试 5 passed；`test_llm.py`/`test_log_session_join.py` 回归通过（旧调用方零改动）；demo 重建后 10-03 数据（旧格式无响应字段）正常缺省渲染，run1 的真实 `memory_maintain gate failed` ERROR 自动红标浮现；注入自测数据确认响应徽章/耗时/tokens 渲染正确（DOM 注入，不污染真实日志）。
+
+**偏差说明**：记录时机从"调用前"改为"调用完成后"——若进程在调用中途崩溃则该次调用无记录（app.jsonl 侧仍有进程级事件兜底）；响应内容使日志体积增约一倍，截断规则（单字符串 30k）与按日分文件继续兜底。旧记录无响应字段属预期，消费侧已容忍。
+
+**待办更新**：
+- [ ] 观察今晚 23:50 例行日报的新格式记录：response/usage/duration_ms 齐全、QQ 对话与 judge 调用的字符串输入可见。
+- [ ] 后续可选：token 用量按日汇总（成本视图）、ERROR 事件阈值告警（与 ROADMAP 既有 sync_failure 告警项合并考虑）。
