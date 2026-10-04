@@ -34,6 +34,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, Request, Response
@@ -68,6 +69,7 @@ _HEALTH_STATUS_CLASS = {
     "empty": "st-empty",
     "failed": "st-failed",
     "missing_data": "st-missing",
+    "disabled": "st-disabled",
 }
 _FACT_CARD_KEY = "_FACT_CARD"
 _FACT_CARD_TITLE = "生活事实卡支线"
@@ -133,6 +135,7 @@ tbody th{font-family:ui-monospace,Consolas,monospace;font-weight:500}
 .st-empty{background:var(--warn)}
 .st-failed{background:var(--bad)}
 .st-missing{background:var(--miss)}
+.st-disabled{background:#d0d7de;color:#57606a}
 .legend{color:var(--mut);font-size:12px;margin:10px 0}
 .legend .cell{margin:0 2px}
 .report{border:1px solid var(--line);border-radius:8px;padding:8px 20px;margin:10px 0}
@@ -187,7 +190,7 @@ _PAGE_TMPL = """<!doctype html>
 <body>
 <header><div class="wrap">
 <span class="brand"><a href="/health">日报评审</a></span>
-<nav><a href="/health">源体检</a></nav>
+<nav><a href="/health">源体检</a><a href="/config">源预算</a></nav>
 </div></header>
 <main class="wrap">
 __BODY__
@@ -886,6 +889,92 @@ def _health_source_page(cfg: Config, date: str, key: str) -> str:
     return _page(f"源体检 · {title} · {date}", body)
 
 
+# --------------------------------------------------------------------------- /config 源预算配置
+
+
+def _source_config_path(cfg: Config) -> Path:
+    return cfg.root / "config" / "info_pack.json"
+
+
+def _latest_usage_by_key(cfg: Config) -> dict[str, dict]:
+    recs = _load_health_records(cfg)
+    if not recs:
+        return {}
+    return {str(s.get("key") or ""): s for s in recs[-1].get("sources", []) if isinstance(s, dict)}
+
+
+def _config_page(cfg: Config) -> str:
+    """源预算配置页：每源 cap/priority/enabled + 整包预算，保存写 config/info_pack.json。
+
+    改完即时生效的机制：build_info_pack_report 每次构建现读该文件，无需重启任何服务。
+    """
+    from gacore.daily_info_pack import PACK_BUDGET, SOURCES, load_source_config
+
+    ov = load_source_config(cfg)
+    src_ov: dict[str, dict] = {k: v for k, v in (ov.get("sources") or {}).items() if isinstance(v, dict)}
+    usage = _latest_usage_by_key(cfg)
+
+    rows: list[str] = []
+    for spec in SOURCES:
+        o = src_ov.get(spec.key) or {}
+        cap = o.get("cap", spec.cap)
+        prio = o.get("priority", spec.priority)
+        enabled = o.get("enabled", True)
+        u = usage.get(spec.key) or {}
+        usage_txt = (
+            f"{u.get('chars', 0):,} / {u.get('full_chars', 0):,}"
+            if u.get("full_chars") is not None
+            else "—"
+        )
+        rows.append(
+            "<tr>"
+            f"<th>{html.escape(spec.key)}</th>"
+            f"<td>{html.escape(u.get('status', '') or '—')}</td>"
+            f"<td>{usage_txt}</td>"
+            f'<td><input id="cap_{spec.key}" type="number" value="{cap}" min="200" max="8000" step="50" style="width:80px"></td>'
+            f'<td><input id="prio_{spec.key}" type="number" value="{prio}" min="1" max="999" style="width:64px"></td>'
+            f'<td><input id="en_{spec.key}" type="checkbox"{" checked" if enabled else ""}></td>'
+            "</tr>"
+        )
+    budget = ov.get("pack_budget", PACK_BUDGET)
+    body = (
+        "<h1>源预算配置</h1>"
+        '<div class="sub">改完保存即生效（下一次日报构建 / 「↻ 重算体检」使用新值，无需重启）。'
+        "cap=该源最大截取字符（进包预算，超出行级截断）；priority=整包超预算时的熔断顺序（越小越优先保留）；"
+        "停用的源不取数不进包。采样方向（取最近/聚合 topN）是每源固有策略，不在配置面。</div>"
+        "<table><thead><tr><th>源</th><th>最近状态</th><th>最近 进包/截断前</th><th>cap（字符）</th>"
+        "<th>priority</th><th>启用</th></tr></thead>"
+        f'<tbody>{"".join(rows)}</tbody></table>'
+        '<div style="margin:12px 0">整包预算 PACK_BUDGET：'
+        f'<input id="pack_budget" type="number" value="{budget}" min="3000" max="20000" step="250" style="width:90px"> 字</div>'
+        '<button class="primary" id="savecfg">保存配置</button>'
+        '<span id="cfgmsg" class="small muted" style="margin-left:10px"></span>'
+        "<script>(function(){var b=document.getElementById('savecfg');"
+        "function tk(msg){var t=localStorage.getItem('review_token')||'';"
+        "if(t&&!msg)return t;t=prompt(msg||'请输入 REVIEW_TOKEN（见 .env）')||'';"
+        "if(t)localStorage.setItem('review_token',t);return t;}"
+        "var keys=" + json.dumps([s.key for s in SOURCES]) + ";"
+        "b.onclick=function(){b.disabled=true;document.getElementById('cfgmsg').textContent='';"
+        "var t=tk();if(!t){b.disabled=false;return;}"
+        "var sources={};keys.forEach(function(k){"
+        "sources[k]={cap:+document.getElementById('cap_'+k).value,"
+        "priority:+document.getElementById('prio_'+k).value,"
+        "enabled:document.getElementById('en_'+k).checked};});"
+        'fetch("/api/config/sources",{method:"POST",'
+        'headers:{"Content-Type":"application/json","X-Review-Token":t},'
+        'body:JSON.stringify({pack_budget:+document.getElementById("pack_budget").value,sources:sources})})'
+        ".then(function(r){if(r.status===401)return Promise.reject('token');return r.json();})"
+        ".then(function(j){b.disabled=false;"
+        "document.getElementById('cfgmsg').textContent=j.ok?'已保存，下次构建生效':'失败：'+(j.error||'');"
+        "if(j.ok){localStorage.setItem('review_token',t);}"
+        "if(!j.ok&&j.error==='unauthorized'){localStorage.removeItem('review_token');}})"
+        ".catch(function(e){b.disabled=false;"
+        "if(e==='token'){localStorage.removeItem('review_token');alert('令牌无效，请重试');}"
+        'else{alert("异常："+e);}});};})();</script>'
+    )
+    return _page("源预算配置", body)
+
+
 # --------------------------------------------------------------------------- FastAPI app
 
 
@@ -917,6 +1006,11 @@ class ReviseIn(BaseModel):
 
 class BackfillIn(BaseModel):
     date: str
+
+
+class SourceConfigIn(BaseModel):
+    pack_budget: int
+    sources: dict[str, dict[str, Any]]
 
 
 def _deliver_revised(cfg: Config, date: str) -> dict:
@@ -1091,6 +1185,54 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         except Exception as exc:  # noqa: BLE001 — 取数源异常统一回传，不让 /health 刷新 500
             return {"ok": False, "result": f"fail:{type(exc).__name__}:{exc}"[:160]}
         return {"ok": res == "ok", "result": res, "date": payload.date}
+
+    @app.get("/config", response_class=HTMLResponse)
+    def config_page() -> Response:
+        return HTMLResponse(_config_page(config))
+
+    @app.post("/api/config/sources")
+    def api_config_sources(request: Request, payload: SourceConfigIn):
+        """保存逐源预算覆盖到 config/info_pack.json（现读现用，下次构建即生效）。"""
+        guard = _guard(request)
+        if guard is not None:
+            return guard
+        from gacore.daily_info_pack import (
+            _BUDGET_MAX,
+            _BUDGET_MIN,
+            _CAP_MAX,
+            _CAP_MIN,
+            SOURCES,
+        )
+
+        known = {s.key for s in SOURCES}
+        bad = [k for k in payload.sources if k not in known]
+        if bad:
+            return JSONResponse({"ok": False, "error": f"unknown source keys: {bad}"}, status_code=400)
+        budget = int(payload.pack_budget or 0)
+        if not (_BUDGET_MIN <= budget <= _BUDGET_MAX):
+            return JSONResponse({"ok": False, "error": "pack_budget out of range"}, status_code=400)
+        norm_sources: dict[str, dict[str, Any]] = {}
+        for key, o in payload.sources.items():
+            entry: dict[str, Any] = {"enabled": bool(o.get("enabled", True))}
+            if "cap" in o:
+                cap = max(_CAP_MIN, min(_CAP_MAX, int(o.get("cap") or 0)))
+                if not (_CAP_MIN <= cap <= _CAP_MAX):
+                    return JSONResponse({"ok": False, "error": f"{key} cap out of range"}, status_code=400)
+                entry["cap"] = cap
+            if "priority" in o:
+                prio = max(1, min(999, int(o.get("priority") or 0)))
+                entry["priority"] = prio
+            norm_sources[key] = entry
+        data = {"pack_budget": budget, "sources": norm_sources}
+        path = _source_config_path(config)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            tmp.replace(path)
+        except OSError as exc:
+            return {"ok": False, "error": f"write failed: {exc}"}
+        return {"ok": True, "path": str(path), "data": data}
 
     @app.post("/api/rerun")
     def api_rerun(request: Request, payload: RerunIn):

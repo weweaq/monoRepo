@@ -429,6 +429,72 @@ def test_edge_detail_window_note(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# v3.2.2 逐源预算配置：config/info_pack.json 覆盖 cap/enabled/priority/budget  #
+# --------------------------------------------------------------------------- #
+def _write_source_config(cfg: Config, data: dict) -> None:
+    import json as _json
+
+    p = cfg.root / "config" / "info_pack.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(_json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def test_source_config_missing_file_uses_defaults(tmp_path):
+    cfg = _cfg(tmp_path)
+    assert dip.load_source_config(cfg) == {}
+    assert dip.effective_source_caps(cfg)["_FILES"] == dip._FILES_CAP
+
+
+def test_source_config_bad_json_falls_back(tmp_path):
+    cfg = _cfg(tmp_path)
+    p = cfg.root / "config" / "info_pack.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("{broken", encoding="utf-8")
+    assert dip.load_source_config(cfg) == {}
+    assert dip.effective_source_caps(cfg)["_CHAT"] == dip._CHAT_CAP
+
+
+def test_build_honors_cap_and_disabled_and_budget(tmp_path, monkeypatch):
+    """cap 覆盖→提前截断；enabled=false→不进包记 disabled；pack_budget 覆盖→整包硬控。"""
+    _flood_all_sources(monkeypatch)
+    cfg = _cfg(tmp_path)
+    _flood_cfg_files(cfg)
+    _write_source_config(cfg, {
+        "pack_budget": 3000,
+        "sources": {
+            "_BILI": {"cap": 300},
+            "_NCM": {"enabled": False},
+            "_GIT": {"priority": 5},   # 提到最前，熔断顺序变化可从 stats 顺序看出
+        },
+    })
+    pack, stats = dip.build_info_pack_report("2026-09-02", cfg)
+    by = {s["key"]: s for s in stats}
+    assert len(pack) <= 3000                                  # 覆盖后的整包预算
+    # 新 cap 截断生效（尾注"（已截断 N 行…）"约 30 字允许超出 cap）
+    assert by["_BILI"]["chars"] < by["_BILI"]["full_chars"] and by["_BILI"]["chars"] <= 340
+    assert by["_NCM"]["status"] == "disabled" and by["_NCM"]["chars"] == 0
+    assert "〔基线·网易云歌单/收藏〕" not in pack               # 停用源不进包
+    keys = [s["key"] for s in stats]
+    assert keys.index("_GIT") < keys.index("_CHAT")           # priority=5 后排序提前（原 70）
+
+
+def test_disabled_source_recorded_in_health_jsonl(tmp_path, monkeypatch):
+    """disabled 状态随 stats 落 jsonl（write_pack_health 由 scheduler 调用，此处直调验证）。"""
+    cfg = _cfg(tmp_path)
+    _write_source_config(cfg, {"pack_budget": 8000, "sources": {"_CHAT": {"enabled": False}}})
+    _flood_all_sources(monkeypatch)
+    pack, stats = dip.build_info_pack_report("2026-09-02", cfg)
+    dip.write_pack_health(cfg, "2026-09-02", "daily-report", "backfill", stats, len(pack))
+    import json as _json
+    rec = _json.loads(
+        (cfg.root / "data" / "logs" / "info_pack_health.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    )
+    chat = [s for s in rec["sources"] if s["key"] == "_CHAT"][0]
+    assert chat["status"] == "disabled"
+    assert rec["budget"] == 8000
+
+
+# --------------------------------------------------------------------------- #
 # 前日日报：空 / 满（pack=260 字摘要；detail=1000 字更长摘要）                   #
 # --------------------------------------------------------------------------- #
 def test_memory_empty(tmp_path):

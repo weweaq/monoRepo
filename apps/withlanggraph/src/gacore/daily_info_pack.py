@@ -73,6 +73,45 @@ _MEMORY_DETAIL_CHARS: int = 1000    # 前日日报详情摘要（C1 v0.7：取�
 
 _PACK_DETAIL_RETENTION_DAYS: Final = 90  # pack_detail 详情目录保留期（重日 100-300KB，90 天约 30MB）
 
+# 逐源预算配置（v3.2.2）：config/info_pack.json 覆盖代码默认（cap/priority/enabled/pack_budget）。
+# 每次构建现读现用——评审页 /config 改完下一次构建即生效，无需重启；文件缺失/损坏 → 全走代码默认。
+# 采样方向（取最近/聚合 topN）是每源固有策略，不属于配置面（防把头部截断类 bug 做成可配项）。
+_SOURCE_CONFIG_RELPATH: Final = Path("config") / "info_pack.json"
+_CAP_MIN, _CAP_MAX = 200, 8000
+_BUDGET_MIN, _BUDGET_MAX = 3000, 20000
+
+
+def load_source_config(cfg: Config) -> dict[str, Any]:
+    """读逐源预算覆盖配置；返回原始 dict（无文件/坏文件/非 dict → 空覆盖）。"""
+    path = cfg.root / _SOURCE_CONFIG_RELPATH
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}
+    except (json.JSONDecodeError, OSError, ValueError) as exc:
+        logger.warning("source config unreadable, using code defaults", error=str(exc))
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _clamped_int(val: Any, default: int, lo: int, hi: int) -> int:
+    try:
+        n = int(val)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, n))
+
+
+def effective_source_caps(cfg: Config) -> dict[str, int]:
+    """各源生效 cap（config 覆盖 + 边界钳制）；供 builder 内部单一截断取用。"""
+    ov = (load_source_config(cfg).get("sources") or {})
+    return {
+        spec.key: _clamped_int(
+            (ov.get(spec.key) or {}).get("cap"), spec.cap, _CAP_MIN, _CAP_MAX
+        )
+        for spec in SOURCES
+    }
+
 # os.walk 时跳过的目录（仓库内部噪音 / 依赖 / 构建缓存 / 运行日志）
 _EXCLUDE_DIRS: frozenset[str] = frozenset(
     {
@@ -134,7 +173,10 @@ def _build_long_term_picture(date: str, cfg: Config) -> tuple[str, str, str]:
                 "- 无长期画像（memory/global_mem_anchor.txt 与 global_mem_insight.txt 均缺失），本日仅凭当日信号写作。",
                 "",
             )
-        compact = _compact_long_term(anchor, text, max_chars=_LONG_TERM_CAP, limit_lines=_LONG_TERM_LINES)
+        compact = _compact_long_term(
+            anchor, text, max_chars=effective_source_caps(cfg).get("_LONG_TERM", _LONG_TERM_CAP),
+            limit_lines=_LONG_TERM_LINES,
+        )
         detail_parts: list[str] = []
         if anchor:
             detail_parts.append(f"〔固定锚〕\n{anchor}")
@@ -701,8 +743,29 @@ def build_info_pack_report(date: str, cfg: Config | None = None) -> tuple[str, l
     # 头部（消费指令）单独装配：受 _HEAD_CAP 行级截断、也受整包 budget 约束。
     blocks.append(("〔当日信息包·" + date + "〕", _cap_lines(_instruction_head(date), _HEAD_CAP)))
 
+    # v3.2.2 逐源预算覆盖：config/info_pack.json 现读现用（页面 /config 改完下次构建即生效）
+    ov = load_source_config(resolved)
+    src_ov: dict[str, dict[str, Any]] = {
+        k: v for k, v in (ov.get("sources") or {}).items() if isinstance(v, dict)
+    }
+    budget = _clamped_int(ov.get("pack_budget"), PACK_BUDGET, _BUDGET_MIN, _BUDGET_MAX)
+
     stats: list[dict[str, Any]] = []
-    for spec in SOURCES:
+    ordered = sorted(  # priority 可被 config 覆盖（越小越先装配、越晚被熔断）；稳定排序保持同值原序
+        SOURCES,
+        key=lambda s: _clamped_int((src_ov.get(s.key) or {}).get("priority"), s.priority, 1, 999),
+    )
+    for spec in ordered:
+        sov = src_ov.get(spec.key) or {}
+        if sov.get("enabled") is False:
+            stats.append({
+                "key": spec.key, "title": "", "status": "disabled", "note": "已停用(config)",
+                "chars": 0, "full_chars": 0, "detail_chars": 0, "budget": budget,
+                "dropped_lines": 0, "block_pos": -1,
+                "pack_body": "", "detail_body": "", "packed_body": "",
+            })
+            continue
+        cap = _clamped_int(sov.get("cap"), spec.cap, _CAP_MIN, _CAP_MAX)
         try:
             title, pack_body, detail_body = spec.builder(date, resolved)
         except Exception as exc:  # noqa: BLE001 - 最后防线：绝不中断整包
@@ -714,7 +777,7 @@ def build_info_pack_report(date: str, cfg: Config | None = None) -> tuple[str, l
             )
             title, pack_body, detail_body = f"〔{spec.key.strip('_')}〕", f"- 该源失败：{exc}", ""
         status, note = classify_body(pack_body)
-        capped, dropped_n = _cap_lines_counted(pack_body, spec.cap)
+        capped, dropped_n = _cap_lines_counted(pack_body, cap)
         block_pos = -1
         if status != "empty":
             block_pos = len(blocks)
@@ -726,13 +789,14 @@ def build_info_pack_report(date: str, cfg: Config | None = None) -> tuple[str, l
             "note": note,
             "dropped_lines": dropped_n,
             "block_pos": block_pos,
+            "budget": budget,
             "full_chars": len(pack_body),
             "detail_chars": len(detail_body),
             "pack_body": pack_body,
             "detail_body": detail_body,
         })
 
-    pack, packed_bodies = _assemble_blocks(blocks, PACK_BUDGET)
+    pack, packed_bodies = _assemble_blocks(blocks, budget)
     for st in stats:
         packed_body = packed_bodies[st["block_pos"]] if st["block_pos"] >= 0 else ""
         if st["status"] != "empty" and not packed_body:
@@ -756,7 +820,7 @@ def build_info_pack_report(date: str, cfg: Config | None = None) -> tuple[str, l
         )
     global _LAST_PACK_STATS
     _LAST_PACK_STATS = stats
-    logger.info("daily info pack built", date=date, chars=len(pack), budget=PACK_BUDGET)
+    logger.info("daily info pack built", date=date, chars=len(pack), budget=budget)
     return pack, stats
 
 
@@ -788,7 +852,8 @@ def write_pack_health(
             "job": job,
             "trigger": trigger,
             "total_chars": total_chars,
-            "budget": PACK_BUDGET,
+            # v3.2.2：记录本次实际生效的整包预算（config 可覆盖 PACK_BUDGET；stats 由 build 装配时带上）
+            "budget": (stats[0].get("budget") if stats and stats[0].get("budget") else PACK_BUDGET),
             "correction_chars": correction_chars,
             "sources": [
                 {

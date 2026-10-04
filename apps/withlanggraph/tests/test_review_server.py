@@ -652,3 +652,49 @@ class TestHealthRefresh:
         c = _client(cfg, monkeypatch)
         assert "hrefresh" in c.get("/health").text
         assert "hrefresh" in c.get(f"/health/source/{DATE}/_CHAT").text
+
+
+class TestSourceConfig:
+    """GET /config + POST /api/config/sources：逐源预算配置页与保存。"""
+
+    def test_config_page_renders_inputs(self, tmp_path: Path, monkeypatch):
+        c = _client(Config.for_tests(tmp_path), monkeypatch)
+        page = c.get("/config").text
+        assert "源预算配置" in page and "savecfg" in page
+        assert 'id="cap__LONG_TERM"' in page and 'id="en__CHAT"' in page
+        assert 'id="pack_budget"' in page
+
+    def test_post_401_without_token(self, tmp_path: Path, monkeypatch):
+        c = _client(Config.for_tests(tmp_path), monkeypatch, token=None)
+        r = c.post("/api/config/sources", json={"pack_budget": 8000, "sources": {}})
+        assert r.status_code == 401
+
+    def test_post_rejects_unknown_key(self, tmp_path: Path, monkeypatch):
+        c = _client(Config.for_tests(tmp_path), monkeypatch)
+        r = c.post("/api/config/sources", json={"pack_budget": 8000, "sources": {"_NOPE": {"cap": 500}}},
+                   headers=_headers())
+        assert r.status_code == 400
+
+    def test_post_rejects_budget_out_of_range(self, tmp_path: Path, monkeypatch):
+        c = _client(Config.for_tests(tmp_path), monkeypatch)
+        r = c.post("/api/config/sources", json={"pack_budget": 100, "sources": {}}, headers=_headers())
+        assert r.status_code == 400
+
+    def test_post_writes_config_and_build_honors_it(self, tmp_path: Path, monkeypatch):
+        from gacore import daily_info_pack as dip
+
+        def _a(date: str, cfg):
+            return "〔源A〕", "- A " + "字" * 900, "- A 全量"
+
+        monkeypatch.setattr(dip, "SOURCES", [dip.SourceSpec(key="_A", cap=2000, priority=10, builder=_a)])
+        cfg = Config.for_tests(tmp_path)
+        c = _client(cfg, monkeypatch)
+        r = c.post("/api/config/sources",
+                   json={"pack_budget": 8000, "sources": {"_A": {"cap": 300, "priority": 10, "enabled": True}}},
+                   headers=_headers())
+        assert r.status_code == 200 and r.json()["ok"] is True
+        written = json.loads((cfg.root / "config" / "info_pack.json").read_text(encoding="utf-8"))
+        assert written["sources"]["_A"]["cap"] == 300
+        # 构建现读现用：新 cap 直接生效（无需重启）
+        _, stats = dip.build_info_pack_report("2026-09-08", cfg)
+        assert stats[0]["chars"] <= 340 and stats[0]["full_chars"] > 300
