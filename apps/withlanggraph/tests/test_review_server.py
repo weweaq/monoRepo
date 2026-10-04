@@ -151,8 +151,8 @@ class TestApiCorrections:
 
 
 class TestApiRevise:
-    def test_revise_auto_mode_verbatim_replaces_and_redelivers(self, tmp_path: Path, monkeypatch):
-        """auto（默认）：锚点能定位 → 原样替换（不走 LLM），bullet 带（人工订正）标记，
+    def test_revise_verbatim_mode_replaces_and_redelivers(self, tmp_path: Path, monkeypatch):
+        """verbatim：锚点能定位 → 原样替换（不走 LLM），bullet 带（人工订正）标记，
         replaced_from 入审计，重投命中 mock 的 _deliver。"""
         cfg = Config.for_tests(tmp_path)
         save_delivered(cfg, DATE, REPORT)
@@ -176,7 +176,7 @@ class TestApiRevise:
         c = _client(cfg, monkeypatch)
         r = c.post(
             "/api/revise",
-            json={"date": DATE, "items": [{"anchor": "[工作日志-2]", "kind": "fact", "text": "上午实际去了朝阳大悦城"}]},
+            json={"date": DATE, "items": [{"anchor": "[工作日志-2]", "kind": "fact", "text": "上午实际去了朝阳大悦城", "mode": "verbatim"}]},
             headers=_headers(),
         )
         assert r.status_code == 200
@@ -196,8 +196,8 @@ class TestApiRevise:
         assert len(deliveries) == 1 and deliveries[0]["for_day"] == DATE
         assert "朝阳大悦城" in deliveries[0]["reply"]
 
-    def test_revise_llm_mode_rewrites_with_footer_mark(self, tmp_path: Path, monkeypatch):
-        """llm 强制改写：走零工具修订，文末追加 ✎ 人工订正脚注，审计 mode=llm。"""
+    def test_revise_default_mode_is_llm(self, tmp_path: Path, monkeypatch):
+        """缺省（不带 mode 字段）= LLM 改写：走零工具修订，文末追加 ✎ 人工订正脚注。"""
         cfg = Config.for_tests(tmp_path)
         save_delivered(cfg, DATE, REPORT)
         monkeypatch.setattr(
@@ -211,7 +211,7 @@ class TestApiRevise:
         c = _client(cfg, monkeypatch)
         r = c.post(
             "/api/revise",
-            json={"date": DATE, "items": [{"anchor": "[工作日志-2]", "kind": "fact", "text": "上午实际去了朝阳大悦城", "mode": "llm"}]},
+            json={"date": DATE, "items": [{"anchor": "[工作日志-2]", "kind": "fact", "text": "上午实际去了朝阳大悦城"}]},
             headers=_headers(),
         )
         assert r.status_code == 200

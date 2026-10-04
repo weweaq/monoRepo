@@ -296,14 +296,14 @@ class TestReviseReportLlm:
 class TestApplyCorrection:
     """统一订正入口（QQ 确认与评审页共用）：auto=原样替换优先、定位不到升级 ②。"""
 
-    def test_auto_anchor_hit_replaces_verbatim_with_mark(self, tmp_path: Path, monkeypatch):
+    def test_verbatim_anchor_hit_replaces_verbatim_with_mark(self, tmp_path: Path, monkeypatch):
         cfg = Config.for_tests(tmp_path)
         _deliver(cfg)
         monkeypatch.setattr(
             "gacore.feedback.get_llm",
             lambda *a, **k: (_ for _ in ()).throw(RuntimeError("LLM must not be called")),
         )
-        res = apply_correction(cfg, DATE, "[工作日志-2]", "fact", "上午实际去了朝阳大悦城")
+        res = apply_correction(cfg, DATE, "[工作日志-2]", "fact", "上午实际去了朝阳大悦城", mode="verbatim")
         assert res["status"] == "ok" and res["mode_used"] == "verbatim"
         updated = (load_delivered(cfg, DATE) or "").rstrip()
         assert "- [工作日志-2] 上午实际去了朝阳大悦城（人工订正）" in updated
@@ -344,7 +344,7 @@ class TestApplyCorrection:
             "gacore.feedback.get_llm",
             lambda *a, **k: (_ for _ in ()).throw(RuntimeError("LLM must not be called")),
         )
-        res = apply_correction(cfg, DATE, "[工作日志-1]", "fact", "补一条：下午去了大悦城", intent="append")
+        res = apply_correction(cfg, DATE, "[工作日志-1]", "fact", "补一条：下午去了大悦城", mode="verbatim", intent="append")
         assert res["status"] == "ok" and res["mode_used"] == "verbatim"
         updated = (load_delivered(cfg, DATE) or "")
         assert "- [反馈] 补一条：下午去了大悦城（人工订正）" in updated

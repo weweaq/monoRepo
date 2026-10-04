@@ -290,7 +290,7 @@ __REPORT__
   <h3>批注 <button id="side-close" style="float:right">×</button></h3>
   <label>锚点<input type="text" id="f-anchor" readonly></label>
   <label>类型<select id="f-kind"><option value="fact">事实订正</option><option value="pref">偏好</option></select></label>
-  <label>替换方式<select id="f-mode"><option value="auto">自动（能原样就原样，否则 LLM 改写）</option><option value="verbatim">原样替换（订正词逐字生效）</option><option value="llm">LLM 改写（语义润色）</option></select></label>
+  <label>替换方式<select id="f-mode"><option value="llm">LLM 改写（默认，输入是改写指令）</option><option value="verbatim">原样替换（输入是成品，逐字生效）</option></select></label>
   <label>内容<textarea id="f-text" rows="5" placeholder="改成什么 / 补充什么 / 偏好描述"></textarea></label>
   <label>备注（可选，仅入审计记录）<input type="text" id="f-note" placeholder="为什么改 / 备注"></label>
   <label class="chk"><input type="checkbox" id="f-only">仅落盘不修订（record_correction）</label>
@@ -324,7 +324,7 @@ async function post(url, body){
 function renderPending(){
   $("pending").innerHTML = items.length
     ? "待修订 " + items.length + " 条：" + items.map((it,i) =>
-        '<span class="chip">' + esc(it.anchor) + " " + esc(it.kind) + "/" + esc(it.mode || "auto") + " " + esc(it.text.slice(0,12)) +
+        '<span class="chip">' + esc(it.anchor) + " " + esc(it.kind) + "/" + esc(it.mode || "llm") + " " + esc(it.text.slice(0,12)) +
         ' <button data-i="'+i+'" title="移除">×</button></span>').join("")
     : "";
   $("pending").querySelectorAll("button").forEach(b => b.onclick = () => { items.splice(+b.dataset.i,1); renderPending(); });
@@ -652,7 +652,7 @@ class ReviseItem(BaseModel):
     anchor: str
     kind: str = "fact"
     text: str
-    mode: str = "auto"   # auto=能原样就原样、定位不到升级 LLM；verbatim=强制原样；llm=强制改写
+    mode: str = "llm"    # llm=语义改写（默认）；verbatim=原样替换（订正词逐字生效）
     note: str = ""
 
 

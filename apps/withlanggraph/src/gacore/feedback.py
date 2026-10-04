@@ -618,17 +618,18 @@ def apply_correction(
     kind: str = "fact",
     text: str = "",
     *,
-    mode: str = "auto",
+    mode: str = "llm",
     note: str = "",
     intent: str = "fix",
 ) -> dict:
     """统一订正入口（C4 内聚）：QQ 确认与评审页 /api/revise 共用，两端对外语义一致。
 
     kind="pref"：仅落偏好库（含 note），不改日报正文、不投递。
-    kind="fact" 按 mode 分派：
-      - "auto"（两端默认）：先尝试 ① 原样替换；锚点定位失败自动升级 ② LLM 最小修订。
-      - "verbatim"：强制 ①，定位失败显式报错（用户明确要原样时不得静默转写）。
-      - "llm"：强制 ②（语义改写，如"把这条说得委婉一点"）。
+    kind="fact" 按 mode 分派（**无 auto，方式由操作者显式选择**）：
+      - "llm"（默认）：语义改写——输入是"指令"（如"把这条说得委婉一点"），
+        零工具单轮重写该节，diff 门禁锁定其余各节。
+      - "verbatim"：原样替换——输入是"成品"，逐字生效零 LLM；定位失败显式报错，
+        不得静默转写。
     ① 成功的 bullet 尾部追加（人工订正）标记；② 成功在文末追加 ✎ 脚注列出锚点——
     收件人一眼可见哪些内容经过人手。审计记录统一带 mode/replaced_from/note。
     投递不在本函数内：QQ 批量「确认重发」、评审页即时发送，由调用方决定。
@@ -653,23 +654,19 @@ def apply_correction(
         out["error"] = f"no delivered report for {date}"
         return out
 
-    if mode in ("auto", "verbatim"):
+    if mode == "verbatim":
         patched = _verbatim_patch(body, anchor, text.strip(), intent)
-        if patched is not None:
-            updated, replaced_from = patched
-            _save_delivered_raw(cfg, date, updated)
-            rec = record_correction(cfg, date, anchor, "fact", text,
-                                    mode="verbatim", note=note, replaced_from=replaced_from)
-            out.update(status="ok", mode_used="verbatim", correction=rec, replaced_from=replaced_from)
-            return out
-        if mode == "verbatim":
+        if patched is None:
             out["error"] = f"no bullet with {anchor} in delivered report"
             return out
-        # auto：锚点定位失败 → 自动升级 ②
-    elif mode == "llm":
-        pass  # 强制改写，直接走下方 ②
-    else:
-        out["error"] = f"invalid mode {mode!r} (auto|verbatim|llm)"
+        updated, replaced_from = patched
+        _save_delivered_raw(cfg, date, updated)
+        rec = record_correction(cfg, date, anchor, "fact", text,
+                                mode="verbatim", note=note, replaced_from=replaced_from)
+        out.update(status="ok", mode_used="verbatim", correction=rec, replaced_from=replaced_from)
+        return out
+    if mode != "llm":
+        out["error"] = f"invalid mode {mode!r} (llm|verbatim)"
         return out
 
     # ---- ② LLM 最小修订 ----
@@ -688,14 +685,13 @@ def apply_correction(
 def apply_feedback(cfg: Config, fb: Feedback) -> dict:
     """Apply an approved feedback draft to the delivered report (source of truth only).
 
-    QQ 确认路径的薄包装：委托统一入口 apply_correction（auto=先原样替换、失败自动升级
-    ②），成功后把草稿标记 applied。它不重投——QQ 批量「确认重发」调 redeliver_day()
+    QQ 确认路径的薄包装：委托统一入口 apply_correction（默认 llm 语义改写，与评审页
+    一致），成功后把草稿标记 applied。它不重投——QQ 批量「确认重发」调 redeliver_day()
     一次合并发送。返回结构保持向后兼容（status/date/section/index/intent/applied_at），
     另附 mode_used 供前端提示实际走了哪条路径。
     """
     res = apply_correction(
-        cfg, fb.date, f"[{fb.section}-{fb.index}]", "fact", fb.content,
-        mode="auto", intent=fb.intent,
+        cfg, fb.date, f"[{fb.section}-{fb.index}]", "fact", fb.content, mode="llm",
     )
     if res["status"] != "ok":
         return {"status": "error", "msg": res["error"]}

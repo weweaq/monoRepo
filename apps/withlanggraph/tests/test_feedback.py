@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 from gacore.config import Config
 from gacore.feedback import (
@@ -115,28 +116,57 @@ class TestStamp:
         assert once == twice
 
 
+
+def _echo_llm(monkeypatch):
+    """apply_feedback 默认走 ② LLM 最小修订——测试用回声 fake：原样返回已投递全文，
+    diff 门禁零变更即通过，存档被同文覆盖（含 ✎ 脚注）。需要定制输出时用脚本化 fake。"""
+    def fake(tool_list, env=None, **kwargs):
+        class _M:
+            def invoke(self, messages):
+                user = messages[1].content
+                body = user.split("【已投递日报全文】\n", 1)[1].split("\n\n【订正条目】", 1)[0]
+                return SimpleNamespace(content=body)
+        return _M()
+    monkeypatch.setattr("gacore.feedback.get_llm", fake)
+
 class TestApply:
-    def test_writes_correction_back(self, tmp_path: Path):
+    def test_writes_correction_back(self, tmp_path: Path, monkeypatch):
         cfg = Config.for_tests(tmp_path)
         src = _deliver(cfg).read_text(encoding="utf-8")
         assert "- [工作日志-2] 上午收 9-08 日报尾巴" in src
+        # 脚本化 fake：LLM 按订正词重写该节（llm 默认路径的确定性版本）
+        revised = src.replace("- [工作日志-2] 上午收 9-08 日报尾巴", "- [工作日志-2] 其实是跑了四段")
+        monkeypatch.setattr(
+            "gacore.feedback.get_llm",
+            lambda *a, **k: SimpleNamespace(invoke=lambda m: SimpleNamespace(content=revised)),
+        )
         fb = Feedback(id="abc123", date="2026-09-09", section="工作日志",
                       index=2, intent="fix", content="其实是跑了四段", status="pending")
         res = apply_feedback(cfg, fb)
-        assert res["status"] == "ok"
+        assert res["status"] == "ok" and res["mode_used"] == "llm"
         body = (cfg.logs_dir / "delivered_report" / "2026-09-09.md").read_text(encoding="utf-8")
         assert "- [工作日志-2] 其实是跑了四段" in body
         assert "上午收 9-08 日报尾巴" not in body
+        assert "✎ 人工订正：[工作日志-2]" in body  # 邮件人工订正标记
 
-    def test_appends_addition(self, tmp_path: Path):
+    def test_appends_addition(self, tmp_path: Path, monkeypatch):
         cfg = Config.for_tests(tmp_path)
-        _deliver(cfg)
+        src = _deliver(cfg).read_text(encoding="utf-8")
+        # append 意图走 llm 默认路径：LLM 把补充内容织入该节（脚本化确定性版本）
+        revised = src.replace(
+            "- [个人观察-1] LPL 老线再加深",
+            "- [个人观察-1] LPL 老线再加深\n- 其实昨晚也没睡",
+        )
+        monkeypatch.setattr(
+            "gacore.feedback.get_llm",
+            lambda *a, **k: SimpleNamespace(invoke=lambda m: SimpleNamespace(content=revised)),
+        )
         fb = Feedback(id="abc124", date="2026-09-09", section="个人观察",
                       index=1, intent="append", content="其实昨晚也没睡", status="pending")
         res = apply_feedback(cfg, fb)
         assert res["status"] == "ok"
         body = (cfg.logs_dir / "delivered_report" / "2026-09-09.md").read_text(encoding="utf-8")
-        assert "[反馈] 其实昨晚也没睡" in body
+        assert "其实昨晚也没睡" in body
         assert "- [个人观察-1] LPL 老线再加深" in body
 
     def test_unknown_anchor_errors(self, tmp_path: Path):
@@ -156,9 +186,10 @@ class TestApply:
 
 
 class TestPendingFlow:
-    def test_confirm_applies_and_marks_applied(self, tmp_path: Path):
+    def test_confirm_applies_and_marks_applied(self, tmp_path: Path, monkeypatch):
         cfg = Config.for_tests(tmp_path)
         _deliver(cfg)
+        _echo_llm(monkeypatch)
         fb = Feedback(id="draft01", date="2026-09-09", section="工作日志",
                       index=1, intent="fix", content="git 8 提交", status="pending")
         save_pending(cfg, fb)
@@ -258,6 +289,7 @@ class TestBatchRedeliver:
     def test_apply_does_not_resend(self, tmp_path: Path, monkeypatch):
         cfg = Config.for_tests(tmp_path)
         _deliver(cfg)
+        _echo_llm(monkeypatch)
         calls: list = []
         monkeypatch.setattr("gacore.scheduler._deliver", lambda *a, **k: calls.append(a))
         fb = Feedback(id="b1", date="2026-09-09", section="工作日志",
@@ -270,6 +302,7 @@ class TestBatchRedeliver:
     def test_redeliver_day_sends_then_noop(self, tmp_path: Path, monkeypatch):
         cfg = Config.for_tests(tmp_path)
         _deliver(cfg)
+        _echo_llm(monkeypatch)
         calls: list = []
         monkeypatch.setattr("gacore.scheduler._deliver", lambda job, cfgx, reply, err, **k: calls.append(reply))
         fb = Feedback(id="b2", date="2026-09-09", section="工作日志",
@@ -288,6 +321,7 @@ class TestBatchRedeliver:
         cfg = Config.for_tests(tmp_path)
         _deliver(cfg, "2026-09-08")
         _deliver(cfg)
+        _echo_llm(monkeypatch)
         sent: list[str] = []
         monkeypatch.setattr("gacore.scheduler._deliver", lambda job, cfgx, reply, err, **k: sent.append("send"))
         fb = Feedback(id="b3", date="2026-09-09", section="工作日志",
