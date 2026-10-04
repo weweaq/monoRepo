@@ -189,8 +189,8 @@ _PAGE_TMPL = """<!doctype html>
 </head>
 <body>
 <header><div class="wrap">
-<span class="brand"><a href="/health">日报评审</a></span>
-<nav><a href="/health">源体检</a><a href="/config">源预算</a></nav>
+<span class="brand"><a href="/review">日报评审</a></span>
+<nav><a href="/review">日报评审</a><a href="/health">源体检</a><a href="/config">源预算</a></nav>
 </div></header>
 <main class="wrap">
 __BODY__
