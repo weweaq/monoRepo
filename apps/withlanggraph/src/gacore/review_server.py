@@ -599,21 +599,21 @@ def _health_matrix(cfg: Config, end: str | None = None) -> str:
 
 
 def _matrix_nav(end_s: str) -> str:
-    """窗口日期导航：±7 天平移 + 日期选择器 + 回到今天。"""
+    """窗口日期导航：前一天/后一天平移 + 日期选择器 + 回到今天。"""
     try:
         e = datetime.strptime(end_s, "%Y-%m-%d")
     except ValueError:
         e = datetime.now().astimezone()
-    prev = (e - timedelta(days=7)).strftime("%Y-%m-%d")
-    nxt = (e + timedelta(days=7)).strftime("%Y-%m-%d")
-    today = datetime.now().astimezone().strftime("%Y-%m-%d")
+    prev = (e - timedelta(days=1)).strftime("%Y-%m-%d")
+    nxt = (e + timedelta(days=1)).strftime("%Y-%m-%d")
     return (
         '<div class="dnav" style="display:flex;gap:10px;align-items:center;margin:6px 0">'
-        f'<a class="dnav-btn" href="/health?end={prev}">‹ 前一周</a>'
+        f'<a class="dnav-btn" href="/health?end={prev}">‹ 前一天</a>'
         f'<span class="cur">窗口末日 {end_s}</span>'
-        f'<a class="dnav-btn" href="/health?end={nxt}">后一周 ›</a>'
+        f'<a class="dnav-btn" href="/health?end={nxt}">后一天 ›</a>'
         f'<input type="date" value="{end_s}" onchange="location=\'/health?end=\'+this.value">'
-        f'<a class="dnav-btn" href="/health">今天</a></div>'
+        f'<a class="dnav-btn" href="/health">今天</a>'
+        '<span class="small muted">矩阵显示以该日为末日的 14 天窗口</span></div>'
     )
 
 
