@@ -6,7 +6,7 @@ FastAPI 单文件服务，骨架沿用 langTrack/server.py（工厂函数 create
 端点一览：
 - GET  /review/{date}                  评审页：已投递日报全文，[节-序号] 锚点为可点角标
 - GET  /health                         源体检总览：最近 14 天 × 源 状态矩阵
-- GET  /health/source/{date}/{key}     单源详情：pack_detail 三节 + 字符量对比 + L0 外链
+- GET  /health/source/{date}/{key}     单源详情：pack_detail 三节 + 字符漏斗 + 查最终 LLM 输入外链
 - GET  /logs/{path:path}               白名单静态文件（scheduled/*.md、{date}/llm_requests.jsonl）
 - GET  /api/corrections/{date}         当日订正（active + all）
 - POST /api/corrections                仅落盘一条订正/偏好（不触发修订）
@@ -648,14 +648,14 @@ def _mini_md_html(text: str) -> str:
 
 
 def _funnel_bars(entry: dict | None) -> str:
-    """字符漏斗（C+ 版式，sqrt 比例条）：L2b 取数 → L1b 渲染 → L1a 进包，条上标每层差值。"""
+    """字符漏斗（C+ 版式，sqrt 比例条）：原始取数 → 挑选压缩 → 实际进包，条上标每层差值。"""
     if not isinstance(entry, dict):
         return ""
     steps: list[tuple[str, int, str]] = []
     for label, field, cls in (
-        ("L2b 完整取数", "detail_chars", ""),
-        ("L1b 渲染文本", "full_chars", "bar-l2"),
-        ("L1a 实际进包", "chars", "bar-l3"),
+        ("原始取数（数据源给的全部）", "detail_chars", ""),
+        ("挑选压缩后（规则筛选）", "full_chars", "bar-l2"),
+        ("实际进包（LLM 真正看到的）", "chars", "bar-l3"),
     ):
         v = entry.get(field)
         if isinstance(v, (int, float)) and v >= 0:
