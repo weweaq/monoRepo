@@ -917,3 +917,26 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 - [ ] dev-console 重启加载 review 服务；真实 `.env` 配 REVIEW_TOKEN；浏览器实测批注→修订→vN 邮件闭环。
 - [ ] 连续 3 天观察 info_pack_health.jsonl：ok 源消费覆盖率 100%（C7 验收）。
 - [ ] 观察 langTrack 日报不再出现双份聚合数字（A′ 验收）。
+
+## [2026-10-04] v3.1 统一订正入口：原样替换/LLM 改写双模式 + 邮件订正标记
+
+**背景**：v3 部署真实验证（评审页修订 v2 邮件 + rerun 重生成 v3 邮件均真实送达）暴露两件事：③ 整版重生成对订正词是"消化转述"而非保真引用（"weiCheckApp"等上下文词被带进正文）；用户提出邮件应体现"哪些内容被人工修正过"，且两端（QQ/评审页）对外表现要一致、改动要内聚。
+
+**已完成**（`ae3397d` + 收尾提交）：
+- `feedback.py` 统一入口 `apply_correction`（QQ 确认与评审页共用）：mode=auto（默认，锚点能定位→① 原样替换；定位不到→自动升级 ② LLM 最小修订）/verbatim（强制原样，定位失败显式报错）/llm（强制改写）；pref 仅落偏好库。
+- 邮件标记：① bullet 尾部 `（人工订正）`；② 文末 `✎ 人工订正：[锚点]` 脚注。
+- 审计字段：corrections 记录新增 `mode`/`replaced_from`（被替换原句）/`note`。
+- `apply_feedback` 改为 core 薄包装；`escalate_revise`/`revise_from_pending` 删除（被 core 取代）。
+- corrections 语义收窄：QQ 提交阶段不再预落盘，确认生效时统一落（未确认订正不进 ③ 注入）；LLM 失败不落记录。
+- review_server：`/api/revise` 走 core（pref 不再触发 LLM 修订与重发）；批注框加替换方式下拉 + 备注；`/review` 307 跳转；`/api/revise` 重发不再依赖 applied-pending 守卫（`_deliver_revised`）；状态 `finished_at/duration` 收尾取值。
+
+**实测验证**（全部真实 API）：
+- 原样替换：`POST /api/revise mode=verbatim` → 2.3 秒完成（零 LLM），存档行与订正词一字不差 + `（人工订正）` 标记，`replaced_from` 捕获原句，真实邮件 v4 送达（主题 `2026-10-03（重生成 v4）`）。
+- 此前已完成：② 最小修订真实链路（diff 门禁仅目标节变化，v2 邮件）、③ 整版重生成真实链路（14 分钟 agent，`〔人工订正〕`注入存档可见，v3 邮件）、401 鉴权、跳转路由。
+- 测试：review_server 31 + feedback_revise 25 重写/新增，受影响套件 187 项全绿；ruff 全仓通过。
+
+**偏差说明**：③ 重生成对订正仍为"消化转述"（LLM 行为特性），保真引用需在 schedule.json prompt 加硬约束——暂缓，观察实际使用后再定；`_LONG_TERM` 源 classify 误判 missing_data（正文含"无数据"字样触发启发式）——已知边界，待精化模式表。
+
+**待办更新**：
+- [ ] 收件箱确认 v2/v3/v4 三封邮件的标记与版本号展示效果。
+- [ ] 观察 ③ 重生成转述问题是否实际困扰，决定是否加"订正词保真引用"prompt 约束。

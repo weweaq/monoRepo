@@ -1491,11 +1491,12 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 
 ### 反馈闭环（`feedback.py` + `frontends/qq.py` + `review_server.py`，S3/S4/接线批）
 
-- **三级修复阶梯**：① 确定性补丁（`apply_feedback`，纯代码）；② **LLM 最小修订（默认）** `revise_report_llm`——输入仅已投递全文+订正条目，`get_llm([], os.environ, bind_tools=False)` 零工具单轮，**diff 门禁**按 `# ` 标题分节硬校验非目标节逐字不变，失败 stricter 重试 1 次，再败降级为节末追加 `> （人工订正）…`；③ 整体重生成 `rerun --day`（需显式确认）。
-- **corrections 存储**：`record_correction(cfg,date,anchor,kind,text)`——fact → `data/feedback/corrections/{date}.json`（同锚点 superseded 去重），pref → `data/feedback/preferences.json`；`list_active_corrections`/`list_active_preferences` 供 ③ 注入与偏好块。QQ edit 提交即落审计；①失败自动升级 ②（`escalate_revise`，成功覆盖 delivered 存档并标记 applied）。
+- **统一订正入口 `apply_correction`（2026-10-04，内聚收敛）**：QQ 确认与评审页 `/api/revise` 共用，两端对外语义一致。`kind="pref"` 仅落偏好库（不改正文不投递）；`kind="fact"` 按 mode 分派——`auto`（默认）先 ① 原样替换（`_verbatim_patch` 定位锚点 bullet 逐字改写）、定位不到自动升级 ②；`verbatim` 强制 ①（定位失败显式报错不静默转写）；`llm` 强制 ②。**邮件订正标记**：① 成功的 bullet 尾部追加 `（人工订正）`；② 成功文末追加 `✎ 人工订正：[锚点]` 脚注——收件人一眼可见哪些内容经过人手。审计记录统一带 `mode`/`replaced_from`（被替换原句）/`note`（操作者备注）。corrections 语义收窄为「已生效订正的事实底座」：QQ 提交阶段只进 pending 草稿，确认生效时才落盘（未确认的订正不进 ③ 注入）；LLM 失败不落记录。`apply_feedback` 为 core 薄包装（返回附 `mode_used`）；`escalate_revise`/`revise_from_pending` 被 core 取代已删除。投递策略按入口保持差异：QQ 批量「确认重发」、评审页即时重发。
+- **三级修复阶梯**：① 确定性补丁（`apply_feedback`，纯代码）；② **LLM 最小修订** `revise_report_llm`——输入仅已投递全文+订正条目，`get_llm([], os.environ, bind_tools=False)` 零工具单轮，**diff 门禁**按 `# ` 标题分节硬校验非目标节逐字不变，失败 stricter 重试 1 次，再败降级为节末追加 `> （人工订正）…`；③ 整体重生成 `rerun --day`（需显式确认）。默认路径由 `apply_correction` 按锚点可定位性自动选择（①优先）。
+- **corrections 存储**：`record_correction(cfg,date,anchor,kind,text,*,mode,note,replaced_from)`——fact → `data/feedback/corrections/{date}.json`（同锚点 superseded 去重），pref → `data/feedback/preferences.json`；`list_active_corrections`/`list_active_preferences` 供 ③ 注入与偏好块。
 - **scheduler 注入（③路径）**：`_build_job_prompt` 包首拼〔人工订正·{date}〕(cap 600) 与〔用户偏好〕(cap 400)，独立于 PACK_BUDGET，块顺序=优先级。
 - **C5 版本号**：`_deliver_email` 对历史天每次真实发送递增 `next_report_version`，主题 `{date}（重生成 vN）`（v≥2），正文头部加「本版为 vN 重生成，依据 M 条人工订正」；当天例行投递无标记。
-- **评审页** `gacore/review_server.py`（:8010，`REVIEW_TOKEN` 保护 POST）：`GET /review/{date}`（锚点批注，修订默认/重生成需确认，分节 diff 视图）、`GET /health`（14 天×源状态矩阵）、`GET /health/source/{date}/{key}`（三节详情 + 三级字符对比 + L0 外链）、`POST /api/revise|rerun|corrections`、`GET /api/rerun/{date}/status`。dev-console services.json 注册 `review` 受管服务。
+- **评审页** `gacore/review_server.py`（:8010，`REVIEW_TOKEN` 保护 POST）：`GET /review`（307 跳最近一篇 delivered）、`GET /review/{date}`（锚点批注：替换方式下拉 自动/原样替换/LLM 改写 + 备注；分节 diff 视图）、`GET /health`（14 天×源状态矩阵）、`GET /health/source/{date}/{key}`（三节详情 + 三级字符对比 + L0 外链）、`POST /api/revise|rerun|corrections`、`GET /api/rerun/{date}/status`。dev-console services.json 注册 `review` 受管服务。
 
 ### prompt（C7，`config/schedule.json` + `_instruction_head`）
 
