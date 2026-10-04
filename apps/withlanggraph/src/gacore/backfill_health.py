@@ -22,10 +22,16 @@ import sys
 from datetime import datetime, timedelta
 
 from gacore.config import Config, load_dotenv
+from gacore.jsonl_logger import get_logger
 
 
-def backfill_range(cfg: Config, start: str, end: str, job: str = "daily-report") -> dict:
-    """重放 [start, end] 闭区间（含端点）的体检落盘。返回 {"ok": [...], "skip": [...], "fail": [...]}。"""
+def refresh_day(cfg: Config, date: str, job: str = "daily-report", trigger: str = "backfill") -> str:
+    """单日体检重放并落盘（jsonl 一行 + pack_detail 三节 + 事实卡支线）。
+
+    返回 "ok" / "skip:原因" / "fail:原因"。与 backfill_range 共用；
+    允许当日（页面刷新按钮的语义即"以当前数据回看"），仅拒绝未来日期——CLI 的当日跳过
+    策略留在 backfill_range。诚实边界同模块 docstring：画像类源是当前态，B站/Edge 受历史窗口限制。
+    """
     from gacore.daily_info_pack import (
         build_info_pack_report,
         write_fact_card_detail,
@@ -33,6 +39,29 @@ def backfill_range(cfg: Config, start: str, end: str, job: str = "daily-report")
         write_pack_health,
     )
 
+    today = datetime.now().astimezone().date().isoformat()
+    if date > today:
+        return "skip:未来日期"
+    pack, stats = build_info_pack_report(date, cfg)
+    if not stats:
+        return "fail:无 stats（全部源异常？）"
+    write_pack_health(cfg, date, job, trigger, stats, len(pack), correction_chars=0)
+    for st in stats:
+        write_pack_detail(
+            cfg, date, st.get("key", ""), st.get("title", ""), st.get("status", ""),
+            st.get("detail_body", ""), st.get("pack_body", ""), st.get("packed_body", ""),
+        )
+    try:
+        from gacore.langTrack import fact_card
+
+        write_fact_card_detail(cfg, fact_card.build(day=date, detail="compact", outlet="debug"))
+    except Exception as exc:  # noqa: BLE001 — 事实卡支线失败不影响主补录
+        get_logger("backfill_health").warning("fact-card detail skipped", date=date, error=str(exc))
+    return "ok"
+
+
+def backfill_range(cfg: Config, start: str, end: str, job: str = "daily-report") -> dict:
+    """重放 [start, end] 闭区间（含端点）的体检落盘。返回 {"ok": [...], "skip": [...], "fail": [...]}。"""
     out: dict[str, list] = {"ok": [], "skip": [], "fail": []}
     today = datetime.now().astimezone().date().isoformat()
     d = datetime.strptime(start, "%Y-%m-%d").date()
@@ -45,29 +74,14 @@ def backfill_range(cfg: Config, start: str, end: str, job: str = "daily-report")
             elif date == today:
                 out["skip"].append(f"{date}:当日等 scheduled 落盘")
             else:
-                pack, stats = build_info_pack_report(date, cfg)
-                if not stats:
-                    out["fail"].append(f"{date}:无 stats（全部源异常？）")
-                    d += timedelta(days=1)
-                    continue
-                write_pack_health(cfg, date, job, "backfill", stats, len(pack), correction_chars=0)
-                for st in stats:
-                    write_pack_detail(
-                        cfg, date, st.get("key", ""), st.get("title", ""), st.get("status", ""),
-                        st.get("detail_body", ""), st.get("pack_body", ""), st.get("packed_body", ""),
-                    )
-                try:
-                    from gacore.langTrack import fact_card
-
-                    write_fact_card_detail(cfg, fact_card.build(day=date, detail="compact", outlet="debug"))
-                except Exception as exc:  # noqa: BLE001 — 事实卡支线失败不影响主补录
-                    from gacore.jsonl_logger import get_logger
-
-                    get_logger("backfill_health").warning(
-                        "fact-card detail skipped", date=date, error=str(exc)
-                    )
-                out["ok"].append(date)
-                print(f"[backfill] {date} ok（{len(stats)} 源，{len(pack)} 字符）", flush=True)
+                res = refresh_day(cfg, date, job=job)
+                if res == "ok":
+                    out["ok"].append(date)
+                    print(f"[backfill] {date} ok", flush=True)
+                else:
+                    kind, _, msg = res.partition(":")
+                    out[kind].append(f"{date}:{msg}")
+                    print(f"[backfill] {date} {kind.upper()} {msg}", flush=True)
         except Exception as exc:  # noqa: BLE001 — 单日失败不断链
             out["fail"].append(f"{date}:{type(exc).__name__}:{exc}"[:160])
             print(f"[backfill] {date} FAIL {type(exc).__name__}", flush=True)

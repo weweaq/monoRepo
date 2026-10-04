@@ -613,7 +613,38 @@ def _matrix_nav(end_s: str) -> str:
         f'<a class="dnav-btn" href="/health?end={nxt}">后一天 ›</a>'
         f'<input type="date" value="{end_s}" onchange="location=\'/health?end=\'+this.value">'
         f'<a class="dnav-btn" href="/health">今天</a>'
+        f'{_health_refresh_widget(end_s)}'
         '<span class="small muted">矩阵显示以该日为末日的 14 天窗口</span></div>'
+    )
+
+
+def _health_refresh_widget(date: str) -> str:
+    """「↻ 重算体检」按钮 + 脚本：POST /api/health/refresh 后整页刷新。
+
+    三处共用（矩阵导航 / 单源详情页有数据与空态）；token 与评审页同存 localStorage。
+    同步重放秒级（bili/Edge CLI 各几秒），按钮置灰防连点。
+    """
+    js = (
+        "(function(){var b=document.getElementById('hrefresh');if(!b)return;"
+        "function tk(msg){var t=localStorage.getItem('review_token')||'';"
+        "if(t&&!msg)return t;t=prompt(msg||'请输入 REVIEW_TOKEN（见 .env）')||'';"
+        "if(t)localStorage.setItem('review_token',t);return t;}"
+        "b.onclick=function(){b.disabled=true;var old=b.textContent;b.textContent='重算中…';"
+        "var t=tk();if(!t){b.disabled=false;b.textContent=old;return;}"
+        'fetch("/api/health/refresh",{method:"POST",'
+        'headers:{"Content-Type":"application/json","X-Review-Token":t},'
+        'body:JSON.stringify({date:"' + date + '"})})'
+        ".then(function(r){if(r.status===401)return Promise.reject('token');return r.json();})"
+        ".then(function(j){if(j.ok){location.reload();}else{b.disabled=false;b.textContent=old;"
+        'alert("重算失败："+(j.result||j.error||"未知"));}})'
+        ".catch(function(e){b.disabled=false;b.textContent=old;"
+        "if(e==='token'){localStorage.removeItem('review_token');alert('令牌无效，请重试');}"
+        'else{alert("异常："+e);}});};})();'
+    )
+    return (
+        '<button id="hrefresh" class="dnav-btn" title="以当前数据重算该日体检（零 LLM 零邮件，'
+        '画像类源为当前态；B站/Edge 受历史窗口限制）">↻ 重算体检</button>'
+        f"<script>{js}</script>"
     )
 
 
@@ -805,13 +836,14 @@ def _health_source_page(cfg: Config, date: str, key: str) -> str:
             f"<h1>源体检 · {html.escape(title)}</h1>{nav}"
             f'<div class="sub">key <code>{html.escape(key)}</code></div>'
             f'<p class="empty">暂无数据：data/logs/pack_detail/{html.escape(date)}/{html.escape(key)}.md 不存在'
-            "（daily job 运行该日后生成）</p>"
+            "（daily job 运行该日后生成；也可点右上「↻ 重算体检」以当前数据回看）</p>"
+            f"{_health_refresh_widget(date)}"
         )
         return _page(f"源体检 · {title} · {date}", body)
 
     body = (
         f"<h1>源体检 · {html.escape(title)}</h1>{nav}"
-        f'<div class="sub">key <code>{html.escape(key)}</code></div>'
+        f'<div class="sub">key <code>{html.escape(key)}</code>　{_health_refresh_widget(date)}</div>'
         f'<div class="links">{" ".join(links)}</div>'
         f"{_funnel_bars(entry)}"
         '<div class="dual">'
@@ -881,6 +913,10 @@ class ReviseItem(BaseModel):
 class ReviseIn(BaseModel):
     date: str
     items: list[ReviseItem]
+
+
+class BackfillIn(BaseModel):
+    date: str
 
 
 def _deliver_revised(cfg: Config, date: str) -> dict:
@@ -1036,6 +1072,25 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             "fallback": any((r.get("revise") or {}).get("fallback", False) for r in results),
         }
         return {"ok": revise["ok"], "results": results, "revise": revise, "redeliver": rd}
+
+    @app.post("/api/health/refresh")
+    def api_health_refresh(request: Request, payload: BackfillIn):
+        """单日体检重放（backfill_health.refresh_day）：零 LLM 零邮件，秒级，同步返回。
+
+        允许当日（语义=「以当前数据回看」）；未来日期拒绝。
+        """
+        guard = _guard(request)
+        if guard is not None:
+            return guard
+        if not _DATE_RE.fullmatch(payload.date):
+            return JSONResponse({"ok": False, "error": "invalid date"}, status_code=400)
+        from gacore.backfill_health import refresh_day
+
+        try:
+            res = refresh_day(config, payload.date)
+        except Exception as exc:  # noqa: BLE001 — 取数源异常统一回传，不让 /health 刷新 500
+            return {"ok": False, "result": f"fail:{type(exc).__name__}:{exc}"[:160]}
+        return {"ok": res == "ok", "result": res, "date": payload.date}
 
     @app.post("/api/rerun")
     def api_rerun(request: Request, payload: RerunIn):

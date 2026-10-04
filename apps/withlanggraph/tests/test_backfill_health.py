@@ -76,3 +76,49 @@ def test_backfill_single_day_failure_does_not_break_chain(tmp_path: Path, monkey
     # 正常路径：C 成功
     result = backfill_range(cfg, "2026-09-08", "2026-09-08")
     assert result["ok"] == ["2026-09-08"]
+
+
+# --------------------------------------------------------------------------- #
+# refresh_day：单日重放原语（页面「↻ 重算体检」按钮的底层）                      #
+# --------------------------------------------------------------------------- #
+def test_refresh_day_allows_today_and_writes(tmp_path: Path, _fake_sources):
+    """与 backfill_range 的差异点：允许当日（页面按钮语义=以当前数据回看）。"""
+    from datetime import datetime
+
+    from gacore.backfill_health import refresh_day
+
+    cfg = Config.for_tests(tmp_path)
+    today = datetime.now().astimezone().date().isoformat()
+    assert refresh_day(cfg, today) == "ok"
+    lines = (cfg.root / "data" / "logs" / "info_pack_health.jsonl").read_text(encoding="utf-8").splitlines()
+    rec = json.loads(lines[0])
+    assert rec["date"] == today and rec["trigger"] == "backfill"
+    assert (cfg.root / "data" / "logs" / "pack_detail" / today / "_A.md").is_file()
+
+
+def test_refresh_day_rejects_future(tmp_path: Path, _fake_sources):
+    from datetime import datetime, timedelta
+
+    from gacore.backfill_health import refresh_day
+
+    cfg = Config.for_tests(tmp_path)
+    future = (datetime.now().astimezone() + timedelta(days=3)).date().isoformat()
+    assert refresh_day(cfg, future) == "skip:未来日期"
+    assert not (cfg.root / "data" / "logs" / "info_pack_health.jsonl").exists()
+
+
+def test_refresh_day_builder_crash_lands_as_failed_source(tmp_path: Path, monkeypatch):
+    """builder 抛异常被 build_info_pack_report 逐源兜住：照常落盘，该源记 failed。"""
+    from gacore import daily_info_pack as dip
+    from gacore.backfill_health import refresh_day
+
+    def _boom(date: str, cfg):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(dip, "SOURCES", [dip.SourceSpec(key="_X", cap=800, priority=10, builder=_boom)])
+    cfg = Config.for_tests(tmp_path)
+    assert refresh_day(cfg, "2026-09-08") == "ok"
+    rec = json.loads(
+        (cfg.root / "data" / "logs" / "info_pack_health.jsonl").read_text(encoding="utf-8").splitlines()[0]
+    )
+    assert rec["sources"][0]["status"] == "failed"

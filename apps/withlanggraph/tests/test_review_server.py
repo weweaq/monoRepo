@@ -602,3 +602,53 @@ class TestReviewPage:
     def test_rejects_invalid_date(self, tmp_path: Path, monkeypatch):
         c = _client(Config.for_tests(tmp_path), monkeypatch)
         assert c.get("/review/not-a-date").status_code == 400
+
+
+class TestHealthRefresh:
+    """POST /api/health/refresh：单日体检重放按钮（backfill_health.refresh_day）。"""
+
+    def test_401_without_token(self, tmp_path: Path, monkeypatch):
+        c = _client(Config.for_tests(tmp_path), monkeypatch, token=None)
+        r = c.post("/api/health/refresh", json={"date": DATE})
+        assert r.status_code == 401
+
+    def test_rejects_invalid_date(self, tmp_path: Path, monkeypatch):
+        c = _client(Config.for_tests(tmp_path), monkeypatch)
+        r = c.post("/api/health/refresh", json={"date": "not-a-date"}, headers=_headers())
+        assert r.status_code == 400
+
+    def test_refresh_writes_health_line(self, tmp_path: Path, monkeypatch):
+        from gacore import daily_info_pack as dip
+
+        def _a(date: str, cfg):
+            return "〔源A〕", f"- A 数据 {date}", f"- A 全量 {date}"
+
+        monkeypatch.setattr(
+            dip, "SOURCES", [dip.SourceSpec(key="_A", cap=800, priority=10, builder=_a)]
+        )
+        cfg = Config.for_tests(tmp_path)
+        c = _client(cfg, monkeypatch)
+        r = c.post("/api/health/refresh", json={"date": "2026-09-08"}, headers=_headers())
+        assert r.status_code == 200 and r.json()["ok"] is True and r.json()["result"] == "ok"
+        rec = json.loads(
+            (cfg.root / "data" / "logs" / "info_pack_health.jsonl").read_text(encoding="utf-8").splitlines()[0]
+        )
+        assert rec["date"] == "2026-09-08" and rec["trigger"] == "backfill"
+
+    def test_refresh_future_date_reports_skip(self, tmp_path: Path, monkeypatch):
+        from datetime import datetime, timedelta
+
+        cfg = Config.for_tests(tmp_path)
+        c = _client(cfg, monkeypatch)
+        future = (datetime.now().astimezone() + timedelta(days=3)).date().isoformat()
+        r = c.post("/api/health/refresh", json={"date": future}, headers=_headers())
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is False and body["result"].startswith("skip:")
+
+    def test_matrix_and_source_page_have_refresh_button(self, tmp_path: Path, monkeypatch):
+        cfg = Config.for_tests(tmp_path)
+        _write_health_jsonl(cfg, [_sample_line(DATE)])
+        c = _client(cfg, monkeypatch)
+        assert "hrefresh" in c.get("/health").text
+        assert "hrefresh" in c.get(f"/health/source/{DATE}/_CHAT").text
