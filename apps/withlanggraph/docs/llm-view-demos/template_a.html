@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8"><title>Demo A v2 运行回放 · __DATE__</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:"Segoe UI","Microsoft YaHei",sans-serif;background:#f5f6f8;color:#2D3142;font-size:13px}
+header{position:sticky;top:0;z-index:9;background:#fff;padding:10px 16px;box-shadow:0 1px 3px rgba(0,0,0,.12);display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+header h1{font-size:15px}
+header .meta{color:#888;font-size:12px}
+.badge{display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;margin-right:4px}
+.role-system{background:#EDE7F6;color:#4527A0}.role-human{background:#E3F2FD;color:#1565C0}
+.role-ai{background:#E8F5E9;color:#2E7D32}.role-tool{background:#FFF3E0;color:#E65100}
+.chip{display:inline-block;background:#EEF1F5;border-radius:4px;padding:1px 6px;font-size:11px;margin:1px 2px;color:#455A64}
+pre{background:#263238;color:#ECEFF1;padding:10px;border-radius:6px;overflow:auto;max-height:380px;font-family:Consolas,monospace;font-size:12px;white-space:pre-wrap;word-break:break-all}
+.exp{cursor:pointer}.exp:hover{background:#ECEFF1}
+button{border:1px solid #ccc;background:#fff;border-radius:6px;padding:3px 10px;cursor:pointer;font-size:12px}
+button:hover{background:#eef1f5}
+.muted{color:#999}
+#bar{padding:8px 16px;background:#fff;border-bottom:1px solid #e3e5e8;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+#bar input,#bar select{border:1px solid #ccc;border-radius:6px;padding:4px 8px;font-size:12px}
+#bar input.q{width:300px}
+#wrap{display:flex;height:calc(100vh - 86px)}
+#side{width:300px;background:#fff;border-right:1px solid #e3e5e8;overflow:auto;padding:8px}
+.run{padding:9px;border-radius:8px;cursor:pointer;margin-bottom:6px;border:1px solid transparent}
+.run:hover{background:#F4F6F9}.run.on{background:#E3F2FD;border-color:#90CAF9}
+.run .t{font-weight:600;margin-bottom:2px}
+.run .q{font-size:11px;color:#555;margin-bottom:3px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.run .s{font-size:11px;color:#999}
+.kind-daily{background:#E3F2FD;color:#1565C0}.kind-proactive{background:#FFF3E0;color:#E65100}
+.kind-chat{background:#E8F5E9;color:#2E7D32}.kind-internal{background:#ECEFF1;color:#546E7A}
+.kind-other{background:#F3E5F5;color:#6A1B9A}
+#main{flex:1;overflow:auto;padding:14px 16px}
+.call{background:#fff;border-radius:10px;box-shadow:0 1px 4px rgba(0,0,0,.08);margin-bottom:14px;overflow:hidden}
+.call>.hd{padding:8px 14px;border-bottom:1px solid #eef0f3;display:flex;gap:8px;align-items:center;flex-wrap:wrap;cursor:pointer}
+.call>.bd{padding:10px 14px;display:none}.call.open>.bd{display:block}
+.call.toolhit>.hd{background:#FFFDE7}
+.tcard{border:1px solid #FFE0B2;border-radius:8px;margin:8px 0;overflow:hidden}
+.tcard>.th{background:#FFF8E1;padding:6px 10px;font-weight:600;cursor:pointer;display:flex;gap:8px;align-items:center}
+.tcard>.tb{display:none;padding:8px 10px}.tcard.open>.tb{display:block}
+.tcard.toolhit{border-color:#FBC02D;box-shadow:0 0 0 2px #FFF59D}
+.msgline{padding:4px 6px;border-radius:6px;margin:2px 0;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.msgline.dim{opacity:.45}
+.msgline.hit{background:#FFF9C4;outline:1px solid #FBC02D}
+.newbadge{display:inline-block;background:#2E7D32;color:#fff;font-size:9px;font-weight:700;border-radius:3px;padding:0 4px;margin-left:4px;vertical-align:1px}
+#hits .hrow{background:#fff;border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.08);padding:8px 12px;margin-bottom:8px;cursor:pointer}
+#hits .hrow:hover{background:#F4F9FF}
+#hits mark{background:#FFF59D;padding:0 1px}
+#drawer{position:fixed;right:0;top:0;width:52%;height:100%;background:#fff;box-shadow:-4px 0 16px rgba(0,0,0,.18);display:none;flex-direction:column;z-index:20}
+#drawer .dh{padding:10px 14px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;gap:8px;align-items:center}
+#drawer .db{flex:1;overflow:auto;padding:14px}
+</style></head><body>
+<header><h1>Demo A v2 · 运行回放</h1><span class="meta">__DATE__ · 运行摘要自动推导 · 融合 B（全局搜索/工具筛选）与 C（NEW 增量/复制 JSON）</span></header>
+<div id="bar">
+<input class="q" id="q" placeholder="全局搜索消息内容…" oninput="onSearch()">
+<select id="ftool" onchange="onTool()"></select>
+<label><input type="checkbox" id="onlynew" checked onchange="applyOnlyNew()"> 只看新增</label>
+<span class="meta" id="stat"></span>
+</div>
+<div id="wrap"><div id="side"></div><div id="main"></div></div>
+<div id="drawer"><div class="dh"><b id="dt"></b><span><button onclick="copyCall()">复制调用 JSON</button> <button onclick="document.getElementById('drawer').style.display='none'">关闭</button></span></div><div class="db" id="db"></div></div>
+<script>
+const DATA=__DATA__;
+function esc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")}
+function fmtC(n){return n>=1000?(n/1000).toFixed(1)+"k":n}
+function pretty(o){try{return JSON.stringify(o,null,2)}catch(e){return String(o)}}
+function hh(ts){return (ts||"").replace("T"," ").slice(5,19)}
+function badge(role){return '<span class="badge role-'+role+'">'+role+'</span>'}
+function tg(e){e.closest(".fold").classList.toggle("open")}
+function copyText(t){if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(function(){toast("已复制")},function(){fallbackCopy(t)})}else{fallbackCopy(t)}}
+function fallbackCopy(t){var ta=document.createElement("textarea");ta.value=t;document.body.appendChild(ta);ta.select();try{document.execCommand("copy");toast("已复制")}catch(e){}document.body.removeChild(ta)}
+function toast(msg){var d=document.createElement("div");d.textContent=msg;d.style.cssText="position:fixed;bottom:24px;left:50%;transform:translateX(-50%);background:#2D3142;color:#fff;padding:6px 18px;border-radius:20px;z-index:99";document.body.appendChild(d);setTimeout(function(){d.remove()},1600)}
+
+const FLAT=[];DATA.runs.forEach(function(r){r.calls.forEach(function(c){c.run=r.id;FLAT.push(c)})});
+let CUR=null,TOOLF="*";
+
+function drawer(t, html){document.getElementById("dt").textContent=t;document.getElementById("db").innerHTML=html;document.getElementById("drawer").style.display="flex"}
+function showMsg(ri,ci,mi){var c=DATA.runs[ri-1].calls[ci-1];var m=c.msgs[mi];
+drawer("run"+ri+" 调用#"+ci+" · 第"+(mi+1)+"条 · "+m.role+" · "+fmtC(m.chars)+"字","<pre>"+esc(m.text)+"</pre>"+(m.toolCalls&&m.toolCalls.length?"<h4>tool_calls</h4><pre>"+esc(pretty(m.toolCalls))+"</pre>":""))}
+function copyCall(){if(CUR)copyText(JSON.stringify(CUR,null,2))}
+
+function callHead(c){return "<b>调用 #"+c.i+"</b><span class=chip>"+hh(c.ts)+"</span><span class=chip>"+esc(c.provider)+"/"+esc(c.model)+"</span><span class=chip>"+(c.msgsCount?("消息 "+c.msgsCount+" 条"):"无消息列表输入")+"</span><span class=chip>新增 "+c.newCount+"</span><span class=chip>绑定工具 "+c.toolsBound+"</span>"+(c.runKind?"<span class=chip>"+esc(c.runKind)+"</span>":"")}
+function msgHtml(ri,ci,c,i){var m=c.msgs[i];var isNew=i>=c.newIdxStart;
+return '<div class="msgline exp'+(isNew?"":" dim")+'" id="m_'+ri+"_"+ci+"_"+i+'" onclick="showMsg('+ri+","+ci+","+i+')">'+badge(m.role)+(m.name?' <span class=chip>'+esc(m.name)+"</span>":"")+(m.toolCallId?' <span class=chip>id:'+esc(String(m.toolCallId).slice(0,10))+"</span>":"")+' <span class=muted>'+fmtC(m.chars)+"字</span> "+esc(m.text.slice(0,150))+(isNew?'<span class=newbadge>NEW</span>':"")+"</div>"}
+function tcardHtml(ri,ci,j,tc){return '<div class="tcard fold'+(TOOLF!=="*"&&tc.name===TOOLF?" toolhit":"")+'" id="tc_'+ri+"_"+ci+"_"+j+'"><div class="th exp" onclick="tg(this)">🔧 '+esc(tc.name)+' <span class=muted>'+(tc.result?tc.resultChars+"字结果":"（无结果记录）")+'</span></div><div class="tb"><div><b>args</b></div><pre>'+esc(pretty(tc.args))+"</pre><div><b>result</b></div><pre>"+esc(tc.result==null?"（无）":tc.result)+"</pre></div></div>"}
+
+function renderMain(){var run=CUR;var el=document.getElementById("main");var h="";
+h+='<div class=muted style="margin-bottom:10px">运行 '+run.id+" · "+esc(run.title)+" · "+hh(run.start)+" → "+hh(run.end)+" · "+run.calls.length+" 次调用"+(TOOLF!=="*"?" · 工具筛选:"+esc(TOOLF):"")+"</div>";
+run.calls.forEach(function(c){var toolhit=TOOLF!=="*"&&c.turnToolCalls.some(function(t){return t.name===TOOLF});
+h+='<div class="call fold'+(toolhit?" open toolhit":"")+'" id="call_'+run.id+"_"+c.i+'"><div class="hd exp" onclick="tg(this)">'+callHead(c)+'</div><div class="bd">';
+h+=c.msgs.map(function(m,i){return msgHtml(run.id,c.i,c,i)}).join("");
+if(c.turnToolCalls.length){h+='<h4 style="margin:8px 0 2px">工具往返 '+c.turnToolCalls.length+" 次（模型响应发起 → 工具结果随本请求到达）</h4>";
+c.turnToolCalls.forEach(function(tc,j){h+=tcardHtml(run.id,c.i,j,tc)});}
+else h+='<div class=muted style="margin-top:6px">本请求无工具往返</div>';
+h+="</div></div>";});
+el.innerHTML=h;applyOnlyNew();}
+function applyOnlyNew(){var on=document.getElementById("onlynew").checked;document.querySelectorAll("#main .msgline.dim").forEach(function(e){e.style.display=on?"none":""})}
+
+function renderSide(){document.getElementById("side").innerHTML=DATA.runs.map(function(r){if(TOOLF!=="*"&&!r.calls.some(function(c){return c.turnToolCalls.some(function(t){return t.name===TOOLF})}))return"";
+return '<div class="run" id="run'+r.id+'" onclick="pick('+r.id+')"><div class="t"><span class="badge kind-'+r.kind+'">'+esc(r.title)+"</span></div>"+'<div class="q">'+esc(r.task)+"</div>"+(r.lastAi?'<div class="q">↳ 末条AI: '+esc(r.lastAi)+"</div>":"")+'<div class="s">'+r.calls.length+" 次调用 · "+hh(r.start).slice(0,11)+" · 工具: "+(r.toolsUsed.map(function(t){return esc(t)}).join(" ")||"无")+"</div></div>"}).join("")||'<div class=muted style="padding:10px">无匹配 run</div>'}
+function pick(id){document.querySelectorAll(".run").forEach(function(e){e.classList.remove("on")});var card=document.getElementById("run"+id);if(card)card.classList.add("on");CUR=DATA.runs[id-1];exitSearch();renderMain();document.getElementById("main").scrollTop=0}
+function onTool(){TOOLF=document.getElementById("ftool").value;var q=document.getElementById("q");if(q.value.trim().length>=2){onSearch()}else{renderSide();if(CUR)renderMain()}}
+
+function onSearch(){var q=document.getElementById("q").value.trim();if(q.length<2){document.getElementById("stat").textContent="";if(CUR){renderSide();renderMain()}return}
+var ql=q.toLowerCase();var hits=[];
+FLAT.forEach(function(c){c.msgs.forEach(function(m,i){var t=m.text.toLowerCase();var idx=t.indexOf(ql);while(idx>=0&&hits.length<400){hits.push({ri:c.run,ci:c.i,mi:i,m:m,at:idx});idx=t.indexOf(ql,idx+1)}})});
+var el=document.getElementById("main");var h='<div style="margin-bottom:10px"><b>搜索 "'+esc(q)+'"</b> · '+hits.length+" 处命中 <button onclick=\"exitSearch();renderMain()\">返回回放</button></div>";
+hits.slice(0,200).forEach(function(x){var s=Math.max(0,x.at-60);
+h+='<div class=hrow onclick="jump('+x.ri+","+x.ci+","+x.mi+')"><span class=chip>run'+x.ri+" #"+x.ci+"</span>"+badge(x.m.role)+'<span class=muted>'+fmtC(x.m.chars)+"字</span><div style=\"margin-top:3px;font-size:12px\">…"+esc(x.m.text.slice(s,x.at))+"<mark>"+esc(x.m.text.substr(x.at,q.length))+"</mark>"+esc(x.m.text.substr(x.at+q.length,90))+"…</div></div>"});
+el.innerHTML="<div id=hits>"+h+"</div>";document.getElementById("stat").textContent="搜索模式 · 点击命中跳回时间轴"}
+function jump(ri,ci,mi){var run=DATA.runs[ri-1];CUR=run;
+document.querySelectorAll(".run").forEach(function(e){e.classList.remove("on")});var card=document.getElementById("run"+ri);if(card)card.classList.add("on");
+exitSearch();document.getElementById("onlynew").checked=false;renderMain();
+var callEl=document.getElementById("call_"+ri+"_"+ci);if(callEl)callEl.classList.add("open");
+var msgEl=document.getElementById("m_"+ri+"_"+ci+"_"+mi);if(msgEl){msgEl.classList.add("hit");msgEl.scrollIntoView({block:"center"});}
+document.getElementById("stat").textContent="已定位 run"+ri+" 调用#"+ci}
+function exitSearch(){document.getElementById("stat").textContent=""}
+
+(function(){var tools={};FLAT.forEach(function(c){c.turnToolCalls.forEach(function(t){tools[t.name]=1})});var ts=Object.keys(tools).sort();
+document.getElementById("ftool").innerHTML='<option value="*">全部工具</option>'+ts.map(function(t){return "<option>"+esc(t)+"</option>"}).join("");
+renderSide();if(DATA.runs.length)pick(DATA.runs[DATA.runs.length-1].id);})();
+</script></body></html>

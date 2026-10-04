@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -55,6 +56,31 @@ def _content_text(content) -> str:
             parts.append(b if isinstance(b, str) else json.dumps(b, ensure_ascii=False))
         return "\n".join(parts)
     return str(content or "")
+
+
+def _one_line(s: str, n: int) -> str:
+    return re.sub(r"\s+", " ", s or "").strip()[:n]
+
+
+def classify_run(calls: list[dict]) -> tuple[str, str, str]:
+    """(kind, badge title, task excerpt) — pure heuristics over the first request."""
+    first = calls[0]
+    msgs = first.get("messages") or []
+    if not msgs:
+        return "internal", "内部调用", "非消息列表输入（memory judge 等）"
+    human = next((m for m in msgs if m.get("role") == "human"), None)
+    htext = _content_text(human.get("content")) if human else ""
+    stext = _content_text(msgs[0].get("content")) if msgs and msgs[0].get("role") == "system" else ""
+    m = re.search(r"〔当日信息包·(\d{4}-\d{2}-\d{2})〕", htext)
+    if m:
+        return "daily", "日报任务 · 数据日 " + m.group(1), _one_line(htext, 70)
+    if "主动给" in htext and "qq_push" in htext.lower():
+        return "proactive", "主动推送", _one_line(htext, 70)
+    if "聊天搭子" in stext + htext or "口语化即兴回应" in stext + htext:
+        return "chat", "QQ 快答", _one_line(htext, 70)
+    if human:
+        return "chat", "QQ 对话", _one_line(htext, 70)
+    return "other", "其他调用", _one_line(htext, 70)
 
 
 def build_runs(records: list[dict]) -> list[dict]:
@@ -129,10 +155,29 @@ def build_runs(records: list[dict]) -> list[dict]:
                 "newIdxStart": prev_count,
                 "turnToolCalls": tcs,
             })
+        tools_used: list[str] = []
+        last_ai_text = ""
+        for c in call_objs:
+            for tc in c["turnToolCalls"]:
+                if tc["name"] and tc["name"] not in tools_used:
+                    tools_used.append(tc["name"])
+        # 产出线索：最后一次请求新增窗口里的末条 AI 文本（真正的最终回复不落本日志，
+        # 已在 logs/scheduled 存档——此处仅为侧栏摘要线索）
+        last_calls_msgs = call_objs[-1]["msgs"] if call_objs else []
+        for m in reversed(last_calls_msgs[call_objs[-1]["newIdxStart"]:] if call_objs else []):
+            if m["role"] == "ai" and m["text"].strip():
+                last_ai_text = m["text"]
+                break
+        kind, title, task = classify_run(calls)
         out.append({
             "id": ri,
+            "kind": kind,
+            "title": title,
+            "task": task,
+            "lastAi": _one_line(last_ai_text, 70),
             "start": calls[0].get("ts"),
             "end": calls[-1].get("ts"),
+            "toolsUsed": tools_used,
             "calls": call_objs,
         })
     return out
@@ -155,7 +200,10 @@ def main() -> int:
     blob = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
 
     out_dir = Path(__file__).resolve().parent
+    tpl_a_file = out_dir / "template_a.html"
     for name, tpl in TEMPLATES.items():
+        if name == "demo_a_timeline.html" and tpl_a_file.is_file():
+            tpl = tpl_a_file.read_text(encoding="utf-8")
         html = tpl.replace("__DATA__", blob).replace("__DATE__", args.date)
         path = out_dir / name
         path.write_text(html, encoding="utf-8")
