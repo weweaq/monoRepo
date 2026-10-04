@@ -76,7 +76,7 @@ flowchart TD
             COR --> CB
             PRE --> CB
         end
-        SIP["daily_info_pack.SOURCES 注册表<br/>9 源 key/cap/priority/builder<br/>classify_body 四态→header 状态<br/>(状态行守卫: - 开头+关键词≤行首8字符)<br/>_cap_lines 行级截断<br/>_assemble_blocks 整块丢弃熔断<br/>_LONG_TERM 采样: _compact_long_term<br/>global_mem_anchor 全保留+编年史尾窗单一截断"]
+        SIP["daily_info_pack.SOURCES 注册表<br/>9 源 key/cap/priority/builder<br/>(config/info_pack.json 覆盖预算<br/>·评审页 /config 改完即生效)<br/>classify_body 四态→header 状态<br/>(状态行守卫: - 开头+关键词≤行首8字符)<br/>_cap_lines 行级截断<br/>_assemble_blocks 整块丢弃熔断<br/>_LONG_TERM 采样: _compact_long_term<br/>global_mem_anchor 全保留+编年史尾窗单一截断"]
         HP[("data/logs/info_pack_health.jsonl<br/>status/chars/full_chars/detail_chars<br/>write_pack_health")]
         DT[("data/logs/pack_detail/{date}/{key}.md<br/>三节: 完整取数详情/渲染文本/实际进包<br/>write_pack_detail · 保留90天<br/>+ _FACT_CARD.md (write_fact_card_detail)")]
         RVW["review_server :8010<br/>/review 锚点批注+diff 视图<br/>/health 矩阵 /health/source 三节归因<br/>POST /api/revise(默认)·/api/rerun(需确认)<br/>POST /api/health/refresh(↻重算体检·零LLM)"]

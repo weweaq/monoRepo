@@ -1004,3 +1004,12 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 ### [2026-10-04] v3.2.1 追补：体检手动刷新按钮（`POST /api/health/refresh`）
 
 用户问体检刷新怎么触发（当时仅 日报生成自动落盘 / backfill CLI 两路）并建议页面加按钮。`backfill_health` 抽出单日重放原语 `refresh_day(cfg, date)`（允许当日=以当前数据回看，拒未来；当日跳过策略保留在 CLI 的 backfill_range）；review_server 新增 `POST /api/health/refresh`（token 保护、同步秒级、零 LLM 零邮件），`/health` 矩阵导航与 `/health/source` 单源页（含空态）挂「↻ 重算体检」按钮（token 存 localStorage 与评审页共用，401 自动提示重输）。矩阵同日 jsonl 后行覆盖先行，刷新即时生效，服务无需重启。测试 +6（refresh_day 3 + 路由 5 内含按钮渲染断言，合计 test_backfill_health 6 / test_review_server 40 项全绿）；ruff 全仓通过。实测：8011 临时实例闭环验证（401/真实 token 重算 2026-10-02）后重启 8010 正式实例，按钮渲染与当日（10-04）刷新均真实验证通过。
+
+### [2026-10-04] v3.2.2 追补：逐源预算网页配置（`/config` + `POST /api/config/sources`）
+
+用户提出"每个源怎么截取、最大截取多少应做成配置项，网页上改完就生效"。实现：
+- **配置层**（daily_info_pack）：`config/info_pack.json` 覆盖代码默认——每源 `cap`（最大截取字符，200~8000 钳制）/`priority`（熔断顺序，1~999，稳定排序）/`enabled`（停用源不取数不进包，stats 记 disabled 态）+ `pack_budget`（3000~20000）。`build_info_pack_report` 每次构建**现读现用**，改完下一次构建/重算体检即生效，无需重启；文件缺失/损坏全走代码默认。`effective_source_caps` 供 `_LONG_TERM` builder 内部单一截断取用；`write_pack_health` 的 budget 字段如实记录本次生效值。
+- **采样方向不开放配置**（取最近/聚合 topN 是每源固有策略）——防把 v3.2 刚修的头部截断类 bug 做成可配项再踩。
+- **评审服务**：`GET /config` 源预算页（每源显示最近一天 进包/截断前 用量辅助定预算；token 存 localStorage 与评审页共用）+ `POST /api/config/sources`（token 保护，未知源 key 400、预算越界 400、原子写 .tmp→replace）。矩阵状态样式新增 disabled（灰）。
+- **实测闭环**（8011 临时实例 → 8010 正式实例重启后复核）：页面渲染 ✓；保存 `_FILES cap=600 + _NCM disabled` ✓；重算 2026-10-03 体检后 NCM=disabled、FILES chars=565/full=704（新 cap 生效）✓；验证后已删除测试配置文件恢复默认。
+- 测试 +11（config 层 5 + 路由/页面 6），test_daily_info_pack 47 / test_review_server 45 项全绿；ruff 全仓通过。
