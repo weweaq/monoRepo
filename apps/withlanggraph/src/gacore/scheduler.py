@@ -344,7 +344,7 @@ def _build_job_prompt(job: Job, cfg: Config, for_day: str | None = None) -> str:
 
             # ---- C4③/C8 注入块：块顺序即优先级，人工输入恒在信息包之前。----
             # 订正/偏好块独立于 PACK_BUDGET（_cap_lines 自带上限），保证最高优先级
-            # 素材不会被 10 源预算挤掉；correction_chars 进 health jsonl 供观测。
+            # 素材不会被 9 源预算挤掉；correction_chars 进 health jsonl 供观测。
             corrections_block = ""
             prefs_block = ""
             correction_chars = 0
