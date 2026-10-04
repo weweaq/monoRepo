@@ -960,3 +960,26 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 ### [2026-10-04] v3.1.3 追补：体检历史补录 CLI（`079e3ad`）
 
 用户问"10-02 为什么没有、能都补全吗"——体检 jsonl 10-04 才上线，此前日期无产物。新增 `gacore/backfill_health.py`（`python -m gacore.backfill_health --from --to`）：逐日重放 build_info_pack_report（取数源全部支持按天查询），trigger=backfill 区分真实运行；当日/未来跳过、单日失败不断链；事实卡支线一并补录。诚实边界：补的是"以当前数据回看该日"（_LONG_TERM/_MEMORY 为当前态；B站/Edge 受历史窗口限制，查不到如实 missing_data）。已执行 2026-08-05 ~ 2026-10-02：**59/59 天全部成功**，jsonl 60 天完整覆盖；早于 09-05 的日期 CHAT 如实 missing_data（QQ 日志 09-05 才开始）。测试 3 项。
+
+## [2026-10-04] v3.2 信息源采样修正：_LONG_TERM 锚点+尾窗 / _CHAT 取最近 / classify 状态行守卫
+
+**背景**：用户排查 `_LONG_TERM` 源发现两个问题——数据从哪来、为何"每次都取前几个"导致新增丢失。实测确认且比预想严重：`global_mem_insight.txt`（L1 编年史，append-only，修订也追加尾部，现 84 行/~24k 字符，跨 08-02~10-04）经 `_summarize_long_term`（前 40 行 → 08-02~09-07/7877 字符）再经 `_LONG_TERM_CAP=1600` 字符截断，**日报 LLM 每天只看到编年史开头 08-02~08-27**；结婚/领证/大帅离职/mono 迁移等最近数周全部不可见，且修订在尾部=专保留过时版本。60 天 health 数据佐证：full_chars 恒 7877、chars 恒 1604、status 恒 missing_data（假阳性）。
+
+**全源排查**（9 源逐一走查 + 60 天 jsonl 实证）：
+- 同类问题 2 处：`_LONG_TERM`（上述）；`_CHAT` 取当日**前** 15 条——日志按时间追加，丢晚间消息。
+- 边界诚实性 2 处：`_BILI`（单次拉 50 条）/`_EDGE`（100 条）的 detail 声称"全部"但拉满窗口时静默截断。
+- 无问题 5 源：`_BILI`/`_MEDIA`/`_FILES`（按计数聚合非时间线头部）、`_GIT`（date-order 最新在前，截断丢最旧合理，仅 8 天触顶）、`_NCM`/`_MEMORY`（静态基线/单份产物，无"新增丢失"形态）。
+
+**已完成**：
+- `scheduler.py`：新增 `_long_term_anchor`（读 `memory/global_mem_anchor.txt` 人工策展固定锚，`# ` 注释不注入）与 `_compact_long_term(anchor, text, max_chars)`（锚全保留 + 编年史尾部窗口，先按行数取尾再按字符预算从最旧端丢行，尾注按 `[YYYY-MM-DD]` 标注覆盖范围）；`_summarize_long_term` 语义改为尾部窗口；rollover `long_term_md` 同口径（预算 8000 保持原量级）。
+- `daily_info_pack.py`：`_build_long_term_picture` 改用 `_compact_long_term(max_chars=_LONG_TERM_CAP)` 单一截断，detail=锚+编年史全文；`_build_chat` 取最近 15 条；`classify_body` 状态行守卫（`- ` 开头 + 关键词 ≤ 行首 8 字符，补 4 个缺失模式）修 60 天 missing_data 假阳性；`_BILI`/`_EDGE` detail 拉满窗口加"更早记录可能未覆盖"尾注。
+- 锚点文件 `memory/global_mem_anchor.txt`（本地策展，gitignore 覆盖不入库）：生日/婚姻/居住/职业引路人/八段锦/长期兴趣主线 6 行，每行括注来源日期。
+- 测试：test_daily_info_pack 新增/改写 8 项（尾窗语义、锚保留+单一截断、仅锚点、classify 守卫×3、窗口标注×2）；受影响断言同步。全 app 回归 1207 passed。
+
+**实测验证**（真实数据 build_info_pack_report('2026-10-04')）：`_LONG_TERM` status=ok（60 天来首次）、full=chars=1543≤1600 单一截断生效、进包内容=锚点 6 行+编年史尾窗（覆盖 2026-10-03~10-04），最新条目可见。
+
+**偏差说明**：锚点内容为本会话从编年史策展的初版，用户可自行增删（改文件即可，机制无感知）；行数上限 `_LONG_TERM_LINES=40` 先于字符预算生效，故字符预算 1600 少见触顶。
+
+**待办更新**：
+- [ ] 【已排期后续优化】LLM 定期蒸馏：把 ~24k 字符编年史定期蒸馏为"当前画像摘要"（接 8-6 memory proxy 课题），替代采样窗口成为画像 compact 的最终形态——用户确认必定要做，本期先以锚点+尾窗过渡。
+- [ ] 观察 3 天日报：长期画像是否引用到 09 月以后的事实（尾窗生效的写作侧证据）。
