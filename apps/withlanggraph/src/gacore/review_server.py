@@ -986,6 +986,9 @@ def _config_page(cfg: Config) -> str:
 
 
 _DC_CSS = """
+.dc-tag{display:inline-block;font-size:12px;line-height:18px;border-radius:10px;padding:0 8px;background:#ddf4ff;color:#0969da;white-space:nowrap}
+.dc-tag.dc-none{background:#ffebe9;color:#cf222e}
+.dc-tag.dc-side{background:#fff8c5;color:#9a6700}
 .layout{display:flex;gap:14px;align-items:flex-start}
 .dc-nav{width:250px;background:var(--card,#fff);border:1px solid var(--line,#d0d7de);border-radius:6px;position:sticky;top:12px;max-height:calc(100vh - 24px);overflow:auto}
 .dc-nav .search{padding:8px;border-bottom:1px solid var(--line,#d0d7de)}
@@ -1042,7 +1045,7 @@ def _data_page(cfg: Config) -> str:
         "var C=" + payload + ";"
         "function esc(s){var d=document.createElement('div');d.textContent=String(s);return d.innerHTML;}"
         "function tag(c){var none=c.indexOf('无')===0,side=c.indexOf('system prompt')>=0;"
-        "return '<span class=\"tag'+(none?' none':(side?' side':''))+'\">'+esc(c)+'</span>';}"
+        "return '<span class=\"dc-tag'+(none?' dc-none':(side?' dc-side':''))+'\">'+esc(c)+'</span>';}"
         "var nav=document.getElementById('dcnav'),tb=document.querySelector('#dctb tbody'),ftb=document.querySelector('#dcfiles tbody');"
         "C.tables.forEach(function(t){var fact=t.kind==='事实/过程';"
         "var tr=document.createElement('tr');tr.dataset.k=t.kind;if(!fact)tr.className='dc-hid';"
@@ -1059,7 +1062,7 @@ def _data_page(cfg: Config) -> str:
         "+'<div style=\"display:flex;align-items:center;gap:6px\"><span class=\"bar\" style=\"width:'+Math.max(v*120/mx,1)+'px\"></span>'"
         "+'<span class=\"num\" style=\"font-size:12px\">'+v+'</span></div>';}).join('');"
         "p.innerHTML='<h2 style=\"margin-top:0\">events / '+esc(e.type)+' '"
-        "+(e.consumer.indexOf('无')===0?'<span class=\"tag none\">无消费方·潜在新源</span>':'')+'</h2>'"
+        "+(e.consumer.indexOf('无')===0?'<span class=\"dc-tag dc-none\">无消费方·潜在新源</span>':'')+'</h2>'"
         "+'<div class=\"dc-kv\"><span class=\"k\">总量</span><b>'+e.total.toLocaleString()+' 条</b>'"
         "+'<span class=\"k\">最新事件</span><span>'+esc(e.last)+'</span>'"
         "+'<span class=\"k\">消费方</span><span>'+esc(e.consumer)+'</span>'"
@@ -1096,12 +1099,12 @@ def _data_page(cfg: Config) -> str:
         ".then(function(r){return r.json();})"
         ".then(function(j){if(!j.ok)return;"
         "document.getElementById('dcnote').textContent='该日共 '+j.total.toLocaleString()+' 条，已全部展示（按时间倒序）';"
-        "document.getElementById('dcloads').innerHTML=j.samples.map(function(s){return '<pre>'+s.ts+'  '+esc(s.payload)+'</pre>';}).join('');});};}"
+        "document.getElementById('dcloads').innerHTML=j.samples.map(function(s){return '<pre>'+s.ts+'  '+esc(s.payload)+'</pre>';}).join('');});};"
         "C.events.forEach(function(e,i){var mx=Math.max.apply(null,e.daily.concat([1]));"
         "var spark=e.daily.map(function(v){return '<i style=\"height:'+Math.max(v*12/mx,1)+'px\" class=\"'+(v===mx&&v?'hot':'')+'\"></i>';}).join('');"
         "var none=e.consumer.indexOf('无')===0;"
         "var b=document.createElement('button');b.dataset.i=i;b.dataset.t=e.type;"
-        "b.innerHTML='<span class=\"row1\"><span>'+esc(e.type)+(none?' <span class=\"tag none\">未接</span>':'')+'</span>'"
+        "b.innerHTML='<span class=\"row1\"><span>'+esc(e.type)+(none?' <span class=\"dc-tag dc-none\">未接</span>':'')+'</span>'"
         "+'<span class=\"num\">'+e.total.toLocaleString()+'</span></span>'"
         "+'<span class=\"spark\">'+spark+'</span>'"
         "+'<span class=\"meta\"><span class=\"cs'+(none?' none':'')+'\">→ '+esc(e.short)+'</span>'"
