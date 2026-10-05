@@ -700,6 +700,44 @@ class TestSourceConfig:
         _, stats = dip.build_info_pack_report("2026-09-08", cfg)
         assert stats[0]["chars"] <= 340 and stats[0]["full_chars"] > 300
 
+    def test_config_page_renders_fetch_limit_column(self, tmp_path: Path, monkeypatch):
+        """v3.2.4 拉取条数旋钮：仅 _BILI/_EDGE 有输入框，其余源显示 —。"""
+        c = _client(Config.for_tests(tmp_path), monkeypatch)
+        page = c.get("/config").text
+        assert "拉取条数" in page
+        assert 'id="fl__BILI"' in page and 'id="fl__EDGE"' in page
+        assert 'id="fl__GIT"' not in page  # 无旋钮源不渲染输入框
+
+    def test_post_fetch_limit_roundtrip_and_validation(self, tmp_path: Path, monkeypatch):
+        from gacore.daily_info_pack import _FETCH_LIMIT_SPECS
+
+        cfg = Config.for_tests(tmp_path)
+        c = _client(cfg, monkeypatch)
+        # 合法：_BILI fetch_limit=30 落盘
+        r = c.post("/api/config/sources",
+                   json={"pack_budget": 8000, "sources": {"_BILI": {"fetch_limit": 30}}},
+                   headers=_headers())
+        assert r.status_code == 200 and r.json()["ok"] is True
+        written = json.loads((cfg.root / "config" / "info_pack.json").read_text(encoding="utf-8"))
+        assert written["sources"]["_BILI"]["fetch_limit"] == 30
+        # 构建现读现用：builder 以新值取数
+        from gacore import daily_info_pack as dip
+        captured = {}
+        monkeypatch.setattr(dip, "_BILLI_FN", lambda **k: captured.update(k) or {"entries": []})
+        dip._build_bili("2026-09-08", cfg)
+        assert captured["limit"] == 30
+        # 越界 → 400
+        r2 = c.post("/api/config/sources",
+                    json={"pack_budget": 8000, "sources": {"_BILI": {"fetch_limit": 5000}}},
+                    headers=_headers())
+        assert r2.status_code == 400
+        # 无旋钮源带 fetch_limit → 400
+        assert "_GIT" not in _FETCH_LIMIT_SPECS
+        r3 = c.post("/api/config/sources",
+                    json={"pack_budget": 8000, "sources": {"_GIT": {"fetch_limit": 30}}},
+                    headers=_headers())
+        assert r3.status_code == 400
+
 
 class TestNoStore:
     """HTML 页统一 no-store：重算体检后 location.reload() 必须拿到新页（v3.2.2 追补）。"""

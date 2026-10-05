@@ -902,3 +902,27 @@ def test_phone_sources_registered_and_config_disabled(tmp_path, monkeypatch):
     assert "〔手机·通知摘要" not in pack
     assert "〔手机·位置轨迹" in pack and "〔手机·使用统计" in pack
 
+
+
+def test_fetch_limit_knob(tmp_path, monkeypatch):
+    """v3.2.4 fetch_limit 旋钮：config 覆盖 + 越界钳制 + 默认值；_BILI/_EDGE 同机制。"""
+    cfg = _cfg(tmp_path)
+    captured: dict = {}
+    monkeypatch.setattr(dip, "_BILLI_FN", lambda **k: captured.update(k) or {"entries": [], "total": 0})
+    monkeypatch.setattr(dip, "_BROWSER_FN", lambda **k: captured.setdefault("edge", k) or {"entries": []})
+
+    # 默认：无 config → _BILI 默认 100
+    dip._build_bili("2026-09-02", cfg)
+    assert captured["limit"] == dip._BILI_FETCH_LIMIT
+    # 覆盖：30 生效
+    _write_source_config(cfg, {"sources": {"_BILI": {"fetch_limit": 30}}})
+    dip._build_bili("2026-09-02", cfg)
+    assert captured["limit"] == 30
+    # 越界钳制：5000 → hi=100
+    _write_source_config(cfg, {"sources": {"_BILI": {"fetch_limit": 5000}}})
+    dip._build_bili("2026-09-02", cfg)
+    assert captured["limit"] == 100
+    # _EDGE 同旋钮
+    _write_source_config(cfg, {"sources": {"_EDGE": {"fetch_limit": 40}}})
+    dip._build_edge("2026-09-02", cfg)
+    assert captured["edge"]["limit"] == 40

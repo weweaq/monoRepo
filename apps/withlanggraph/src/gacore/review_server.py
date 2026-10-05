@@ -915,7 +915,13 @@ def _config_page(cfg: Config) -> str:
 
     改完即时生效的机制：build_info_pack_report 每次构建现读该文件，无需重启任何服务。
     """
-    from gacore.daily_info_pack import PACK_BUDGET, SOURCES, load_source_config
+    from gacore.daily_info_pack import (
+        PACK_BUDGET,
+        SOURCES,
+        _FETCH_LIMIT_SPECS,
+        effective_fetch_limit,
+        load_source_config,
+    )
 
     ov = load_source_config(cfg)
     src_ov: dict[str, dict] = {k: v for k, v in (ov.get("sources") or {}).items() if isinstance(v, dict)}
@@ -933,12 +939,21 @@ def _config_page(cfg: Config) -> str:
             if u.get("full_chars") is not None
             else "—"
         )
+        if spec.key in _FETCH_LIMIT_SPECS:
+            d, lo, hi = _FETCH_LIMIT_SPECS[spec.key]
+            fl_cell = (
+                f'<td><input id="fl_{spec.key}" type="number" value="{effective_fetch_limit(cfg, spec.key)}"'
+                f' min="{lo}" max="{hi}" step="10" style="width:64px"></td>'
+            )
+        else:
+            fl_cell = '<td class="muted" style="text-align:center">—</td>'
         rows.append(
             "<tr>"
             f"<th>{html.escape(spec.key)}</th>"
             f"<td>{html.escape(u.get('status', '') or '—')}</td>"
             f"<td>{usage_txt}</td>"
             f'<td><input id="cap_{spec.key}" type="number" value="{cap}" min="200" max="8000" step="50" style="width:80px"></td>'
+            f"<td>{fl_cell}</td>"
             f'<td><input id="prio_{spec.key}" type="number" value="{prio}" min="1" max="999" style="width:64px"></td>'
             f'<td><input id="en_{spec.key}" type="checkbox"{" checked" if enabled else ""}></td>'
             "</tr>"
@@ -947,10 +962,11 @@ def _config_page(cfg: Config) -> str:
     body = (
         "<h1>源预算配置</h1>"
         '<div class="sub">改完保存即生效（下一次日报构建 / 「↻ 重算体检」使用新值，无需重启）。'
-        "cap=该源最大截取字符（进包预算，超出行级截断）；priority=整包超预算时的熔断顺序（越小越优先保留）；"
-        "停用的源不取数不进包。采样方向（取最近/聚合 topN）是每源固有策略，不在配置面。</div>"
+        "cap=该源最大截取字符（进包预算，超出行级截断）；拉取条数=单次取数窗口大小（仅部分源有此旋钮，"
+        "方向仍固化为取最近）；priority=整包超预算时的熔断顺序（越小越优先保留）；"
+        "停用的源不取数不进包。</div>"
         "<table><thead><tr><th>源</th><th>最近状态</th><th>最近 进包/截断前</th><th>cap（字符）</th>"
-        "<th>priority</th><th>启用</th></tr></thead>"
+        "<th>拉取条数</th><th>priority</th><th>启用</th></tr></thead>"
         f'<tbody>{"".join(rows)}</tbody></table>'
         '<div style="margin:12px 0">整包预算 PACK_BUDGET：'
         f'<input id="pack_budget" type="number" value="{budget}" min="3000" max="20000" step="250" style="width:90px"> 字</div>'
@@ -966,7 +982,8 @@ def _config_page(cfg: Config) -> str:
         "var sources={};keys.forEach(function(k){"
         "sources[k]={cap:+document.getElementById('cap_'+k).value,"
         "priority:+document.getElementById('prio_'+k).value,"
-        "enabled:document.getElementById('en_'+k).checked};});"
+        "enabled:document.getElementById('en_'+k).checked};"
+        "var fl=document.getElementById('fl_'+k);if(fl)sources[k].fetch_limit=+fl.value;});"
         'fetch("/api/config/sources",{method:"POST",'
         'headers:{"Content-Type":"application/json","X-Review-Token":t},'
         'body:JSON.stringify({pack_budget:+document.getElementById("pack_budget").value,sources:sources})})'
@@ -1559,6 +1576,7 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             _BUDGET_MIN,
             _CAP_MAX,
             _CAP_MIN,
+            _FETCH_LIMIT_SPECS,
             SOURCES,
         )
 
@@ -1577,6 +1595,14 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                 if not (_CAP_MIN <= cap <= _CAP_MAX):
                     return JSONResponse({"ok": False, "error": f"{key} cap out of range"}, status_code=400)
                 entry["cap"] = cap
+            if "fetch_limit" in o:
+                if key not in _FETCH_LIMIT_SPECS:
+                    return JSONResponse({"ok": False, "error": f"{key} has no fetch_limit knob"}, status_code=400)
+                _d, lo, hi = _FETCH_LIMIT_SPECS[key]
+                fl = int(o.get("fetch_limit") or 0)
+                if not (lo <= fl <= hi):
+                    return JSONResponse({"ok": False, "error": f"{key} fetch_limit out of range"}, status_code=400)
+                entry["fetch_limit"] = fl
             if "priority" in o:
                 prio = max(1, min(999, int(o.get("priority") or 0)))
                 entry["priority"] = prio
