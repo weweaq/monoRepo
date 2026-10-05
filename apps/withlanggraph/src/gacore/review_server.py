@@ -989,6 +989,7 @@ _DC_CSS = """
 .dc-tag{display:inline-block;font-size:12px;line-height:18px;border-radius:10px;padding:0 8px;background:#ddf4ff;color:#0969da;white-space:nowrap}
 .dc-tag.dc-none{background:#ffebe9;color:#cf222e}
 .dc-tag.dc-side{background:#fff8c5;color:#9a6700}
+.dc-pane .bar{display:inline-block;height:10px;background:#0969da;border-radius:2px}
 .layout{display:flex;gap:14px;align-items:flex-start}
 .dc-nav{width:250px;background:var(--card,#fff);border:1px solid var(--line,#d0d7de);border-radius:6px;position:sticky;top:12px;max-height:calc(100vh - 24px);overflow:auto}
 .dc-nav .search{padding:8px;border-bottom:1px solid var(--line,#d0d7de)}
