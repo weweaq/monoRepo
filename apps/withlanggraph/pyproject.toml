@@ -23,6 +23,7 @@ dependencies = [
     "fastapi",
     "uvicorn",
     "pygraphviz",
+    "mcp>=2.3.0",
 ]
 
 [project.optional-dependencies]

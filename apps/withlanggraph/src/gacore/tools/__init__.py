@@ -34,6 +34,7 @@ from .ocr_tools import ocr_image, ocr_screen
 from .qq_tools import qq_push
 from .web_tools import web_execute_js, web_scan
 from .langTrack_tools import langTrack_stats
+from .news_mcp import news_hot_list, news_list_sources, news_search
 
 __all__ = ["TOOL_NAMES", "build_tool_list"]
 
@@ -65,6 +66,9 @@ TOOL_NAMES: tuple[str, ...] = (
     "qq_push",
     "send_email",
     "langTrack_stats",
+    "news_hot_list",
+    "news_search",
+    "news_list_sources",
 )
 
 _TOOLS: tuple[BaseTool, ...] = (
@@ -95,6 +99,9 @@ _TOOLS: tuple[BaseTool, ...] = (
     qq_push,
     send_email,
     langTrack_stats,
+    news_hot_list,
+    news_search,
+    news_list_sources,
 )
 
 
