@@ -726,6 +726,19 @@ def user_tag_of(label: str) -> str:
     return label if label and label != "未知" else ""
 
 
+def region_suffix(district: str, home_district: str) -> str:
+    """异地标注（§2.6 补充）：地点区县 != 家所在区县 → "（区县）"，否则空串。
+
+    解决"张垛是哪里的张垛"：POI 名不带行政区划时，异地点补区县后缀
+    （如 张垛（当涂县））；本地（家所在区县）与未知区县不加，避免噪音。
+    """
+    d = (district or "").strip()
+    h = (home_district or "").strip()
+    if not d or not h or d == h:
+        return ""
+    return f"（{d}）"
+
+
 def format_place(place_name: str, user_tag: str) -> str:
     """compact 显示（§2.6）：真名+tag / 仅真名 / 仅 tag / 全空 → 未知地点。"""
     name = (place_name or "").strip()

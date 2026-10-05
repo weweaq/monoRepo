@@ -95,3 +95,14 @@ def run_graph() -> Callable[..., dict]:
         return graph.invoke({"messages": [HumanMessage(content=user_input)]}, config)
 
     return _run
+
+
+@pytest.fixture(autouse=True)
+def _isolated_place_semantics(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """隔离手工语义配置（place_semantics.json）：全测试封闭，绝不读真实 data/。
+
+    需要语义叠加的用例自行 monkeypatch place_semantics.CONFIG_PATH 到 tmp 文件。
+    """
+    from gacore.langTrack import place_semantics as _ps
+
+    monkeypatch.setattr(_ps, "CONFIG_PATH", tmp_path / "absent_place_semantics.json")

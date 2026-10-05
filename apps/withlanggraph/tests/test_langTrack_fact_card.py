@@ -611,7 +611,7 @@ def test_budget_omission_records_sleep_and_time_app(monkeypatch):
         (json.dumps([{"segment": "早上", "app": "代码", "value": "1.5h"}]), "dev1", "2026-08-18"),
     )
     conn.commit()
-    monkeypatch.setattr(fc, "_MAX_COMPACT_CHARS", 120)
+    monkeypatch.setattr(fc, "_MAX_COMPACT_CHARS", 200)  # 200：waterline+timeline+current+stay 可装（v3.4 时间线带异地标注后约 196 字），sleep/time_app 装不下 → budget
     card = fc.build(conn=conn, day="2026-08-18", device_id="dev1", detail="compact")
     assert card["compact_omitted"].get("sleep") == "budget"
     assert card["compact_omitted"].get("time_app") == "budget"
@@ -624,7 +624,8 @@ def test_compact_timeline_example_format():
     card = fc.build(conn=conn, day="2026-08-18", device_id="dev1", detail="compact")
     text = fc.render_compact(card)
     assert (
-        "今日轨迹：XX路1号〔家〕 00:00-08:32 → YY路2号〔公司〕 09:04-12:03 → 快餐店 12:11-12:47 → YY路2号〔公司〕 13:02-17:06；移动 3 段"
+        "今日轨迹：XX路1号〔家〕 00:00-08:32 → YY路2号〔公司〕（雨花台区） 09:04-12:03 → "
+        "快餐店（雨花台区） 12:11-12:47 → YY路2号〔公司〕（雨花台区） 13:02-17:06；移动 3 段"
         in text
     )
 
@@ -657,10 +658,12 @@ def test_compact_max_900_chars_without_mid_field_cut():
     conn.execute("UPDATE etl_state SET last_event_ts=?", (_ts(2026, 8, 18, 23, 59),))
     conn.commit()
     cur = conn.cursor()
+    # 交替两个地点构造超长轨迹（v3.4 起相邻同点 stay 会合并，不能同点连排）
     for i in range(40):
+        pid, gk = ("p_mall", "g_mall") if i % 2 == 0 else ("p_rest", "g_rest")
         cur.execute(
             "INSERT INTO stays VALUES (?,?,?,?,?,?,?,?)",
-            (100 + i, "dev1", "p_mall", "g_mall", _ts(2026, 8, 18, 13, 2) + i * 90_000,
+            (100 + i, "dev1", pid, gk, _ts(2026, 8, 18, 13, 2) + i * 90_000,
              _ts(2026, 8, 18, 13, 2) + (i + 1) * 90_000, "2026-08-18", 20),
         )
     conn.commit()
@@ -952,7 +955,7 @@ def test_v2_compact_keeps_untagged_real_place():
     conn = _make_db()
     card = fc.build(conn=conn, day="2026-08-18", device_id="dev1", detail="compact")
     text = fc.render_compact(card)
-    assert "快餐店 12:11-12:47" in text
+    assert "快餐店（雨花台区） 12:11-12:47" in text
     assert "系统标记：#new_place 德基广场" in text
     assert "31.97,118.76" not in text
 
@@ -1025,3 +1028,87 @@ def test_v2_log_built_reports_quality_fields(monkeypatch):
     _, fields = stub.infos[0]
     assert fields["daily_quality_present"] == 1
     assert fields["tag_conflict_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# 语义地点 + 异地标注 + 同点短出合并（v3.4）
+# ---------------------------------------------------------------------------
+
+
+def _short_out_db() -> sqlite3.Connection:
+    """同点短出合成库：张垛（当涂县）三段 stay + 两次同点往返；家在玄武区作异地基准。"""
+    conn = _make_db()
+    cur = conn.cursor()
+    for table in ("stays", "trips", "anomalies", "places", "place_cells"):
+        cur.execute(f"DELETE FROM {table}")
+    places = [
+        (1, "dev1", "p_home", "g_home", "家", 260, 260, 5_000_000,
+         "家小区", "XX路1号", "玄武区", "home", 0.0, "", "", "", ""),
+        (2, "dev1", "p_zd", "g_zd", "未知", 30, 30, 500_000,
+         "张垛", "安徽省马鞍山市当涂县乌溪镇张垛", "当涂县", "", 0.80, "高德POI", "", "", ""),
+    ]
+    cur.executemany("INSERT INTO places VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", places)
+    cur.executemany(
+        "INSERT INTO place_cells VALUES (?,?,?)",
+        [("dev1", "p_home", "g_home"), ("dev1", "p_zd", "g_zd")],
+    )
+    cur.executemany(
+        "INSERT INTO stays VALUES (?,?,?,?,?,?,?,?)",
+        [
+            (1, "dev1", "p_zd", "g_zd", _ts(2026, 8, 18, 0, 0), _ts(2026, 8, 18, 3, 5), "2026-08-18", 18),
+            (2, "dev1", "p_zd", "g_zd", _ts(2026, 8, 18, 3, 11), _ts(2026, 8, 18, 14, 14), "2026-08-18", 18),
+            (3, "dev1", "p_zd", "g_zd", _ts(2026, 8, 18, 15, 55), _ts(2026, 8, 18, 17, 6), "2026-08-18", 18),
+        ],
+    )
+    cur.executemany(
+        "INSERT INTO trips VALUES (?,?,?,?,?,?,?,?,?)",
+        [
+            (1, "dev1", _ts(2026, 8, 18, 3, 5), _ts(2026, 8, 18, 3, 11), 2000, "2026-08-18", "p_zd", "p_zd", None),
+            (2, "dev1", _ts(2026, 8, 18, 14, 14), _ts(2026, 8, 18, 15, 55), 434, "2026-08-18", "p_zd", "p_zd", None),
+        ],
+    )
+    conn.commit()
+    return conn
+
+
+def test_timeline_merges_same_place_short_out():
+    """相邻同点 stay 合并 + 期间短出括注 + 全同点往返改"短出"口径。"""
+    conn = _short_out_db()
+    card = fc.build(conn=conn, day="2026-08-18", device_id="dev1")
+    text = fc.render_compact(card)
+    assert (
+        "今日轨迹：张垛（当涂县） 00:00-17:06（期间 03:05 短出 2.0km、14:14 短出 0.4km）；"
+        "短出 2 次合计 2.4km" in text
+    )
+    assert card["home_district"] == "玄武区"
+    assert card["stays"][0]["region"] == "（当涂县）"
+    # 同点往返不再切成三段同名 stay
+    assert len(card["stays"]) == 3 and len([s for s in card["stays"] if s["place_id"] == "p_zd"]) == 3
+
+
+def test_semantics_tag_and_note_overlay(tmp_path, monkeypatch):
+    """place_semantics.json：tag 覆盖 DB label 进显示，note 进 StayBrief；note 不进 compact。"""
+    from gacore.langTrack import place_semantics as ps
+
+    sem_path = tmp_path / "place_semantics.json"
+    sem_path.write_text(
+        json.dumps({"places": [{"poi": "张垛", "tag": "张威的老家", "note": "乌溪镇"}]},
+                   ensure_ascii=False),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ps, "CONFIG_PATH", sem_path)
+    conn = _short_out_db()
+    card = fc.build(conn=conn, day="2026-08-18", device_id="dev1")
+    text = fc.render_compact(card)
+    assert "张垛〔张威的老家〕（当涂县） 00:00-17:06" in text
+    assert card["stays"][0]["note"] == "乌溪镇"
+    assert card["stays"][0]["user_tag"] == "张威的老家"
+
+
+def test_semantics_absent_file_is_noop():
+    """无语义配置：行为与旧版一致（无 tag 叠加、无 note），region 仍按区县差异标注。"""
+    conn = _short_out_db()
+    card = fc.build(conn=conn, day="2026-08-18", device_id="dev1")
+    assert card["stays"][0]["user_tag"] == ""
+    assert card["stays"][0]["note"] == ""
+    assert card["stays"][0]["region"] == "（当涂县）"

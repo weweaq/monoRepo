@@ -49,10 +49,12 @@ def _ts(hh: int, mm: int) -> int:
 # 字面契约快照（旧 JSON shape；只增不删——删字段/改名在此处即失败）
 # Task 7：StayBrief/TripBrief/PlaceBrief/CurrentKnown 增 PlaceRef 载荷，
 # 旧字段 label/from_label/to_label/visits 保留兼容（label=format_place）
+# v3.4：StayBrief 增 region（异地标注）/note（手工语义注记）
 STAY_BRIEF_KEYS = {
     "label", "poi", "start_hhmm", "end_hhmm", "mins",
     "place_id", "place_name", "user_tag", "name_source", "poi_fallback",
     "point_count", "avg_accuracy_m", "behavior", "district",
+    "region", "note",
 }
 TRIP_BRIEF_KEYS = {
     "start_hhmm", "end_hhmm", "dist_m", "from_label", "to_label",

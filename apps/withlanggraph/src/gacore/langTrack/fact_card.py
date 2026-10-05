@@ -32,9 +32,11 @@ from gacore.jsonl_logger import get_logger
 from gacore.langTrack.location_facts import (
     PlaceRef,
     format_place,
+    region_suffix,
     resolve_place_name,
     user_tag_of,
 )
+from gacore.langTrack import place_semantics
 from gacore.langTrack.persona import build as build_persona
 
 _TZ = datetime.timezone(datetime.timedelta(hours=8))
@@ -81,6 +83,8 @@ class StayBrief(TypedDict):
     mins: int
     point_count: int
     avg_accuracy_m: float | None
+    region: str  # 异地标注（区县 != 家所在区县 → "（区县）"，本地空串）
+    note: str  # 手工语义配置注记（place_semantics.json），无则空串
 
 
 class TripBrief(TypedDict):
@@ -142,6 +146,7 @@ class FactCard(TypedDict, total=False):
     location_as_of_ms: int | None
     data_age_min: int | None
     day_window_closed: bool
+    home_district: str  # 家所在区县（异地标注基准，§2.6 region_suffix）
     current_known: CurrentKnown | None
     screen_ms: int
     screen_hours: float
@@ -285,6 +290,8 @@ def _load_places(conn: sqlite3.Connection, device_id: str | None) -> tuple[dict,
 
     返回 (by_id, by_grid)：v2 优先按 place_id 寻址；v1/缺表按 grid_key 回落。
     读取失败降级为空索引不抛——stay 内嵌字段仍可用，展示降级为「未知地点」。
+    语义叠加：place_semantics.json 的 tag 覆盖 DB label（手工语义 > ETL 标签），
+    place dict 为本次读取的新对象，原地覆盖不影响库。
     """
     by_id: dict[str, dict] = {}
     by_grid: dict[str, dict] = {}
@@ -293,7 +300,13 @@ def _load_places(conn: sqlite3.Connection, device_id: str | None) -> tuple[dict,
     try:
         from gacore.langTrack import location_reader as lr
 
+        sem = place_semantics.load()
         for p in lr.read_places(conn, device_id=device_id):
+            sem_tag = place_semantics.resolve_tag(
+                p.get("place_id"), p.get("poi") or "", p.get("label") or "", cfg=sem
+            )
+            if sem_tag:
+                p["label"] = sem_tag
             if p.get("place_id"):
                 by_id[str(p["place_id"])] = p
             if p.get("grid_key"):
@@ -469,6 +482,7 @@ def _new_card(day: str, now_ms: int) -> FactCard:
         location_as_of_ms=None,
         data_age_min=None,
         day_window_closed=False,
+        home_district="",
         current_known=None,
         screen_ms=0,
         screen_hours=0.0,
@@ -623,6 +637,15 @@ def _fill_card(
     # 地点索引：全卡 stay/trip/place 的 PlaceRef 解析唯一数据源（§2.6）
     place_by_id, place_by_grid = _load_places(conn, dev)
 
+    # home_district：家标签点（含语义叠加后的家）取 visit_count 最高者的区县，
+    # 作为异地标注基准；无家点/无区县 → 空串（全不加后缀，不误标）
+    home_district = ""
+    for p in place_by_id.values():
+        if (p.get("label") or "") == "家" and (p.get("district") or ""):
+            home_district = p["district"]
+            break  # read_places 按访问频次降序，首个家点即最高频
+    card["home_district"] = home_district
+
     # 事实水位：ETL 优先，其次当日 stays/trips 最大 end_ts
     fallback = None
     for s in stays_raw:
@@ -705,10 +728,15 @@ def _fill_card(
             district=(place.get("district") or "") if place else "",
             behavior=(place.get("behavior") or "") if place else "",
             start_hhmm=_hhmm(cs),
-            end_hhmm=_hhmm(ce),
+            end_hhmm="24:00" if ce >= day_end_ms else _hhmm(ce),
             mins=mins,
             point_count=int((place or {}).get("point_count") or 0),
             avg_accuracy_m=s.get("avg_accuracy_m"),
+            region=region_suffix((place.get("district") or "") if place else "", home_district),
+            note=place_semantics.note_for(
+                (str(place["place_id"]) if place and place.get("place_id") else None),
+                poi,
+            ) if place else "",
         ))
 
     # location_as_of：裁剪后 stays 最大 end_ts
@@ -913,8 +941,25 @@ def _build_waterline_section(card: FactCard) -> CompactSection | None:
     return CompactSection(id="waterline", text=f"{_CARD_PREFIX}{status}）===", priority=0)
 
 
+def _trips_summary(trips: list[TripBrief]) -> str:
+    """trips 尾注口径：全部为同点往返（from/to 同 place）→ "短出 N 次合计 X.Xkm"；
+    否则维持"移动 N 段"。端点未知（place_id 缺失）按移动段处理，不冒充短出。"""
+    def _same_place(t: TripBrief) -> bool:
+        fp, tp = t.get("from_place"), t.get("to_place")
+        return bool(fp and tp and fp.get("place_id") and fp.get("place_id") == tp.get("place_id"))
+
+    if trips and all(_same_place(t) for t in trips):
+        km = sum(int(t["dist_m"] or 0) for t in trips) / 1000
+        return f"短出 {len(trips)} 次合计 {km:.1f}km"
+    return f"移动 {len(trips)} 段"
+
+
 def _build_timeline_section(card: FactCard) -> CompactSection | None:
-    """今日轨迹：按时序排列裁剪后 stays；trips 只报移动段数。"""
+    """今日轨迹：相邻同点 stay 合并（短出往返不再切成 N 段）+ 异地标注（region）。
+
+    同点往返（出去又回原地）此前把一天切成多段同名 stay，读起来是"张垛→张垛→张垛"；
+    合并后括注期间短出时刻与里程。trips 尾注走 _trips_summary 口径。
+    """
     stays = card.get("stays") or []
     trips = card.get("trips") or []
     if not stays:
@@ -923,10 +968,43 @@ def _build_timeline_section(card: FactCard) -> CompactSection | None:
                 id="timeline", text=f"今日移动：{len(trips)} 段（地点端点未知）", priority=10,
             )
         return None
-    parts = [f"{s['label']} {s['start_hhmm']}-{s['end_hhmm']}" for s in stays]
+
+    def _seg_label(s: StayBrief) -> str:
+        return f"{s['label']}{s.get('region', '')}"
+
+    # 相邻同点合并：place_id 相同（缺 place_id 时退化为同显示名才合并，避免误合）
+    groups: list[list[StayBrief]] = []
+    for s in stays:
+        if groups:
+            last = groups[-1][-1]
+            same = (
+                bool(s.get("place_id") and last.get("place_id") and s["place_id"] == last["place_id"])
+                or (
+                    not s.get("place_id") and not last.get("place_id")
+                    and _seg_label(s) == _seg_label(last)
+                )
+            )
+            if same:
+                groups[-1].append(s)
+                continue
+        groups.append([s])
+
+    def _gap_txt(group: list[StayBrief]) -> str:
+        if len(group) < 2:
+            return ""
+        gaps: list[str] = []
+        for a, b in zip(group, group[1:]):
+            for t in trips:
+                if a["end_hhmm"] <= t["start_hhmm"] and t["end_hhmm"] <= b["start_hhmm"]:
+                    gaps.append(f"{t['start_hhmm']} 短出 {int(t['dist_m'] or 0) / 1000:.1f}km")
+        return f"（期间 {'、'.join(gaps)}）" if gaps else ""
+
+    parts = [
+        f"{_seg_label(g[0])} {g[0]['start_hhmm']}-{g[-1]['end_hhmm']}{_gap_txt(g)}" for g in groups
+    ]
     line = "今日轨迹：" + " → ".join(parts)
     if trips:
-        line += f"；移动 {len(trips)} 段"
+        line += f"；{_trips_summary(trips)}"
     # 超长：保留最早 2 段 + 最近 3 段，中间折叠，禁止字符串硬切
     if len(line) > _MAX_TIMELINE_CHARS and len(parts) > 5:
         hidden = len(parts) - 5
@@ -935,7 +1013,7 @@ def _build_timeline_section(card: FactCard) -> CompactSection | None:
             f" → …另 {hidden} 段… → " + " → ".join(parts[-3:])
         )
         if trips:
-            line += f"；移动 {len(trips)} 段"
+            line += f"；{_trips_summary(trips)}"
     return CompactSection(id="timeline", text=line, priority=10)
 
 
