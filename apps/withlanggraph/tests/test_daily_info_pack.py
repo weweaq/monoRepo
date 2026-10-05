@@ -414,11 +414,15 @@ def test_classify_failed_and_empty():
 def test_bili_detail_window_note(tmp_path, monkeypatch):
     entries = [
         {"bvid": f"BV{i}", "title": f"视频{i}", "author": "UP", "viewed_at": f"2026-09-02T10:{i % 60:02d}:00"}
-        for i in range(50)
+        for i in range(100)
     ]
     monkeypatch.setattr(dip, "_BILLI_FN", lambda **k: {"entries": entries, "total": 500})
     _, _, detail_body = dip._build_bili("2026-09-02", _cfg(tmp_path))
-    assert "拉取上限 50 条" in detail_body
+    assert f"拉取上限 {dip._BILI_FETCH_LIMIT} 条" in detail_body
+    # 未触及上限时不加尾注
+    monkeypatch.setattr(dip, "_BILLI_FN", lambda **k: {"entries": entries[:99], "total": 500})
+    _, _, detail_body2 = dip._build_bili("2026-09-02", _cfg(tmp_path))
+    assert "拉取上限" not in detail_body2
 
 
 def test_edge_detail_window_note(tmp_path, monkeypatch):

@@ -68,6 +68,7 @@ _PHONE_NOTIF_CAP: int = 800  # 手机·通知摘要
 
 _LONG_TERM_LINES: int = 40  # 画像 compact 行数上限（对齐 _summarize_long_term 默认）
 _BILI_TOP: int = 20         # B站当日观看 top N
+_BILI_FETCH_LIMIT: int = 100  # 单次拉取条数上限（工具 _MAX_LIMIT=100；军规④：detail 须标注窗口边界）
 _EDGE_TOP: int = 10         # Edge 域名归并 top N
 _FILES_TOP: int = 15        # 文件活动目录聚合 top N
 _NCM_TOP: int = 10          # ncm 歌单 top N
@@ -316,7 +317,7 @@ def _build_bili(date: str, cfg: Config) -> tuple[str, str, str]:
     """B站当日观看：pack=top20，detail=当日每一笔观看（include_duration=False，避免逐条拉时长 CLI 慢调用）。"""
     title = "〔浏览·B站观看 top〕"
     try:
-        res = _BILLI_FN(limit=50, page=1, include_duration=False)
+        res = _BILLI_FN(limit=_BILI_FETCH_LIMIT, page=1, include_duration=False)
         if not isinstance(res, dict):
             return title, "- 该源失败：返回格式异常", ""
         if "error" in res:
@@ -334,8 +335,8 @@ def _build_bili(date: str, cfg: Config) -> tuple[str, str, str]:
             return f"- {ts} {t}｜UP:{author}"
 
         detail_body = "\n".join(_line(e) for e in today_entries)
-        if len(entries) >= 50:
-            detail_body += "\n（工具单次拉取上限 50 条，当日更早观看可能未覆盖）"
+        if len(entries) >= _BILI_FETCH_LIMIT:
+            detail_body += f"\n（工具单次拉取上限 {_BILI_FETCH_LIMIT} 条，当日更早观看可能未覆盖）"
         lines = [_line(e) for e in today_entries[:_BILI_TOP]]
         body = "\n".join(lines)
         if len(today_entries) > _BILI_TOP:
