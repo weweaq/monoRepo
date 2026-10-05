@@ -497,7 +497,38 @@ flowchart LR
 | poi / poi_fallback / address / district / township / business_area / parent_poi / behavior | regeo 语义回填字段 |
 | name_evidence | 地名证据（供审计） |
 
-**FactCard 位置字段（`fact_card.py:52-166`）**：`current_known`、`places`（PlaceBrief：`place_id/place_name/user_tag/name_source/point_count/visit_episodes/stay_ms`，旧字段 `visits/poi/behavior/address` 标 deprecated 仅兼容）、`stays`（StayBrief：PlaceRef 载荷 + `point_count/avg_accuracy_m`）、`trips`（TripBrief：`from_place/to_place=PlaceRef|None`，保留 `from_label/to_label`）、`anomalies`（kind/poi/detail）、`daily_location_quality`（Task 7 观测）、`tag_conflict_count`、`spatial_profile`（Task 8 `places_v2` 长期空间画像，7/30/90 客观聚合，仅 full 卡携带）。`label = format_place(place_name, user_tag)` 展示。
+**FactCard 位置字段（`fact_card.py:52-166`）**：`current_known`、`places`（PlaceBrief：`place_id/place_name/user_tag/name_source/point_count/visit_episodes/stay_ms`，旧字段 `visits/poi/behavior/address` 标 deprecated 仅兼容）、`stays`（StayBrief：PlaceRef 载荷 + `point_count/avg_accuracy_m` + v3.4 `region/note`）、`trips`（TripBrief：`from_place/to_place=PlaceRef|None`，保留 `from_label/to_label`）、`anomalies`（kind/poi/detail）、`daily_location_quality`（Task 7 观测）、`tag_conflict_count`、`spatial_profile`（Task 8 `places_v2` 长期空间画像，7/30/90 客观聚合，仅 full 卡携带）、`home_district`（v3.4：家标签点的区县，异地标注基准）。`label = format_place(place_name, user_tag)` 展示。
+
+#### 5.6 手工语义地点配置与异地标注（v3.4，`place_semantics.py` + `location_facts.region_suffix`）
+
+**动机**：regeo 只能给地理事实（POI 名/行政区划），"张垛=张威的老家"这类只有用户知道的语义由用户手工配置；"张垛是哪里的张垛"由异地标注解决（places 表已存 district/township/address，此前显示层只取 POI 名丢弃了区域）。
+
+**配置文件 `data/place_semantics.json`**（gitignore 内用户数据，手工编辑，mtime 缓存改完即生效；坏 JSON/缺文件静默降级为空配置，不挡卡）：
+
+```json
+{
+  "places": [
+    {"place_id": "7afcc1e4576ce7fc", "poi": "张垛", "tag": "张威的老家", "note": "安徽省马鞍山市当涂县乌溪镇"}
+  ],
+  "districts": [
+    {"district": "当涂县", "note": "（手写人文/背景注记）"}
+  ]
+}
+```
+
+匹配规则：places 条目 place_id 命中优先、poi 名次之（两键可同给）；`tag` 覆盖 DB label（含 家/公司，叠加在 `_load_places` 读入处，stay_minutes 分桶、format_place 全链路生效）；`note` 追加展示不覆盖；districts 按 district 名精确匹配。
+
+**消费点**：
+
+| 出口 | 行为 |
+|---|---|
+| `fact_card._load_places` | 语义 tag 覆盖 place dict 的 label（一次叠加全链路受益） |
+| StayBrief 新字段 | `region=region_suffix(district, home_district)`（区县≠家所在区县 → "（区县）"，本地/未知区县空串）；`note=place_semantics.note_for(place_id, poi)` |
+| 时间线 `_build_timeline_section` | 相邻同点 stay 合并（place_id 相同；缺 place_id 退化为同显示名），合并段括注期间短出（`（期间 03:06 短出 2.0km、…）`）；trips 尾注口径：全部 trips 均为同点往返（from/to 同 place_id）→ "短出 N 次合计 X.Xkm"，否则 "移动 N 段"（`_trips_summary`）；stay 末端命中日窗终点渲染 "24:00"（此前 "00:00"） |
+| 日报 `_build_phone_place` detail | stays 全量行带 region；追加 `地点背景：{label}——{note}` 与 `区县背景：{district}——{note}`（去重，仅 detail 不占 compact 预算） |
+| ETL `detect_route_changes` | route_change 详情端点地名化：from/to place_id 直查 places（poi>address>district）→ 无 place_id 端点 500m 内就近匹配 → 坐标兜底；v1 库缺列自动落坐标 |
+
+测试：`test_langTrack_place_semantics.py`（加载容错/规范化/tag 优先级/note/区县/mtime 重载）；fact_card 合并+语义+region 三用例、anomalies 地名化、daily_info_pack 背景行；conftest 全局 autouse fixture 将 `place_semantics.CONFIG_PATH` 指向不存在的 tmp 文件保证测试封闭。
 
 ---
 
@@ -1438,6 +1469,8 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 ③ detect_route_changes 比对
    今天同一起终点 trips.route_key="v2#d4e5f6" ≠ 昨天"v2#a1b2c3" → 通则(路线指纹不一致)
    → 写 anomalies：kind="route_change", day=today, grid_key=g_1212~
+   detail 端点地名化（v3.4）：place_id 直查 → 500m 就近 place → 坐标兜底
+   例："通勤路线变化（同日相邻出行指纹不同）: 家小区 → 张垛"
 ④ report 移动叙事 → 输出句子
    「今天通勤走的线路和平时不一样」
 ```

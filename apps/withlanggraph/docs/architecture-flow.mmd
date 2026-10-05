@@ -80,7 +80,8 @@ flowchart TD
         HP[("data/logs/info_pack_health.jsonl<br/>status/chars/full_chars/detail_chars<br/>write_pack_health")]
         DT[("data/logs/pack_detail/{date}/{key}.md<br/>三节: 完整取数详情/渲染文本/实际进包<br/>write_pack_detail · 保留90天<br/>+ _FACT_CARD.md (write_fact_card_detail)")]
         RVW["review_server :8010<br/>/review 锚点批注+diff 视图<br/>/health 矩阵 /health/source 三节归因<br/>/llm-requests 运行回放(llm_runview 重建)<br/>/data 数据目录(data_catalog 纯读盘点·按日取数 /api/data/events)<br/>POST /api/revise(默认)·/api/rerun(需确认)<br/>POST /api/health/refresh(↻重算体检·零LLM)"]
-        FC2["fact_card compact<br/>chat system prompt 注入出口<br/>9 sections (含 sleep p45/time_app p55)<br/>预算900 · compact_omitted 透传<br/>v3.3 分工: 当前时刻卡<br/>(_PHONE_* 承担当日全天事实)"]
+        PS[("data/place_semantics.json<br/>手工语义配置(v3.4): 地点tag/note·区县note<br/>place_semantics.py 加载·mtime缓存·坏文件降级")]
+        FC2["fact_card compact<br/>chat system prompt 注入出口<br/>9 sections (含 sleep p45/time_app p55)<br/>预算900 · compact_omitted 透传<br/>v3.3 分工: 当前时刻卡<br/>(_PHONE_* 承担当日全天事实)<br/>v3.4 语义叠加: 手工tag覆盖DB label·note进StayBrief<br/>异地标注 region_suffix(区县≠家)·同点短出合并"]
     end
 
     subgraph OUT["④ 退出/投递"]
@@ -112,6 +113,7 @@ flowchart TD
 
     IG --> RW --> ET --> OU
     OU --> FC2
+    PS -. "语义叠加(tag/note)" .-> FC2
     FC2 -->|"outlet=prompt<br/>system prompt"| PR
     SC -. "daily job" .-> CB
     CB --> SIP

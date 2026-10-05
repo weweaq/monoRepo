@@ -1112,3 +1112,21 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 ### [2026-10-05] v3.2.4 拉取条数上 /config——逐源 fetch_limit 旋钮 + 保存改合并语义
 
 用户要求把 _BILI 拉取上限做成网页配置项（"各个源有单独的配置项也正常"）。`_FETCH_LIMIT_SPECS`（key→默认/min/max，max 受工具硬上限约束：`_BILI`/`_EDGE` 均为 10~100，默认 100）+ `effective_fetch_limit(cfg,key)`（config `sources[key].fetch_limit` 覆盖+钳制，现读现用）；`_build_bili`/`_build_edge` 改读旋钮，窗口边界尾注随生效值。`/config` 页加「拉取条数」列（仅旋钮源有输入框，其余显示 —），POST 校验：无旋钮源带 fetch_limit 400、越界 400。**保存接口改合并语义**：实测踩坑——curl 单源 POST 曾把既有配置（NCM disabled 等）整体清掉；现 payload 只覆盖显式给出的源/字段，其余保留（页面全量发送行为不变）。测试 +2+1（daily_info_pack 旋钮覆盖/钳制/默认、review_server 列渲染/落盘回读/越界拒绝/合并保留），113 项全绿；真实 API 验证 150→400、30 落盘、页面回显 30；8010 已重启。
+
+## [2026-10-05] v3.4.0 地点语义化：手工语义配置 + 异地标注 + 同点短出合并 + route_change 地名化
+
+**背景**：用户指出 _PHONE_PLACE 轨迹输出"张垛 00:00-03:05 → 张垛 03:11-14:14 → 张垛 15:55-00:00"没有利用价值——①不知道是哪里的张垛；②"张垛=张威的老家"这类语义无处配置；③区县背景信息没用上；④同点往返被切成三段同名 stay 读起来是废话。探索确认：places 表已存完整行政区划（张垛=安徽省马鞍山市当涂县乌溪镇张垛），缺的是显示层与"人的语义"；高德行政区划/天气/静态地图 API 实测可用但人文故事类内容无 API（用户拍板语义手工配置，静态地图确认 dashboard 已有动态轨迹图不需要）。
+
+**已完成**（新模块 place_semantics.py + location_facts/fact_card/etl/daily_info_pack + 测试 + R5 同步）：
+- `place_semantics.py`：读 `data/place_semantics.json`（手工编辑，gitignore 内用户数据）——places 条目（place_id 命中优先、poi 名次之）的 `tag` 覆盖 DB label、`note` 追加展示；districts 条目区县 note。mtime 缓存改完即生效；坏文件/缺文件静默降级空配置。
+- `location_facts.region_suffix(district, home_district)`：区县≠家所在区县 → "（区县）"，本地/未知空串。
+- fact_card：`_load_places` 处语义 tag 一次叠加全链路受益（stay_minutes 分桶/format_place/PlaceRef）；卡片新增 `home_district`（家点区县，visit 降序首个）；StayBrief 新增 `region`/`note` 字段（shape 快照契约只增不删）；`_build_timeline_section` 相邻同点 stay 合并 + 括注期间短出（`（期间 03:06 短出 2.0km、15:24 短出 0.4km）`），trips 尾注口径全同点往返 → "短出 N 次合计 X.Xkm" 否则 "移动 N 段"（`_trips_summary`）；stay 末端命中日窗终点渲染 "24:00"（修 "00:00-00:00" 观感）。
+- etl `detect_route_changes`：route_change 详情端点地名化——from/to place_id 直查（poi>address>district）→ 500m 内就近 place → 坐标兜底；v1 缺列自动落坐标（历史存量行不回改）。
+- daily_info_pack `_build_phone_place` detail：stays 全量行带 region；追加 `地点背景：{label}——{note}` / `区县背景：{district}——{note}`（去重，不占 compact 预算）。
+- 测试封闭性：tests/conftest.py 全局 autouse fixture 将 place_semantics.CONFIG_PATH 指向不存在的 tmp 文件，语义用例自行写 tmp 配置。
+
+**实测验证**：真实库 2026-10-04 回算——`今日轨迹：张垛〔张威的老家〕（当涂县） 00:00-24:00（期间 03:06 短出 2.0km、15:24 短出 0.4km）；短出 2 次合计 2.4km`（原"张垛×3 段"完全消除）；`place_semantics.note_for('7afcc1e4…')` 真实命中。全仓 1333 passed + ruff 全绿。
+
+**偏差说明**：① 现有 3 项 fact_card 断言因异地标注/合并行为更新（test_compact_timeline_example_format 精串、900 字折叠用例改交替地点构造超长、budget 用例阈值 120→200）——均为契约演进而非回归；② route_change 地名化只影响新检测事件，存量 anomalies detail 保持坐标；③ 高德天气 API 仅实况/预报无历史，历史日天气背景暂缓；④ 语义配置为 data/ 下 gitignore 用户数据，格式以 tech §5.6 为准。
+
+**待办更新**：区县人文背景先手写 place_semantics.json districts note；LLM 蒸馏画像待办不变（可顺带预填区县/地点 note 后人工复核）。
