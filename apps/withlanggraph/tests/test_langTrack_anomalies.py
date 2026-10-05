@@ -668,3 +668,55 @@ class TestOffScheduleInProgressDay:
         assert [r for r in _kinds(path) if r[1] == "off_schedule"] == [
             ("2026-08-17", "off_schedule", "dev1")
         ]
+
+
+# ---------------------------------------------------------------------------
+# route_change 详情地名化（v3.4）
+# ---------------------------------------------------------------------------
+
+
+def test_route_change_detail_uses_place_names(tmp_path, anomaly_env):
+    """端点地名化：from/to place_id 命中 places.poi → detail 用地名；
+    无 place_id 的端点 500m 内就近匹配 place，再退坐标。"""
+    path = tmp_path / "lt.db"
+    _v1_db(path)
+    conn = sqlite3.connect(path)
+    # v1 库手工补 v2 端点列（真实 v2 激活库由迁移添加）
+    conn.execute("ALTER TABLE places ADD COLUMN place_id TEXT")
+    conn.execute("ALTER TABLE trips ADD COLUMN from_place_id TEXT")
+    conn.execute("ALTER TABLE trips ADD COLUMN to_place_id TEXT")
+    conn.execute(
+        "UPDATE places SET place_id='p_home', poi='家小区' WHERE grid_key=?", (HOME_GK,)
+    )
+    conn.execute(
+        "INSERT INTO places(device_id, grid_key, lat, lon, label, visit_count, is_primary, "
+        "place_id, poi) VALUES ('dev1', '31.334,118.671', 31.334, 118.671, '未知', 5, 1, 'p_zd', '张垛')"
+    )
+    conn.executemany(
+        "INSERT INTO trips(device_id, start_ts, end_ts, duration_ms, start_lat, start_lon, "
+        "end_lat, end_lon, dist_m, n_points, day, route_key, route_mode, from_place_id, to_place_id) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [
+            # 去程：家小区 → 张垛（端点均有 place_id）
+            ("dev1", _ts("2026-08-17", 8, 0), _ts("2026-08-17", 8, 30), 1_800_000,
+             31.992, 118.783, 31.334, 118.671, 60000.0, 5, "2026-08-17", "rkAAAAAA", "driving",
+             "p_home", "p_zd"),
+            # 返程起点不同处（非往返对）；终点落张垛 500m 内（31.331,118.672 ≈ 340m）无 place_id
+            ("dev1", _ts("2026-08-17", 18, 0), _ts("2026-08-17", 18, 30), 1_800_000,
+             31.330, 118.680, 31.331, 118.672, 60000.0, 5, "2026-08-17", "rkBBBBBB", "driving",
+             None, None),
+        ],
+    )
+    conn.commit()
+    etl.detect_route_changes(conn)
+    conn.close()
+
+    conn = sqlite3.connect(path)
+    rows = conn.execute(
+        "SELECT detail FROM anomalies WHERE kind='route_change' AND device_id='dev1'"
+    ).fetchall()
+    conn.close()
+    assert len(rows) == 1
+    detail = rows[0][0]
+    assert "家小区 → 张垛" in detail
+    assert "31.992" not in detail and "118.783" not in detail  # 有地名不再露坐标

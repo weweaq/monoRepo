@@ -1452,6 +1452,37 @@ def detect_route_changes(conn: sqlite3.Connection) -> int:
 
         by_dev[r["device_id"]].append(r)
 
+    # 地名化素材：place_id → 显示名（poi 优先，退地址/区县）；v1 无 place_id 列时为空。
+    # 另存坐标索引供无 from/to place 的端点就近匹配（≤500m 才认，避免冒认远点）。
+    place_names: dict[str, str] = {}
+    place_pts: list[tuple[float, float, str]] = []
+    try:
+        for p in conn.execute("SELECT place_id, poi, address, district, lat, lon FROM places"):
+            name = p["poi"] or p["address"] or p["district"] or ""
+            if not name:
+                continue
+            if p["place_id"]:
+                place_names[str(p["place_id"])] = name
+            place_pts.append((float(p["lat"]), float(p["lon"]), name))
+    except (sqlite3.OperationalError, KeyError):
+        pass  # v1 库缺列：端点全部落坐标兜底
+
+    def _endpoint_name(lat: float, lon: float, place_id: object) -> str:
+        """端点地名：place_id 直查 → 500m 内就近 place → 坐标兜底。"""
+        name = place_names.get(str(place_id)) if place_id else None
+        if name:
+            return name
+        best, best_d = "", 500.0
+        for la, lo, nm in place_pts:
+            d = hav(lat, lon, la, lo)
+            if d <= best_d:
+                best, best_d = nm, d
+        return best or f"{lat:.4f},{lon:.4f}"
+
+    def _pid(row: sqlite3.Row, key: str) -> object:
+        """v2 trips 才有 from/to_place_id；v1 行缺列返回 None（坐标兜底）。"""
+        return row[key] if key in row.keys() else None
+
     changes: list[tuple] = []
 
     PAIR_DIST = 400.0  # 往返对判距：A起点≈B终点 且 A终点≈B起点
@@ -1482,13 +1513,18 @@ def detect_route_changes(conn: sqlite3.Connection) -> int:
 
             gk = "rc:" + (cur["route_key"][:8] or "?")
 
+            from_name = _endpoint_name(
+                prev["start_lat"], prev["start_lon"], _pid(prev, "from_place_id")
+            )
+            to_name = _endpoint_name(
+                cur["end_lat"], cur["end_lon"], _pid(cur, "to_place_id")
+            )
+
             detail = (
 
                 f"通勤路线变化（同日相邻出行指纹不同）: "
 
-                f"{prev['start_lat']:.4f},{prev['start_lon']:.4f} → "
-
-                f"{cur['end_lat']:.4f},{cur['end_lon']:.4f}"
+                f"{from_name} → {to_name}"
 
             )
 
