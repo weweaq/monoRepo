@@ -1083,3 +1083,20 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 ### [2026-10-04] 追补：运行回放页折叠展开修复（CSS 优先级）
 
 用户实测 /llm-requests 点击「调用 #2」无反应。浏览器实测定位：点击本身生效（class 正确切到 `call fold open`），但 `#llmv .call>.bd{display:none}`（ID 选择器）压过无前缀的 `.call.open>.bd{display:block}`——.open 展开规则漏加 `#llmv` 前缀，**全页所有折叠（调用/工具卡片）自上线起均不可展开**。修复两条规则补 `#llmv` 前缀并加回归测试（断言带前缀规则存在、无前缀规则不存在）；同页其余状态规则（.run.on/.toolhit）核查无同类问题。58 项 review_server 测试全绿（全仓 1252 passed），8010 已重启并浏览器复验展开正常。
+
+## [2026-10-05] v3.3 手机事实源接入：_PHONE_PLACE/_PHONE_USAGE/_PHONE_NOTIF 三源进包
+
+**背景**：/data 数据目录页盘点显示 langTrack.db 采集了 16 类事件（10.7 万条），日报仅消费 music_play；daily_stats 聚合、stays/trips 轨迹、通知内容全部未进信息包。且 fact_card 与 daily notes 摘要走 system prompt 旁路——不在 /health 观测体系、不受 /config 预算管辖。用户拍板接入三个手机事实源（通知内容经隐私确认：仅本地日报+本人邮箱，不出网）。
+
+**已完成**（daily_info_pack.py + data_catalog.py + 测试 + R5 同步）：
+- `_PHONE_PLACE`（priority 15，cap 800）：复用 `fact_card.build(day, detail="full")` 纯读卡——地名解析/日界裁剪/降级全复用，措辞与事实卡不失真（复用 `_build_timeline_section`/`_build_stay_section` 文本）。pack=轨迹时间线+停留累计+数据窗口未闭合标注+异常 top5；detail=stays/trips/anomalies 全量。
+- `_PHONE_USAGE`（45，600）：daily_stats 聚合（屏幕/解锁/切换/App Top5/通知计数/作息窗口）；疑似熬夜信号才进包，"未见熬夜信号"默认态不写；detail 直查全量排行（fact_card 卡内截 8）+通知来源分布。
+- `_PHONE_NOTIF`（65，800）：通知内容事件尾窗（最近 8 条，连续同源合并、单条 50 字唯一截断）。**采样策略实证修正**：原方案"只取点击过的消息"经真实数据检验失效（近 10 天 1359 事件中 clicked=True 只出现在无文本移除标记上，含内容且 clicked=True 为 0），改尾窗取最近内容事件；点击计数由 _PHONE_USAGE 聚合行承载不重复。
+- SOURCES 注册顺序改为 priority 升序（注册序=装配序不变量保持）；`_instruction_head` 降级说明改为"fact_card=当前时刻视角、当日全天以 _PHONE_* 为准"；`data_catalog.CONSUMERS` 同步（location/session/usage/notification 已接，sms/input/clipboard 标注永不进包）。
+- AGENTS.md 第 15 节军规新增第 7 条**进包负清单**（sms/input/clipboard 永不进包，notification 为已拍板例外）。
+
+**实测验证**：真实数据回算 2026-10-04——三源全 ok（PLACE 216/USAGE 117/NOTIF 394 字），整包 7769/10000 在用户配置预算内；/config 的 NCM 停用与预算覆盖照常生效。测试：test_daily_info_pack 新增 8 项（合成库 schema 对齐 test_langTrack_fact_card._make_db：内容/截断/空态/尾窗合并/负清单注册/config 停用），test_source_registry 失败注入登记 `_lang_track_card` 打桩（fact_card.build 内部吞异常降级，须打读卡入口）、priority 不变量放宽为 5 的倍数。全仓 1316 passed，ruff 全绿。
+
+**偏差说明**：① 通知"点击过"采样不可行是实测结论而非设计缺陷，文档已记实证数据；② sleep_start/end 字段 ETL 未产出（全 null），作息行在真实数据暂缺、产出后自动出现；③ C2 A′"langTrack 不做独立源"决策局部修订——细维度（事件级流水）仍不做源，聚合/轨迹/通知内容三个当日视角进包，fact_card 的 chat 注入出口不变。
+
+**待办更新**：新增源观测一周（军规⑥）：关注 _PHONE_NOTIF 的 full_chars 与 cap 关系（通知多日可能触顶）；LLM 蒸馏画像待办不变。
