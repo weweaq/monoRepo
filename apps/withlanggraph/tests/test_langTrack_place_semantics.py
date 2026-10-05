@@ -7,7 +7,6 @@ v3.5 起本模块只管区县 note（地点标签/note 由编辑器直写 places
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
 import sys
 from pathlib import Path
