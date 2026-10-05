@@ -3166,3 +3166,40 @@ delete 照跑，本地展示缓存永久缺尾部；sync_history 因 count=0 不
 - [x] call/bt_device 权限已由用户授予（READ_CALL_LOG/BLUETOOTH_CONNECT granted=true），
      两类为事件驱动，来电/蓝牙连断时自然产出，无需额外操作。
 - [ ] 跑构建脚本出 v1.0.14（buildNumber 自增）+ 邮件分发。
+
+## 2026-10-05：定位功耗治理 v2——三态状态机 + 零功耗哨兵（weiCheckApp）
+
+### 背景
+batterystats 实测 weiCheckApp 耗电 67.7 mAh，其中 GNSS 64.4 mAh（引擎时间 51.5 分钟/天，占 95%）。
+根因：`updateMotionSampling()` 每 60s 兜底，最近 30s 无 fix 就强制 GPS 单次定位——把 IDLE 档
+300s 稀疏采样架空，全天每分钟 ping 一次 GPS；且高德高精度引擎在静止时也不关。
+
+### 设计（经子代理用 7 天真实数据定量评审修正）
+初版"哨兵触发→确认突发"被评审证伪：解锁(54 次/天)直触发 + 慢走连环突发 + 家电误报，
+一天确认 ~200 次 ≈ 3~5 倍现状耗电。修正为 v2：
+- **三态状态机**：IDLE（网络定位 300s 例行，高德 Battery_Saving，不挂 GPS 连续监听）→
+  CONFIRM（GPS 5s×5 点突发，第 2 点位移 <3m 提前中止）→ ACTIVE（GPS 10s/15m，与旧版同）。
+- **零功耗哨兵**（仅 IDLE 响应）：SMD 硬件触发器（sns_smd，免权限）+ 计步器 + Wi-Fi SSID
+  变化（不认 BSSID，最小间隔 10min）+ 亮屏 accel 运动态。解锁/亮屏**不**直接触发 GPS。
+- **两信号规则**：90s 内 ≥2 独立哨兵 / SMD ≥2 次 / 3min 步数 ≥8 / fix 级强证据（300s 窗
+  净位移 360m+）直通。
+- **防风暴**：确认失败冷却 180s；配额 8 次/时、40 次/日（硬上限，最坏不劣于旧版 51.5min）；
+  同 ~55m 格连续 3 次确认失败 → 抑制 30min（家电振动驻留）。
+- **降档滞回**：连续 2 次低速 fix 且 ≥5min 无任何"动过"信号。
+- **服务重建**：IDLE 起步 + 立即确认定档（不再起步常驻 active）。
+- IDLE 网络 fix 精度 >150m 或缺失 → GPS 单次兜底（≥10min 一次）。
+
+### 连带发现与修复
+- **计步器 7 天零事件根因**：该机计步传感器要求 ACTIVITY_RECOGNITION 运行时权限，
+  manifest 从未声明。已加声明（授予待用户手动，ColorOS 拦 adb pm grant）。
+- SMD 传感器确认可用（QTI sns_smd，免权限）。
+
+### 预期
+宅家日 GNSS 15~25min（省 50~70%）、常规出行日持平、最坏有界。location 事件格式不变
+（契约无影响），新增 steps 事件类型（权限授予后产出）。
+
+### 状态
+- 代码完成（SensorCollector.kt 重写 ~600 行），assembleDebug 通过。
+- [ ] 实机安装验证（无线调试被 ColorOS 超时关闭，待用户重开）。
+- [ ] 跑一天后对比 GNSS 引擎分钟数验证收益。
+- [ ] 用户授予 ACTIVITY_RECOGNITION → steps 哨兵生效。
