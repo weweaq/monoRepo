@@ -3154,8 +3154,15 @@ delete 照跑，本地展示缓存永久缺尾部；sync_history 因 count=0 不
 - 端到端核对：重装后新事件（至 13:16 的 snapshot/session/notification 等 7 类）全部落服务端。
 
 ### 待办
-- [ ] 用户在手机上重新开启：无障碍（WeiAccessibilityService）→ 恢复 screen_content/input/
-     clipboard；应用信息里授予麦克风 → 恢复 audio_env/audio_clip（无障碍须在装了本修复版后开，
-     避免 screen_content 继续产 uptime 脏数据）。
-- [ ] call（需 READ_CALL_LOG）与 bt_device（需 BLUETOOTH_CONNECT）按需授予，不授则维持现状。
+- [x] 无障碍恢复（2026-10-05 22:47 实测）：用户授了 READ_CALL_LOG/BLUETOOTH_CONNECT 但
+     无障碍 UI 开关没找到，经 adb `settings put secure enabled_accessibility_services`
+     直写启用；ColorOS 懒绑定问题（Enabled 有、Bound 无）用"关-开"一次跳变触发绑定成功。
+     screen_content 已产出（约 32s 一条，30s 节流符合预期），**时间戳为干净墙钟**（R7 修复实测通过），
+     服务端同分钟落库。
+- [ ] 麦克风仍差最后一步：RECORD_AUDIO 为 USER_FIXED（永久拒绝），ColorOS 拦截 adb
+     `pm grant`（SecurityException: no GRANT_RUNTIME_PERMISSIONS），只能用户在
+     应用信息 → 权限 → 麦克风手动改"允许"，授予后重启 App 使 CollectorService 重建。
+     授予前 audio_env/audio_clip 持续停采。
+- [x] call/bt_device 权限已由用户授予（READ_CALL_LOG/BLUETOOTH_CONNECT granted=true），
+     两类为事件驱动，来电/蓝牙连断时自然产出，无需额外操作。
 - [ ] 跑构建脚本出 v1.0.14（buildNumber 自增）+ 邮件分发。
