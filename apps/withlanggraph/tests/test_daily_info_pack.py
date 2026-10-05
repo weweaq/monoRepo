@@ -11,12 +11,12 @@ detail_body=当日取数全部结果。langTrack 源已按 C2 A′ 移除（细�
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
-
 
 import gacore.daily_info_pack as dip
 from gacore.config import Config
@@ -926,3 +926,21 @@ def test_fetch_limit_knob(tmp_path, monkeypatch):
     _write_source_config(cfg, {"sources": {"_EDGE": {"fetch_limit": 40}}})
     dip._build_edge("2026-09-02", cfg)
     assert captured["edge"]["limit"] == 40
+
+
+def test_phone_place_semantics_notes(tmp_path, monkeypatch):
+    """语义配置（v3.4）：地点 note/区县 note 进 detail；stays 全量行带异地标注。"""
+    from gacore.langTrack import place_semantics as ps
+
+    sem = tmp_path / "place_semantics.json"
+    sem.write_text(json.dumps({
+        "places": [{"place_id": "p_home", "note": "注记一"}],
+        "districts": [{"district": "雨花台区", "note": "南京主城之一"}],
+    }, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(ps, "CONFIG_PATH", sem)
+    cfg = _cfg(tmp_path)
+    _seed_langtrack_db(cfg, "2026-09-10")
+    title, pack, detail = dip._build_phone_place("2026-09-10", cfg)
+    assert "- 地点背景：XX路1号〔家〕——注记一" in detail
+    assert "- 区县背景：雨花台区——南京主城之一" in detail
+    assert "YY路2号〔公司〕（雨花台区） 09:00-12:00" in detail  # 异地标注进 stays 全量

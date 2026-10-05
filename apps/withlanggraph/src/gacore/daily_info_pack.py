@@ -716,7 +716,7 @@ def _build_phone_place(date: str, cfg: Config) -> tuple[str, str, str]:
             lines.append(f"- 异常：{a.get('kind', '')} {a.get('poi', '')}（{a.get('detail', '')}）")
         detail_lines = [f"- stays 全量（{len(stays)} 段）："]
         detail_lines += [
-            f"  - {s['label']} {s['start_hhmm']}-{s['end_hhmm']}"
+            f"  - {s['label']}{s.get('region', '')} {s['start_hhmm']}-{s['end_hhmm']}"
             f"（{s['mins']}min，{s['point_count']}点）"
             for s in stays
         ]
@@ -730,6 +730,25 @@ def _build_phone_place(date: str, cfg: Config) -> tuple[str, str, str]:
             f"- 异常：{a.get('kind', '')} {a.get('poi', '')}（{a.get('detail', '')}）"
             for a in anomalies
         ]
+        # 手工语义背景（place_semantics.json）：地点 note + 区县 note，仅 detail 呈现不占 compact 预算
+        from gacore.langTrack import place_semantics
+
+        sem = place_semantics.load()
+        seen_place_notes: list[str] = []
+        seen_district_notes: list[str] = []
+        districts_seen: set[str] = set()
+        for s in stays:
+            n = place_semantics.note_for(s.get("place_id"), s.get("poi") or "", cfg=sem)
+            if n and f"{s['label']}——{n}" not in seen_place_notes:
+                seen_place_notes.append(f"{s['label']}——{n}")
+            d = (s.get("district") or "").strip()
+            if d and d not in districts_seen:
+                districts_seen.add(d)
+                dn = place_semantics.district_note(d, cfg=sem)
+                if dn:
+                    seen_district_notes.append(f"{d}——{dn}")
+        detail_lines += [f"- 地点背景：{t}" for t in seen_place_notes]
+        detail_lines += [f"- 区县背景：{t}" for t in seen_district_notes]
         return title, "\n".join(lines), "\n".join(detail_lines)
     except Exception as exc:  # noqa: BLE001 - 最后防线：源失败不中断整包
         logger.warning("daily_info_pack: phone_place failed", error_type=type(exc).__name__, error=str(exc))
