@@ -3112,3 +3112,50 @@ openai / anthropic / deepseek 三种 provider，无智谱。
 ### 待办 / 注意
 - **生产 gacore 进程需重启才生效**：`.env` 在进程启动时读取，当前运行中的服务仍是
   deepseek，重启后才会切到智谱。切回 deepseek 只需把 `.env` 的 `LLM_PROVIDER` 改回即可。
+
+## 2026-10-05：客户端 bug 体检修复 + 采集缺口定位（weiCheckApp，待发 v1.0.14）
+
+### 背景
+无线 ADB 打通后对账手机本地库与服务端（10-01~10-05 逐日逐类型），发现两类问题：
+①10-01 10:19 重启补传的 500 条批次，服务端完整收到，但本地 sent_events 只归档 452 条，
+缺的 48 条恰为 notification/music_play/sms（监听器来源）；②代码审计确认一批既有 bug 与停采缺口。
+
+### 根因定位（10-01 缺 48 条）
+`archiveSentEvents` 逐条 insert 非事务 + NotificationListener/AccessibilityService 各持
+独立 SQLite 连接持续写库 → 归档循环撞写锁中途抛异常，但"上传成功→归档→删 pending"顺序执行，
+delete 照跑，本地展示缓存永久缺尾部；sync_history 因 count=0 不记录，抹掉线索。实机还有：
+无障碍服务被系统禁用（screen_content/input/clipboard 三类断供）、RECORD_AUDIO 被永久拒绝
+（USER_FIXED，audio_env/audio_clip 停采，start() 静默早退零日志）。
+
+### 客户端修复清单
+1. **screen_content 时间戳**（P0，R7 落地）：`event.eventTime`（uptime）改 `System.currentTimeMillis()`
+   ——8-18 的提交只改了 input，screen_content 漏改，这是服务端 30 条 1970 脏数据的来源。
+2. **归档事务化 + WAL**（P0）：新增 `LocalStore.commitUploaded()`（插 sent_events + 删 pending
+   + 裁剪同一事务，异常整体回滚、pending 保留下轮幂等重传）；helper 开 `setWriteAheadLoggingEnabled`。
+3. **music_play isPlaying 逻辑修复**（P1）：原式恒等于 `!hasPlay`，hasPause 不参与；改为
+   `!(hasPlay && !hasPause)`（暂停键在场即 playing，双按钮不再误记 paused）。
+4. **music_play 去重改按歌 Map**（P1）：单键"只比上一首"在交替播放时永不命中，改 HashMap
+   记 (pkg+title)→lastMs，5s 窗口，超 64 键清理 1h 前旧键。
+5. **onNotificationRemoved 过滤媒体通知**（P1）：媒体通知消失不再记 notification 脏数据
+   （isMediaNotification 判定 posted/removed 共用）。
+6. **network 事件防抖**（P1）：首次 onAvailable 作基线不记，之后仅 type|ssid 变化才记。
+7. **删除 media 死代码**（P1）：StateCollector 的 MediaSessionManager 监听在 Android 10+
+   权限模型下永远不出数且异常空吞，与 music_play 重复，整体移除（事件类型 media 服务端保留契约）。
+8. **上传按字节分批**（P1）：固定 500 条/批混入 audio_clip（单条 31KB）可达十几 MB 必超时，
+   改按 2MB 估重切块（chunkByBytes），readTimeout 5s→15s；失败返回已传条数，sync_history 可见。
+9. **P2**：短信游标改"先落盘再推进"（防 insert 失败丢短信）；心跳 startForegroundService 包
+   try/catch（Android 12+ 部分 ROM 抛异常断心跳链）；AudioCollector 两处静默出口加日志
+   （权限拒绝、连续零样本）；sent_events 裁剪上限 5000→20000（音频恢复后约存 7-10 天）。
+
+### 实测验证（无线 adb 实机 PHY120）
+- assembleDebug 构建通过，`adb install -r` 覆盖装 v1.0.13 基座（版本号待下次构建脚本自增）。
+- 重装后服务自启，logcat 无崩溃；WAL 生效（-wal/-shm 出现）；采集恢复（accel/battery/
+  notification/session/snapshot 13:09+ 产出），每分钟同步 ok、pending 清零。
+- 端到端核对：重装后新事件（至 13:16 的 snapshot/session/notification 等 7 类）全部落服务端。
+
+### 待办
+- [ ] 用户在手机上重新开启：无障碍（WeiAccessibilityService）→ 恢复 screen_content/input/
+     clipboard；应用信息里授予麦克风 → 恢复 audio_env/audio_clip（无障碍须在装了本修复版后开，
+     避免 screen_content 继续产 uptime 脏数据）。
+- [ ] call（需 READ_CALL_LOG）与 bt_device（需 BLUETOOTH_CONNECT）按需授予，不授则维持现状。
+- [ ] 跑构建脚本出 v1.0.14（buildNumber 自增）+ 邮件分发。
