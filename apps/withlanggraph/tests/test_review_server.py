@@ -831,7 +831,7 @@ class TestDataPage:
         assert "数据目录" in r.text
         # 事件类型 + 消费方短标已内嵌（含未接兜底）
         assert '"music_play"' in r.text and '"_MEDIA 源"' in r.text
-        assert '"sms"' in r.text and '"无消费方（验证码为主，永不进包）"' in r.text
+        assert '"sms"' in r.text and '"无消费方（隐私边界：仅本地日报+本人邮箱，不出网，军规7）"' in r.text
         assert '"short": "未接"' in r.text  # bad_json 不在映射表 → 未接兜底
         # 表资产含影子表标记；库外文件区块存在
         assert "shadow_places_v2" in r.text and "影子表" in r.text

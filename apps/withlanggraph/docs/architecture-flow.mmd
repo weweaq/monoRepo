@@ -76,7 +76,7 @@ flowchart TD
             COR --> CB
             PRE --> CB
         end
-        SIP["daily_info_pack.SOURCES 注册表<br/>12 源 key/cap/priority/builder·注册序=priority升序<br/>(config/info_pack.json 覆盖预算<br/>·评审页 /config 改完即生效)<br/>classify_body 四态→header 状态<br/>(状态行守卫: - 开头+关键词≤行首8字符)<br/>_cap_lines 行级截断<br/>_assemble_blocks 整块丢弃熔断<br/>_LONG_TERM 采样: _compact_long_term<br/>global_mem_anchor 全保留+编年史尾窗单一截断<br/>v3.3 手机事实源:<br/>_PHONE_PLACE(15) fact_card卡·轨迹/异常<br/>_PHONE_USAGE(45) daily_stats聚合·作息<br/>_PHONE_NOTIF(65) 通知内容尾窗8条·同源合并<br/>sms/input/clipboard 永不进包(军规负清单)"]
+        SIP["daily_info_pack.SOURCES 注册表<br/>12 源 key/cap/priority/builder·注册序=priority升序<br/>(config/info_pack.json 覆盖预算<br/>·评审页 /config 改完即生效)<br/>classify_body 四态→header 状态<br/>(状态行守卫: - 开头+关键词≤行首8字符)<br/>_cap_lines 行级截断<br/>_assemble_blocks 整块丢弃熔断<br/>_LONG_TERM 采样: _compact_long_term<br/>global_mem_anchor 全保留+编年史尾窗单一截断<br/>v3.3 手机事实源:<br/>_PHONE_PLACE(15) fact_card卡·轨迹/异常<br/>_PHONE_USAGE(45) daily_stats聚合·作息<br/>_PHONE_NOTIF(65) 通知内容尾窗8条·同源合并<br/>sms/input/clipboard 边界=仅本地+本人邮箱(军规7)"]
         HP[("data/logs/info_pack_health.jsonl<br/>status/chars/full_chars/detail_chars<br/>write_pack_health")]
         DT[("data/logs/pack_detail/{date}/{key}.md<br/>三节: 完整取数详情/渲染文本/实际进包<br/>write_pack_detail · 保留90天<br/>+ _FACT_CARD.md (write_fact_card_detail)")]
         RVW["review_server :8010<br/>/review 锚点批注+diff 视图<br/>/health 矩阵 /health/source 三节归因<br/>/llm-requests 运行回放(llm_runview 重建)<br/>/data 数据目录(data_catalog 纯读盘点·按日取数 /api/data/events)<br/>POST /api/revise(默认)·/api/rerun(需确认)<br/>POST /api/health/refresh(↻重算体检·零LLM)"]
