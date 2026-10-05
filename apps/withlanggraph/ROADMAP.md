@@ -1100,3 +1100,11 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 **偏差说明**：① 通知"点击过"采样不可行是实测结论而非设计缺陷，文档已记实证数据；② sleep_start/end 字段 ETL 未产出（全 null），作息行在真实数据暂缺、产出后自动出现；③ C2 A′"langTrack 不做独立源"决策局部修订——细维度（事件级流水）仍不做源，聚合/轨迹/通知内容三个当日视角进包，fact_card 的 chat 注入出口不变。
 
 **待办更新**：新增源观测一周（军规⑥）：关注 _PHONE_NOTIF 的 full_chars 与 cap 关系（通知多日可能触顶）；LLM 蒸馏画像待办不变。
+
+### [2026-10-05] v3.3 追补：军规第 7 条放宽（负清单→统一隐私边界）+ 新源接入经验固化为 add-info-source skill
+
+用户反馈两点：① sms/输入法/剪贴板"永不进包"过严——只要与通知同边界（仅本地日报+本人邮箱，不出网）即可接受；② 后续还会接入很多源，要求把本次经验固化成 skill。调整：AGENTS.md 第 15 节军规第 7 条由"进包负清单"改为**"敏感事件进包边界"**——notification/sms/input/clipboard 均允许进包，统一边界=仅本地日报落盘+本人邮箱、绝不出网，新增涉敏类型先向用户确认边界再登记再写 builder；data_catalog.CONSUMERS 三处文案、tech §9.24 v3.3 条目、mmd SIP 节点、_build_phone_notif docstring 同步改写（历史 ROADMAP 记录不回改，以本追补为准）。**新增项目级 skill `.agents/skills/add-info-source/SKILL.md`**（根 AGENTS.md 技能指引已登记）：八步流程（盘点→拆分决策→隐私拍板→builder 契约→注册→封闭测试→同步面清单→真实验证与提交）+ 已踩坑（采样假设先实证/连发合并/heredoc 坏中文），供后续新源接入直接复用。
+
+### [2026-10-05] _BILI 单次拉取上限 50→100
+
+用户要求提高 B 站观看源取数覆盖。`_build_bili` 的 `_BILLI_FN(limit=50)` 改 `_BILI_FETCH_LIMIT=100`（工具 `_MAX_LIMIT` 本即 100，非扩工具）；detail 边界尾注同步常量化（`len(entries) >= _BILI_FETCH_LIMIT` 才标注「拉取上限 100 条」，不再硬编码）；tech §9.24 v3.2 采样修正④同步。测试 `test_bili_detail_window_note` 改 100 条断言 + 补"未触顶不加尾注"对照。51 项 daily_info_pack 测试全绿。8010 已重启，/health 页对该日「↻ 重算体检」即以新上限重拉。

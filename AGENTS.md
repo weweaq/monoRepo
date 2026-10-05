@@ -108,6 +108,7 @@ uv run pre-commit install                       # 启用 git 提交钩子（首�
 ### 技能指引（按需调用对应 skill）
 
 - 新建/接入一个 app（mono 规范 + dev-console 受管服务）：调用 [`buildApp`](.trae/skills/buildApp/SKILL.md)
+- 日报信息包新增信息源（把某类数据接进日报、问"为什么 X 没进日报"）：调用 [`add-info-source`](.agents/skills/add-info-source/SKILL.md)
 - 生成架构图 / 走查代码结构与模块依赖：调用 `codemap`
 - 网页/PPT/文档等交付物制作：调用 `html-report` / `html-deck` / `doc-writing-guide`
 
