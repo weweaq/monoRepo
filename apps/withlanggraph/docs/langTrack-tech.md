@@ -499,38 +499,47 @@ flowchart LR
 
 **FactCard 位置字段（`fact_card.py:52-166`）**：`current_known`、`places`（PlaceBrief：`place_id/place_name/user_tag/name_source/point_count/visit_episodes/stay_ms`，旧字段 `visits/poi/behavior/address` 标 deprecated 仅兼容）、`stays`（StayBrief：PlaceRef 载荷 + `point_count/avg_accuracy_m` + v3.4 `region/note`）、`trips`（TripBrief：`from_place/to_place=PlaceRef|None`，保留 `from_label/to_label`）、`anomalies`（kind/poi/detail）、`daily_location_quality`（Task 7 观测）、`tag_conflict_count`、`spatial_profile`（Task 8 `places_v2` 长期空间画像，7/30/90 客观聚合，仅 full 卡携带）、`home_district`（v3.4：家标签点的区县，异地标注基准）。`label = format_place(place_name, user_tag)` 展示。
 
-#### 5.6 手工语义地点配置与异地标注（v3.4，`place_semantics.py` + `location_facts.region_suffix`）
+#### 5.6 语义地点：自定义标签直写 DB + 编辑器（v3.5，`places_page.py` + `place_semantics.py`）
 
-**动机**：regeo 只能给地理事实（POI 名/行政区划），"张垛=张威的老家"这类只有用户知道的语义由用户手工配置；"张垛是哪里的张垛"由异地标注解决（places 表已存 district/township/address，此前显示层只取 POI 名丢弃了区域）。
+**v3.5 定稿（用户拍板"DB 即真源"）**：自定义标签与地点背景由用户在编辑器里**直写数据库**
+（`places.label` / `places.note` 列），不再走任何 JSON 叠加层。v3.4 的
+place_semantics.json tag 覆盖机制、`label_places` 交互确认流（place_labels.json）一并退役
+（模块保留兼容读取，不再有消费者）。
 
-**配置文件 `data/place_semantics.json`**（gitignore 内用户数据，手工编辑，mtime 缓存改完即生效；坏 JSON/缺文件静默降级为空配置，不挡卡）：
+**places.note 列（R6 列级迁移）**：`location_reader.ensure_note_column(conn)` 幂等
+ALTER ADD COLUMN（判据=列存在性），etl.run 开头与编辑器保存路径都会触发。
+⚠️ **不递增 PRAGMA user_version**——该版本号被 location v2 占用（>=2 即走 v2 全量
+重建分支），v1 库上递增会把库误标成 v2（实测踩坑：TestDailyQuality 三测连挂）。
 
-```json
-{
-  "places": [
-    {"place_id": "7afcc1e4576ce7fc", "poi": "张垛", "tag": "张威的老家", "note": "安徽省马鞍山市当涂县乌溪镇"}
-  ],
-  "districts": [
-    {"district": "当涂县", "note": "（手写人文/背景注记）"}
-  ]
-}
-```
+**计算语义**：计算逻辑按精确值认 `label=="家"` / `label=="公司"`（深夜在外判定、
+停留分桶的家/公司桶、异地标注基准 home_district、作息画像），自定义标签若恰好写
+这两个词就参与计算，其余纯显示。UI 上以提示 + "标为家/标为公司"快捷按钮防错别字。
 
-匹配规则：places 条目 place_id 命中优先、poi 名次之（两键可同给）；`tag` 覆盖 DB label（含 家/公司，叠加在 `_load_places` 读入处，stay_minutes 分桶、format_place 全链路生效）；`note` 追加展示不覆盖；districts 按 district 名精确匹配。
+**停留累计按自定义标签聚合（v3.5）**：`stay_minutes` 桶键=label（家/公司固定桶在前，
+其余用户标签按时长降序、上限 4，其他/未知收尾）——如"停留累计：家 8.5h · 张威的老家 22.2h"。
 
-**消费点**：
+**编辑器 `/places`（review_server :8010）**：D（待办驱动主从式）+ C（地图点选）定稿形态。
+左=待办（新出现未配置 + 高频未配置 Top5 + 同名歧义提醒）/全部/区县/地图 四 tab；
+右=编辑面板（place_id/区域/地址/访问/坐标 + 标签输入 + 地点 note + 区县 note + 实时
+渲染预览），保存即写库并更新待办。地图 tab：AMap JS 打点（绿=家/蓝=公司/橙=自定义/
+灰=未知），初始视野锚家点，点 marker 进编辑。页面模板与脚本在 `gacore/places_page.py`
+（JS 以模板常量 + `__DATA__` 占位内嵌，`</` 转义防 script 逃逸；node --check 为上线门禁）。
 
-| 出口 | 行为 |
-|---|---|
-| `fact_card._load_places` | 语义 tag 覆盖 place dict 的 label（一次叠加全链路受益） |
-| StayBrief 新字段 | `region=region_suffix(district, home_district, address)`（区县≠家所在区县 → "（…）"，本地/未知区县空串；正文尽量补全省市区——regeo address 恒以"省+市+区"开头，截取起点到 district 结尾，如"安徽省马鞍山市当涂县"，address 不含 district 时退化为仅 district）；`note=place_semantics.note_for(place_id, poi)` |
-| 时间线 `_build_timeline_section` | 相邻同点 stay 合并（place_id 相同；缺 place_id 退化为同显示名），合并段括注期间短出（`（期间 03:06 短出 2.0km、…）`）；trips 尾注口径：全部 trips 均为同点往返（from/to 同 place_id）→ "短出 N 次合计 X.Xkm"，否则 "移动 N 段"（`_trips_summary`）；stay 末端命中日窗终点渲染 "24:00"（此前 "00:00"） |
-| 日报 `_build_phone_place` detail | stays 全量行带 region；追加 `地点背景：{label}——{note}` 与 `区县背景：{district}——{note}`（去重，仅 detail 不占 compact 预算） |
-| ETL `detect_route_changes` | route_change 详情端点地名化：from/to place_id 直查 places（poi>address>district）→ 无 place_id 端点 500m 内就近匹配 → 坐标兜底；v1 库缺列自动落坐标 |
+**保存 API（token 保护）**：
+- `POST /api/places/labels` `{items:[{place_id,poi,label,note}]}` →
+  `place_semantics.save_place_labels`：place_id 匹配优先、poi 兜底；label≤24 字、
+  note≤500 字截断；label 留空恢复"未知"；直写 `places.label/note`。
+- `POST /api/places/districts` `{items:[{district,note}]}` → `save_district_notes`：
+  区县背景整表替换写 `data/place_semantics.json`（该文件 v3.5 起只剩区县 note）。
 
-测试：`test_langTrack_place_semantics.py`（加载容错/规范化/tag 优先级/note/区县/mtime 重载）；fact_card 合并+语义+region 三用例、anomalies 地名化、daily_info_pack 背景行；conftest 全局 autouse fixture 将 `place_semantics.CONFIG_PATH` 指向不存在的 tmp 文件保证测试封闭。
+**数据层**：`place_semantics.editor_data()` 纯读收集 places 全量（访问降序）+ 近 14 天
+出现线索（stay 按 place_id/grid_key 归点）+ 区县聚合 + 家基准区县 + AMap JS key；
+db 缺失/缺表降级空态。
 
----
+**存量迁移（一次性，已完成）**：v3.4 json 里的张垛 tag/note（"张威的老家"）搬进
+places.label/note，json 重写为 districts-only。注意 places 表存在同 poi 两行（新旧网格
+残留），编辑器待办以"同名歧义"提醒。
+
 
 ## 6. ETL 流程详解（`etl.run`, etl.py:2332-2617）
 

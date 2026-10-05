@@ -80,9 +80,9 @@ flowchart TD
         SIP["daily_info_pack.SOURCES 注册表<br/>12 源 key/cap/priority/builder·注册序=priority升序<br/>(config/info_pack.json 覆盖预算<br/>·评审页 /config 改完即生效)<br/>classify_body 四态→header 状态<br/>(状态行守卫: - 开头+关键词≤行首8字符)<br/>_cap_lines 行级截断<br/>_assemble_blocks 整块丢弃熔断<br/>_LONG_TERM 采样: _compact_long_term<br/>global_mem_anchor 全保留+编年史尾窗单一截断<br/>v3.3 手机事实源:<br/>_PHONE_PLACE(15) fact_card卡·轨迹/异常<br/>_PHONE_USAGE(45) daily_stats聚合·作息<br/>_PHONE_NOTIF(65) 通知内容尾窗8条·同源合并<br/>sms/input/clipboard 边界=仅本地+本人邮箱(军规7)"]
         HP[("data/logs/info_pack_health.jsonl<br/>status/chars/full_chars/detail_chars<br/>write_pack_health")]
         DT[("data/logs/pack_detail/{date}/{key}.md<br/>三节: 完整取数详情/渲染文本/实际进包<br/>write_pack_detail · 保留90天<br/>+ _FACT_CARD.md (write_fact_card_detail)")]
-        RVW["review_server :8010<br/>/review 锚点批注+diff 视图<br/>/health 矩阵 /health/source 三节归因<br/>/llm-requests 运行回放(llm_runview 重建)<br/>/data 数据目录(data_catalog 纯读盘点·按日取数 /api/data/events)<br/>POST /api/revise(默认)·/api/rerun(需确认)<br/>POST /api/health/refresh(↻重算体检·零LLM)"]
-        PS[("data/place_semantics.json<br/>手工语义配置(v3.4): 地点tag/note·区县note<br/>place_semantics.py 加载·mtime缓存·坏文件降级")]
-        FC2["fact_card compact<br/>chat system prompt 注入出口<br/>9 sections (含 sleep p45/time_app p55)<br/>预算900 · compact_omitted 透传<br/>v3.3 分工: 当前时刻卡<br/>(_PHONE_* 承担当日全天事实)<br/>v3.4 语义叠加: 手工tag覆盖DB label·note进StayBrief<br/>异地标注 region_suffix(区县≠家)·同点短出合并"]
+        RVW["review_server :8010<br/>/review 锚点批注+diff 视图<br/>/health 矩阵 /health/source 三节归因<br/>/llm-requests 运行回放(llm_runview 重建)<br/>/data 数据目录(data_catalog 纯读盘点·按日取数 /api/data/events)<br/>/places 语义地点编辑(places_page·待办队列+地图点选<br/>·POST /api/places/labels 直写 places.label/note(自定义标签DB即真源 v3.5)<br/>·POST /api/places/districts 区县背景)<br/>POST /api/revise(默认)·/api/rerun(需确认)<br/>POST /api/health/refresh(↻重算体检·零LLM)"]
+        PS[("data/place_semantics.json<br/>区县背景note(v3.5起仅此一项;地点标签/note已迁DB)<br/>place_semantics.py editor_data/save_district_notes·mtime缓存")]
+        FC2["fact_card compact<br/>chat system prompt 注入出口<br/>9 sections (含 sleep p45/time_app p55)<br/>预算900 · compact_omitted 透传<br/>v3.3 分工: 当前时刻卡<br/>(_PHONE_* 承担当日全天事实)<br/>v3.4/v3.5 语义: 自定义标签直写DB(places.label)·StayBrief.note读places.note列<br/>停留累计按自定义标签聚合·异地标注 region_suffix(区县≠家)·同点短出合并"]
     end
 
     subgraph OUT["④ 退出/投递"]
@@ -114,7 +114,8 @@ flowchart TD
 
     IG --> RW --> ET --> OU
     OU --> FC2
-    PS -. "语义叠加(tag/note)" .-> FC2
+    PS -. "区县背景note" .-> SIP
+    RVW -. "编辑器直写 places.label/note" .-> FC2
     FC2 -->|"outlet=prompt<br/>system prompt"| PR
     SC -. "daily job" .-> CB
     CB --> SIP

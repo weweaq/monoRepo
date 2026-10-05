@@ -1149,3 +1149,22 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 **偏差说明**：① `search_news` 实测语义为**热榜标题内关键词匹配**而非搜索引擎（"人工智能"0 命中属正常），工具描述已写明预期；② weibo 源上游适配器当前已坏（server 端 `reading 'cards'`），zhihu/github/baidu/bilibili 正常——上游问题不修，等 server 更新；③ 评审服务 8010 不绑工具无需重启，新工具随 QQ 前端/日报进程下次重启生效。
 
 **待办更新**：观察聊天中工具实际调用频率与价值；若日报需要"当日热点"维度，可另做确定性 `_NEWS` 信息包源（复用同一桥接会话，进包可观测可预算）——尚未拍板。
+
+## [2026-10-06] v3.5.0 语义地点编辑器：自定义标签 DB 即真源 + /places 页（D+地图定稿）
+
+**背景**：v3.4.0 落地后用户连续三轮推进语义化体验——①要可视化编辑（起 3 个交互 demo：A 主从式/B 表格批量/C 地图点选，真实数据烘焙实拍评审）；②拍板"自定义 tag，计算逻辑跟我的 tag 走"（讨论出角色绑定方案）；③最终改向**"我可以自定义 DB 标签，手动给地点设置，计算逻辑继续算，后续还能按新标签多算有趣指标"**——即取消 tag 概念，名字唯一真源进数据库，note（背景故事）保留为独立字段；note/区县背景确认是两个粒度不是一回事。编辑器形态采纳 subagent 用户视角评审的 D 方案（待办驱动主从式）并按用户要求并入 C 的地图。
+
+**已完成**：
+- `places.note` 列迁移（R6）：`location_reader.ensure_note_column` 幂等 ALTER（判据=列存在性）。**⚠️ 踩坑已修**：初版递增 user_version→3，但该版本号被 location v2 占用为"位置事实 schema 版本"（>=2 走 v2 全量重建分支），v1 测试库被误标 v2 → TestDailyQuality 三测连挂（place_cells missing）。修正为**不递增 user_version**（R6 递增规则的既记录例外）。
+- fact_card：place_semantics tag 叠加层删除；StayBrief.note 改读 places.note 列；**停留累计按自定义标签聚合**（家/公司固定桶在前，其余用户标签时长降序上限 4，其他/未知收尾）——第一颗"按标签多算的指标"落地（真实数据实证：`停留累计：张威的老家 22.2h`，原"其他 22.2h"）。
+- `place_semantics.py` 收缩重构：只管区县背景 note（json 格式 `{"districts":[...]}`，旧版 places/roles 键兼容忽略）+ 编辑器数据层 `editor_data()`（places 全量+近 14 天出现线索+区县聚合+家基准）+ `save_place_labels()`（直写 DB，place_id 优先/poi 兜底，label≤24/note≤500 截断）。
+- **/places 编辑页**（review_server :8010，模板在 `gacore/places_page.py`）：待办队列（新出现未配置"新"徽标 + 高频未配置 Top5 + 同名歧义提醒）｜全部｜区县｜地图（AMap JS 打点：绿=家/蓝=公司/橙=自定义/灰=未知，初始视野锚家点+全国视野按钮）四 tab + 右侧编辑面板（标签输入+「家」「公司」快捷按钮+防错别字提示+地点 note+区县 note+实时渲染预览），保存即写库自动出队。API：`POST /api/places/labels`（直写 DB）、`POST /api/places/districts`（json 整表替换），均 token 保护。
+- **存量迁移（一次性）**：v3.4 json 里张垛 tag/note 搬进 places.label/note，json 重写为 districts-only；发现 places 表同 poi 两行（新旧网格残留），由待办"同名歧义"提醒承载。
+- label_places 交互确认流与 place_labels.json 退役（模块保留，无消费者）；计算逻辑零改动（按精确值"家"/"公司"匹配，UI 防错别字提示）。
+- 顺手修测试午夜地雷：test_events_for_day_api 种子锚定"2 小时前"，凌晨跑落到昨天 → 改为"5-10 分钟前 + 东八区当天取日"。
+
+**实测验证**：浏览器全流程实拍——待办队列真实数据正确（新徽标/张垛歧义）、编辑面板回显迁移后的"张威的老家"、**保存闭环 UI→POST→DB 写入实证**（note 更新后 DB 读回一致）、区县 note 保存落 json、地图 tab 渲染+全国视野；真数据 10-04 回算轨迹行不变（`张垛〔张威的老家〕（安徽省马鞍山市当涂县）…`）+ 停留累计升级。全仓 1349 passed + ruff 全绿（并行会话 news_mcp.py 的 F841 不属本会话文件）。8010 已重启加载（后台任务方式，dev-console 下次 start.bat 接管）。
+
+**偏差说明**：①设计三次演进（json tag 叠加 v3.4 → 角色绑定（未提交即废弃）→ DB 直写 v3.5），历史 ROADMAP 记录不回改；②home_district 基准仍=label=="家"，用户把别的点标成"家"会改变异地基准与深夜判定——UI 已提示；③地图/编辑器对 v1 无 place_id 的点按 poi 匹配兜底（同名点有误伤可能，待办歧义提醒兜住）；④8010 本次以 ZCode 后台任务拉起（python.exe），会话结束即停，日常由 dev-console 管理。
+
+**待办更新**：按自定义标签的到访频率趋势/距离圈层（用户点名的"有趣指标"，未排期）；区县背景待用户手写；add-info-source skill 不受影响。
