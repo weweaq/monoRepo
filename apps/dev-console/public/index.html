@@ -17,6 +17,8 @@
   main { padding:24px; display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:16px; }
   .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:16px; }
   .card .top { display:flex; align-items:center; gap:10px; }
+  .card .pick { width:15px; height:15px; margin:0; flex:none; accent-color:var(--accent); cursor:pointer; }
+  .card.sel { border-color:var(--accent); background:#1c2530; }
   .dot { width:10px; height:10px; border-radius:50%; background:var(--red); flex:none; }
   .dot.on { background:var(--green); }
   .dot.warn { background:#d29922; }
@@ -57,13 +59,14 @@
 <header>
   <h1>Dev Console · 本地服务控制台</h1>
   <div class="right">
-    <button id="startAll">全部启动</button>
-    <button id="stopAll">全部停止</button>
+    <button id="selectAll">全选</button>
+    <button id="startAll" title="仅作用于勾选的服务卡片">全部启动</button>
+    <button id="stopAll" title="仅作用于勾选的服务卡片">全部停止</button>
     <span class="addr" id="addr">127.0.0.1:8787</span>
   </div>
 </header>
 <div id="banner"></div>
-<div id="hint">后台服务均由 uv 虚拟环境的 launcher 启动，每个服务在系统里会显示为两个进程（launcher 桩 + 真实 Python 解释器），属正常现象——停止/重启时会将这一对一并结束。</div>
+<div id="hint">后台服务均由 uv 虚拟环境的 launcher 启动，每个服务在系统里会显示为两个进程（launcher 桩 + 真实 Python 解释器），属正常现象——停止/重启时会将这一对一并结束。勾选卡片后，顶部「启动/停止」仅作用于所选服务。</div>
 <main id="grid"></main>
 <div id="toast"></div>
 <div id="logModal" class="modal">
@@ -207,6 +210,29 @@ async function runAction(path, id) {
 let busy = false;
 let currentList = [];
 let lastRenderJson = null;
+const selected = new Set();  // 勾选的服务 id，跨轮询重渲染保持
+
+function selectedServices() {
+  return (currentList || []).filter(s => selected.has(s.id));
+}
+
+function updateBatchBar() {
+  // 服务从 services.json 下线后清掉残留勾选，避免计数虚高
+  const alive = new Set((currentList || []).map(s => s.id));
+  for (const id of Array.from(selected)) {
+    if (!alive.has(id)) selected.delete(id);
+  }
+  const n = selected.size;
+  const startBtn = document.getElementById("startAll");
+  const stopBtn = document.getElementById("stopAll");
+  const selBtn = document.getElementById("selectAll");
+  startBtn.textContent = n ? "启动所选 (" + n + ")" : "全部启动";
+  stopBtn.textContent = n ? "停止所选 (" + n + ")" : "全部停止";
+  startBtn.disabled = stopBtn.disabled = !n || busy;
+  startBtn.title = stopBtn.title = n ? "仅作用于勾选的 " + n + " 个服务" : "先勾选服务卡片";
+  selBtn.textContent = n ? "清空所选" : "全选";
+  selBtn.disabled = busy;
+}
 
 function render(list, force) {
   currentList = list;
@@ -232,7 +258,8 @@ function render(list, force) {
         : (declared.length ? " · :" + declared.join(", :") : "");
     }
     card.innerHTML =
-      '<div class="top"><span class="dot ' + dotCls + '"></span>' +
+      '<div class="top"><input class="pick" type="checkbox" title="勾选后顶部批量按钮仅作用于所选服务" />' +
+      '<span class="dot ' + dotCls + '"></span>' +
       '<span class="name"></span></div>' +
       '<div class="meta"></div>' +
       '<div class="actions">' +
@@ -244,6 +271,16 @@ function render(list, force) {
       '<button class="cfg">配置</button></div>';
     card.querySelector(".name").textContent = s.name;
     card.querySelector(".meta").textContent = meta;
+    const pick = card.querySelector(".pick");
+    pick.dataset.id = s.id;
+    pick.checked = selected.has(s.id);
+    pick.disabled = busy;
+    card.classList.toggle("sel", pick.checked);
+    pick.onchange = () => {
+      if (pick.checked) selected.add(s.id); else selected.delete(s.id);
+      card.classList.toggle("sel", pick.checked);
+      updateBatchBar();
+    };
     ["start", "restart", "stop"].forEach(cls => { card.querySelector("." + cls).disabled = busy; });
     const openBtn = card.querySelector(".open");
     if (s.frontend) {
@@ -257,6 +294,7 @@ function render(list, force) {
     card.querySelector(".cfg").onclick = () => openConfig(s);
     grid.appendChild(card);
   });
+  updateBatchBar();
 }
 
 function startBtnWire(card, s) {
@@ -431,12 +469,16 @@ async function refresh(force) {
   }
 }
 
-/* ---- 批量启停 ---- */
+/* ---- 批量启停（仅作用于勾选的服务） ---- */
 async function batch(path, label) {
   if (busy) return;
-  const list = currentList || [];
-  if (!list.length) return;
-  if (path === "/api/stop" && !confirm("确定停止全部服务？（强制结束进程）")) return;
+  const list = selectedServices();
+  if (!list.length) {
+    toast("请先勾选要批量操作的服务卡片");
+    return;
+  }
+  if (path === "/api/stop" &&
+      !confirm("确定停止所选 " + list.length + " 个服务？（强制结束进程）\n" + list.map(s => s.name).join("、"))) return;
   busy = true;
   render(currentList, true);
   let okN = 0;
@@ -469,6 +511,20 @@ async function batch(path, label) {
 
 document.getElementById("startAll").onclick = () => batch("/api/start", "批量启动");
 document.getElementById("stopAll").onclick = () => batch("/api/stop", "批量停止");
+document.getElementById("selectAll").onclick = () => {
+  if (busy) return;
+  if (selected.size) {
+    selected.clear();
+  } else {
+    (currentList || []).forEach(s => selected.add(s.id));
+  }
+  document.querySelectorAll("#grid .card .pick").forEach(cb => {
+    const on = selected.has(cb.dataset.id);
+    cb.checked = on;
+    cb.closest(".card").classList.toggle("sel", on);
+  });
+  updateBatchBar();
+};
 
 /* ---- 全局快捷键 ---- */
 document.addEventListener("keydown", (e) => {
