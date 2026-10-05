@@ -730,7 +730,8 @@ def _build_phone_place(date: str, cfg: Config) -> tuple[str, str, str]:
             f"- 异常：{a.get('kind', '')} {a.get('poi', '')}（{a.get('detail', '')}）"
             for a in anomalies
         ]
-        # 手工语义背景（place_semantics.json）：地点 note + 区县 note，仅 detail 呈现不占 compact 预算
+        # 背景注记：地点 note 来自 places.note 列（编辑器直写，v3.5），
+        # 区县 note 来自 place_semantics.json；仅 detail 呈现不占 compact 预算
         from gacore.langTrack import place_semantics
 
         sem = place_semantics.load()
@@ -738,7 +739,7 @@ def _build_phone_place(date: str, cfg: Config) -> tuple[str, str, str]:
         seen_district_notes: list[str] = []
         districts_seen: set[str] = set()
         for s in stays:
-            n = place_semantics.note_for(s.get("place_id"), s.get("poi") or "", cfg=sem)
+            n = (s.get("note") or "").strip()
             if n and f"{s['label']}——{n}" not in seen_place_notes:
                 seen_place_notes.append(f"{s['label']}——{n}")
             d = (s.get("district") or "").strip()

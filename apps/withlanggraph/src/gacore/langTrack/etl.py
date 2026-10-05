@@ -2399,6 +2399,12 @@ def run(db_path: Path = DB_PATH, device_id: str | None = None, run_geocode: bool
 
     conn.executescript(_SCHEMA)
 
+    # v3 列迁移（R6，幂等）：places 加 note 列（编辑器直写的手写背景注记）
+    from gacore.langTrack.location_reader import ensure_note_column
+
+    if ensure_note_column(conn):
+        print("[etl] places.note 列已添加（user_version -> 3）")
+
     # 位置事实 v2 守卫：激活后（user_version>=2）places/stays/trips 为 v2 冻结
     # schema（place_id 主键 + 三个计数语义）。v1 位置管线禁止触碰——否则
     # visit_count 累加事故（P0）复活、place_id/stay 引用被洗掉。位置事实改由

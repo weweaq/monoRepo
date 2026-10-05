@@ -36,7 +36,7 @@ _PLACE_COLS = (
     "id, device_id, grid_key, lat, lon, label, first_seen, last_seen, "
     "visit_count, is_primary, address, poi, poi_fallback, district, township, "
     "business_area, poi_type, behavior, matched_level, candidate_label, "
-    "confidence_home, confidence_work, geocoded_at, poi_l1, poi_l2, poi_l3"
+    "confidence_home, confidence_work, geocoded_at, poi_l1, poi_l2, poi_l3, note"
 )
 
 # v2 新增计数列（v1 无，由 reader 兼容映射）。
@@ -68,6 +68,22 @@ def schema_version(conn: sqlite3.Connection) -> int:
 
 def is_v2(conn: sqlite3.Connection) -> bool:
     return schema_version(conn) >= 2
+
+
+def ensure_note_column(conn: sqlite3.Connection) -> bool:
+    """v3 列迁移（R6）：places 加 note 列（用户手写背景注记，编辑器直写）。
+
+    ⚠️ 不递增 PRAGMA user_version：该版本号被 location v2 占用为"位置事实 schema
+    版本"（>=2 即走 v2 全量重建分支），在 v1 库上递增会把库误标成 v2。
+    迁移以列存在性为幂等判据（列级 ALTER 幂等，重放无害），属 R6 递增规则的
+    既记录例外。已存在返回 False。
+    """
+    cols = table_columns(conn, "places")
+    if not cols or "note" in cols:
+        return False
+    conn.execute("ALTER TABLE places ADD COLUMN note TEXT")
+    conn.commit()
+    return True
 
 
 def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -142,6 +158,8 @@ def _norm_place(row: sqlite3.Row, *, v2: bool) -> dict:
     out["name_confidence"] = float(row["name_confidence"] or 0.0)
     out["name_evidence"] = row["name_evidence"] or ""
     out["parent_poi"] = row["parent_poi"] or ""
+    # v3 手写背景注记（缺列/未迁移 → 空）
+    out["note"] = row["note"] or ""
     return out
 
 

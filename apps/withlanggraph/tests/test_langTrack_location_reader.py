@@ -44,6 +44,7 @@ PLACE_FIELDS = {
     "candidate_label", "confidence_home", "confidence_work", "geocoded_at",
     "name_confidence", "name_evidence", "parent_poi",
     "poi_l1", "poi_l2", "poi_l3",
+    "note",  # v3 列（编辑器直写的手写背景注记；未迁移库恒 NULL）
 }
 STAY_FIELDS = {
     "device_id", "place_id", "start_ts", "end_ts", "duration_ms",

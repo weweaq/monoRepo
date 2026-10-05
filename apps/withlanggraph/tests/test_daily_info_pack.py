@@ -929,17 +929,24 @@ def test_fetch_limit_knob(tmp_path, monkeypatch):
 
 
 def test_phone_place_semantics_notes(tmp_path, monkeypatch):
-    """语义配置（v3.4）：地点 note/区县 note 进 detail；stays 全量行带异地标注。"""
+    """v3.5：地点 note 来自 places.note 列（编辑器直写）、区县 note 来自 json；stays 全量行带异地标注。"""
+    import sqlite3
+
     from gacore.langTrack import place_semantics as ps
 
     sem = tmp_path / "place_semantics.json"
     sem.write_text(json.dumps({
-        "places": [{"place_id": "p_home", "note": "注记一"}],
         "districts": [{"district": "雨花台区", "note": "南京主城之一"}],
     }, ensure_ascii=False), encoding="utf-8")
     monkeypatch.setattr(ps, "CONFIG_PATH", sem)
     cfg = _cfg(tmp_path)
     _seed_langtrack_db(cfg, "2026-09-10")
+    # 合成库无 v3 note 列：先迁移再写值（编辑器 save_place_labels 同路径）
+    conn = sqlite3.connect(cfg.root / "data" / "langTrack.db")
+    conn.execute("ALTER TABLE places ADD COLUMN note TEXT")
+    conn.execute("UPDATE places SET note='注记一' WHERE place_id='p_home'")
+    conn.commit()
+    conn.close()
     title, pack, detail = dip._build_phone_place("2026-09-10", cfg)
     assert "- 地点背景：XX路1号〔家〕——注记一" in detail
     assert "- 区县背景：雨花台区——南京主城之一" in detail

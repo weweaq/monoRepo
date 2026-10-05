@@ -1086,27 +1086,24 @@ def test_timeline_merges_same_place_short_out():
     assert len(card["stays"]) == 3 and len([s for s in card["stays"] if s["place_id"] == "p_zd"]) == 3
 
 
-def test_semantics_tag_and_note_overlay(tmp_path, monkeypatch):
-    """place_semantics.json：tag 覆盖 DB label 进显示，note 进 StayBrief；note 不进 compact。"""
-    from gacore.langTrack import place_semantics as ps
-
-    sem_path = tmp_path / "place_semantics.json"
-    sem_path.write_text(
-        json.dumps({"places": [{"poi": "张垛", "tag": "张威的老家", "note": "乌溪镇"}]},
-                   ensure_ascii=False),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(ps, "CONFIG_PATH", sem_path)
+def test_custom_db_label_and_note_flow():
+    """v3.5 DB 即真源：自定义标签直写 places.label → 显示〔标签〕；places.note → StayBrief.note。"""
     conn = _short_out_db()
+    cur = conn.cursor()
+    cur.execute("ALTER TABLE places ADD COLUMN note TEXT")  # 合成库未含 v3 列，先迁移
+    cur.execute("UPDATE places SET label='张威的老家', note='乌溪镇，小时候常住' WHERE place_id='p_zd'")
+    conn.commit()
     card = fc.build(conn=conn, day="2026-08-18", device_id="dev1")
     text = fc.render_compact(card)
     assert "张垛〔张威的老家〕（安徽省马鞍山市当涂县） 00:00-17:06" in text
-    assert card["stays"][0]["note"] == "乌溪镇"
+    assert card["stays"][0]["note"] == "乌溪镇，小时候常住"
     assert card["stays"][0]["user_tag"] == "张威的老家"
+    # 自定义标签进停留分桶（"多算的有趣指标"第一例）
+    assert card["stay_minutes"].get("张威的老家") > 0
 
 
-def test_semantics_absent_file_is_noop():
-    """无语义配置：行为与旧版一致（无 tag 叠加、无 note），region 仍按区县差异标注。"""
+def test_unlabeled_place_is_noop():
+    """未自定义标签：显示无〔tag〕、note 空，region 仍按区县差异标注。"""
     conn = _short_out_db()
     card = fc.build(conn=conn, day="2026-08-18", device_id="dev1")
     assert card["stays"][0]["user_tag"] == ""

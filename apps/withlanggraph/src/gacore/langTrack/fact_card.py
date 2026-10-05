@@ -36,7 +36,6 @@ from gacore.langTrack.location_facts import (
     resolve_place_name,
     user_tag_of,
 )
-from gacore.langTrack import place_semantics
 from gacore.langTrack.persona import build as build_persona
 
 _TZ = datetime.timezone(datetime.timedelta(hours=8))
@@ -84,7 +83,7 @@ class StayBrief(TypedDict):
     point_count: int
     avg_accuracy_m: float | None
     region: str  # 异地标注（区县 != 家所在区县 → "（区县）"，本地空串）
-    note: str  # 手工语义配置注记（place_semantics.json），无则空串
+    note: str  # 手写背景注记（places.note 列，编辑器直写），无则空串
 
 
 class TripBrief(TypedDict):
@@ -290,8 +289,7 @@ def _load_places(conn: sqlite3.Connection, device_id: str | None) -> tuple[dict,
 
     返回 (by_id, by_grid)：v2 优先按 place_id 寻址；v1/缺表按 grid_key 回落。
     读取失败降级为空索引不抛——stay 内嵌字段仍可用，展示降级为「未知地点」。
-    语义叠加：place_semantics.json 的 tag 覆盖 DB label（手工语义 > ETL 标签），
-    place dict 为本次读取的新对象，原地覆盖不影响库。
+    自定义标签即 DB label（编辑器直写 places.label，v3.5 起无叠加层）。
     """
     by_id: dict[str, dict] = {}
     by_grid: dict[str, dict] = {}
@@ -300,13 +298,7 @@ def _load_places(conn: sqlite3.Connection, device_id: str | None) -> tuple[dict,
     try:
         from gacore.langTrack import location_reader as lr
 
-        sem = place_semantics.load()
         for p in lr.read_places(conn, device_id=device_id):
-            sem_tag = place_semantics.resolve_tag(
-                p.get("place_id"), p.get("poi") or "", p.get("label") or "", cfg=sem
-            )
-            if sem_tag:
-                p["label"] = sem_tag
             if p.get("place_id"):
                 by_id[str(p["place_id"])] = p
             if p.get("grid_key"):
@@ -708,14 +700,14 @@ def _fill_card(
         poi = (place.get("poi") or "") if place else ""
         mins = (ce - cs) // 60000
         tag = (ref or {}).get("user_tag", "")
-        if tag == "家":
-            bucket = "家"
-        elif tag == "公司":
-            bucket = "公司"
-        elif label == "未知地点":
+        # 停留分桶按自定义标签聚合（v3.5）：家/公司固定桶在前，其余用户标签各自成桶，
+        # 有名无标签→其他、无名→未知（计算语义仍按"家/公司"精确值）
+        if label == "未知地点":
             bucket = "未知"
-        else:
+        elif not tag:
             bucket = "其他"
+        else:
+            bucket = tag
         stay_minutes[bucket] = stay_minutes.get(bucket, 0) + mins
         stay_briefs.append(StayBrief(
             place_id=(str((place or {}).get("place_id") or "") if place else None),
@@ -737,10 +729,7 @@ def _fill_card(
                 home_district,
                 (place.get("address") or "") if place else "",
             ),
-            note=place_semantics.note_for(
-                (str(place["place_id"]) if place and place.get("place_id") else None),
-                poi,
-            ) if place else "",
+            note=(place.get("note") or "") if place else "",
         ))
 
     # location_as_of：裁剪后 stays 最大 end_ts
@@ -1033,10 +1022,25 @@ def _build_current_section(card: FactCard) -> CompactSection | None:
 
 
 def _build_stay_section(card: FactCard) -> CompactSection | None:
-    """停留累计：裁剪后 stays 按 label 纯聚合（时长求和，不推断上班/居家）。"""
+    """停留累计：裁剪后 stays 按自定义标签聚合（v3.5）。
+
+    家/公司固定桶在前（计算语义桶，位置稳定），其余用户标签按时长降序
+    （上限 4 个防挤占预算），其他/未知收尾。不推断上班/居家。
+    """
     sm = card.get("stay_minutes") or {}
     items = []
-    for key in ("家", "公司", "其他", "未知"):
+    for key in ("家", "公司"):
+        mins = sm.get(key, 0)
+        if mins > 0:
+            items.append(f"{key} {mins / 60:.1f}h")
+    custom = [
+        (k, v) for k, v in sm.items()
+        if k not in ("家", "公司", "其他", "未知") and v > 0
+    ]
+    custom.sort(key=lambda kv: -kv[1])
+    for k, v in custom[:4]:
+        items.append(f"{k} {v / 60:.1f}h")
+    for key in ("其他", "未知"):
         mins = sm.get(key, 0)
         if mins > 0:
             items.append(f"{key} {mins / 60:.1f}h")

@@ -865,8 +865,8 @@ class TestDataPage:
         )
         now_ms = int(time.time() * 1000)
         rows = [
-            (now_ms - 3600_000, "music_play", json.dumps({"pkg": "ncm", "song": "x"}, ensure_ascii=False)),
-            (now_ms - 7200_000, "sms", json.dumps({"number": "106", "text": "验证码 1"}, ensure_ascii=False)),
+            (now_ms - 300_000, "music_play", json.dumps({"pkg": "ncm", "song": "x"}, ensure_ascii=False)),
+            (now_ms - 600_000, "sms", json.dumps({"number": "106", "text": "验证码 1"}, ensure_ascii=False)),
             (now_ms - 86400_000 * 2, "location", json.dumps({"lat": 31.1, "lon": 118.6}, ensure_ascii=False)),
             (now_ms, "bad_json", "not-json{"),
         ]
@@ -928,7 +928,9 @@ class TestDataPage:
         cfg = Config.for_tests(tmp_path)
         self._make_langtrack_db(cfg)
         c = _client(cfg, monkeypatch)
-        today = datetime.date.today().isoformat()
+        # 当日取数按东八区日窗；测试种子也锚定东八区当天（午夜后跑不落到昨天）
+        _tz8 = datetime.timezone(datetime.timedelta(hours=8))
+        today = datetime.datetime.now(_tz8).date().isoformat()
         r = c.get("/api/data/events", params={"type": "sms", "day": today})
         assert r.status_code == 200
         body = r.json()
@@ -975,3 +977,106 @@ class TestDataPage:
         assert tables["shadow_places_v2"]["kind"] == "影子表"
         assert tables["events"]["kind"] == "事实/过程"
         assert tables["events"]["rows"] == 4
+
+
+# ---------------------------------------------------------------------------
+# /places 语义地点编辑页（v3.5）：页面渲染 + 直写 DB 保存 API
+# ---------------------------------------------------------------------------
+
+class TestPlacesPage:
+    def _seed_db(self, cfg: Config) -> None:
+        import sqlite3
+
+        from gacore.langTrack.location_reader import ensure_note_column
+
+        (cfg.root / "data").mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(cfg.root / "data" / "langTrack.db")
+        conn.executescript(
+            """
+            CREATE TABLE places (
+              id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL,
+              grid_key TEXT NOT NULL, lat REAL NOT NULL, lon REAL NOT NULL,
+              label TEXT DEFAULT '未知', first_seen INTEGER, last_seen INTEGER,
+              visit_count INTEGER NOT NULL DEFAULT 0, is_primary INTEGER NOT NULL DEFAULT 0,
+              address TEXT, poi TEXT, district TEXT, township TEXT, place_id TEXT
+            );
+            CREATE TABLE stays (
+              id INTEGER PRIMARY KEY AUTOINCREMENT, device_id TEXT NOT NULL,
+              place_id TEXT, grid_key TEXT, start_ts INTEGER, end_ts INTEGER, day TEXT
+            );
+            """
+        )
+        conn.execute("PRAGMA user_version = 2")
+        conn.execute(
+            "INSERT INTO places(device_id, grid_key, lat, lon, label, first_seen, last_seen, "
+            "visit_count, address, poi, district, township, place_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("dev1", "g1", 31.99, 118.78, "未知", 1000, 2000, 9,
+             "安徽省马鞍山市当涂县乌溪镇张垛", "张垛", "当涂县", "乌溪镇", "p_zd"),
+        )
+        conn.commit()
+        assert ensure_note_column(conn) is True
+        conn.close()
+
+    def test_places_page_renders(self, tmp_path: Path, monkeypatch) -> None:
+        cfg = Config.for_tests(tmp_path)
+        self._seed_db(cfg)
+        c = _client(cfg, monkeypatch)
+        text = c.get("/places").text
+        assert "语义地点" in text and "待办" in text
+        assert "/places" in c.get("/config").text          # 导航含新入口
+
+    def test_places_page_nav_link(self, tmp_path: Path, monkeypatch) -> None:
+        cfg = Config.for_tests(tmp_path)
+        c = _client(cfg, monkeypatch)
+        assert '<a href="/places">语义地点</a>' in c.get("/data").text
+
+    def test_places_page_db_missing(self, tmp_path: Path, monkeypatch) -> None:
+        cfg = Config.for_tests(tmp_path)
+        c = _client(cfg, monkeypatch)
+        text = c.get("/places").text
+        assert "不存在" in text  # 空态降级不抛
+
+    def test_post_labels_writes_db(self, tmp_path: Path, monkeypatch) -> None:
+        import sqlite3
+
+        cfg = Config.for_tests(tmp_path)
+        self._seed_db(cfg)
+        c = _client(cfg, monkeypatch)
+        r = c.post("/api/places/labels", headers=_headers(), json={
+            "items": [{"place_id": "p_zd", "poi": "张垛", "label": "张威的老家",
+                       "note": "外婆家，逢年过节必回"}]})
+        assert r.json()["ok"] is True and r.json()["updated"] == 1
+        conn = sqlite3.connect(cfg.root / "data" / "langTrack.db")
+        label, note = conn.execute(
+            "SELECT label, note FROM places WHERE place_id='p_zd'").fetchone()
+        conn.close()
+        assert label == "张威的老家" and note == "外婆家，逢年过节必回"
+        # 页面回读：刷新后数据带上新标签
+        assert "张威的老家" in c.get("/places").text
+
+    def test_post_labels_requires_token(self, tmp_path: Path, monkeypatch) -> None:
+        cfg = Config.for_tests(tmp_path)
+        self._seed_db(cfg)
+        c = _client(cfg, monkeypatch, token=None)
+        r = c.post("/api/places/labels", json={"items": []})
+        assert r.status_code == 401
+
+    def test_post_labels_db_missing_400(self, tmp_path: Path, monkeypatch) -> None:
+        cfg = Config.for_tests(tmp_path)
+        c = _client(cfg, monkeypatch)
+        r = c.post("/api/places/labels", headers=_headers(), json={
+            "items": [{"place_id": "x", "poi": "", "label": "a", "note": ""}]})
+        assert r.status_code == 400  # places 表不存在 → ValueError → 400
+
+    def test_post_districts_roundtrip(self, tmp_path: Path, monkeypatch) -> None:
+        cfg = Config.for_tests(tmp_path)
+        self._seed_db(cfg)
+        c = _client(cfg, monkeypatch)
+        r = c.post("/api/places/districts", headers=_headers(), json={
+            "items": [{"district": "当涂县", "note": "李白墓园所在，当涂民歌国家级非遗"}]})
+        assert r.json()["ok"] is True
+        text = c.get("/places").text
+        assert "当涂民歌" in text  # 页面回读 json 里的区县背景
+        assert "place_id" not in json.loads(
+            (cfg.root / "data" / "place_semantics.json").read_text(encoding="utf-8")
+        )  # json 只剩 districts（DB 即真源）
