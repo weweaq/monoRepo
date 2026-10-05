@@ -620,9 +620,10 @@ def test_build_info_pack_report_stash_and_real_headers(tmp_path, monkeypatch):
     stats = dip.last_pack_stats()
     assert [s["key"] for s in stats] == [s.key for s in dip.SOURCES]
     assert all(isinstance(s.get("packed_body"), str) for s in stats)
-    # langTrack 源不再出现在信息包（C2 A′）
+    # langTrack 旧源 _LANGTRACK 不再出现（C2 A′）；v3.3 起手机事实源以 _PHONE_* 进包，
+    # 测试环境无 langTrack.db → 降级为“无数据”行（可观测的空态，而非缺席）
     assert "_LANGTRACK" not in {s["key"] for s in stats}
-    assert "手机使用" not in pack
+    assert "无 langTrack 位置数据" in pack
 
 
 # --------------------------------------------------------------------------- #
@@ -672,3 +673,228 @@ def test_media_split_music_vs_video(tmp_path):
     assert "听歌全量" in detail_body and "视频伴音全量" in detail_body
     # 真实值核对：row_factory=Row 未设会导致 _listen_music 静默返回空 → 断言能兜住
     assert "今日无听歌记录" not in pack_body
+
+
+# --------------------------------------------------------------------------- #
+# 手机事实源（v3.3）：_PHONE_PLACE / _PHONE_USAGE / _PHONE_NOTIF               #
+# 合成库 schema 对齐 tests/test_langTrack_fact_card._make_db（已验证与
+# fact_card.build 兼容的最小 v2 表结构）；落盘文件库（builder 按 db_path 打开）。
+# --------------------------------------------------------------------------- #
+def _ts8(y: int, mo: int, d: int, hh: int, mi: int = 0) -> int:
+    import datetime as _dt
+
+    return int(_dt.datetime(y, mo, d, hh, mi, tzinfo=_dt.timezone(_dt.timedelta(hours=8))).timestamp() * 1000)
+
+
+def _seed_langtrack_db(
+    cfg: Config, day: str, *, with_stats: bool = True, with_stays: bool = True,
+    notif_payloads: list[str] | None = None,
+) -> Path:
+    """在 cfg.root/data/langTrack.db 写合成 v2 事实库，绝不触碰真实库。"""
+    import json
+    import sqlite3
+
+    db = cfg.root / "data" / "langTrack.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db)
+    cur = conn.cursor()
+    cur.execute("PRAGMA user_version=2")
+    cur.execute(
+        "CREATE TABLE daily_stats ("
+        "device_id TEXT, day TEXT, total_screen_ms INTEGER, app_ranking_json TEXT,"
+        "notification_count INTEGER, notification_clicked INTEGER, top_notification_apps_json TEXT,"
+        "screen_on_count INTEGER, screen_off_count INTEGER, unlock_count INTEGER,"
+        "switch_count INTEGER, location_count INTEGER, audio_clip_count INTEGER,"
+        "sleep_start_hhmm TEXT, sleep_end_hhmm TEXT, sleep_duration_min INTEGER, time_app_json TEXT)"
+    )
+    cur.execute("CREATE TABLE etl_state (device_id TEXT PRIMARY KEY, last_event_ts INTEGER)")
+    cur.execute(
+        "CREATE TABLE places ("
+        "id INTEGER, device_id TEXT, place_id TEXT, grid_key TEXT, label TEXT,"
+        "visit_count INTEGER, point_count INTEGER, stay_ms INTEGER,"
+        "poi TEXT, address TEXT, district TEXT, behavior TEXT,"
+        "name_confidence REAL, name_evidence TEXT, parent_poi TEXT,"
+        "township TEXT, business_area TEXT)"
+    )
+    cur.execute(
+        "CREATE TABLE stays ("
+        "id INTEGER, device_id TEXT, place_id TEXT, grid_key TEXT,"
+        "start_ts INTEGER, end_ts INTEGER, day TEXT, avg_accuracy_m INTEGER)"
+    )
+    cur.execute(
+        "CREATE TABLE trips ("
+        "id INTEGER, device_id TEXT, start_ts INTEGER, end_ts INTEGER, dist_m INTEGER, day TEXT,"
+        "from_place_id TEXT, to_place_id TEXT, route_dist_m INTEGER)"
+    )
+    cur.execute(
+        "CREATE TABLE anomalies ("
+        "id INTEGER, device_id TEXT, day TEXT, kind TEXT, poi TEXT, detail TEXT, ts INTEGER)"
+    )
+    cur.execute(
+        "CREATE TABLE events ("
+        "id INTEGER, device_id TEXT, ts INTEGER, type TEXT, payload TEXT, received_at INTEGER)"
+    )
+    cur.execute("CREATE TABLE place_cells (device_id TEXT, place_id TEXT, grid_key TEXT)")
+
+    y, mo, d = (int(x) for x in day.split("-"))
+    dev = "dev-test"
+    cur.execute("INSERT INTO etl_state VALUES (?,?)", (dev, _ts8(y, mo, d, 22, 0)))
+    if with_stats:
+        # 10 个 App：卡内截 8、pack 取 Top5、detail 直查全量 → 三层截断互为对照
+        ranking = json.dumps(
+            [{"app": f"App{i}", "ms": 3_600_000 - i * 300_000} for i in range(10)]
+        )
+        cur.execute(
+            "INSERT INTO daily_stats VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (dev, day, 21_600_000, ranking, 12, 3,
+             json.dumps([{"app": "微信", "n": 8}, {"app": "飞书", "n": 4}]),
+             5, 4, 30, 80, 40, 0, "23:40", "06:30", 400, "[]"),
+        )
+    if with_stays:
+        cur.executemany(
+            "INSERT INTO places VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                (1, dev, "p_home", "g_home", "家", 10, 10, 3_000_000,
+                 "家小区", "XX路1号", "玄武区", "home", 0.0, "", "", "", ""),
+                (2, dev, "p_work", "g_work", "公司", 20, 20, 6_000_000,
+                 "公司大厦", "YY路2号", "雨花台区", "work", 0.0, "", "", "", ""),
+            ],
+        )
+        cur.executemany(
+            "INSERT INTO stays VALUES (?,?,?,?,?,?,?,?)",
+            [
+                (1, dev, "p_home", "g_home", _ts8(y, mo, d, 0, 0), _ts8(y, mo, d, 8, 0), day, 15),
+                (2, dev, "p_work", "g_work", _ts8(y, mo, d, 9, 0), _ts8(y, mo, d, 12, 0), day, 20),
+            ],
+        )
+        cur.execute(
+            "INSERT INTO trips VALUES (?,?,?,?,?,?,?,?,?)",
+            (1, dev, _ts8(y, mo, d, 8, 0), _ts8(y, mo, d, 9, 0), 3200, day, "p_home", "p_work", None),
+        )
+        cur.execute(
+            "INSERT INTO anomalies VALUES (?,?,?,?,?,?,?)",
+            (1, dev, day, "new_place", "德基广场", "访问 1 次", _ts8(y, mo, d, 20, 0)),
+        )
+    for i, payload in enumerate(notif_payloads or []):
+        cur.execute(
+            "INSERT INTO events VALUES (?,?,?,?,?,?)",
+            (i + 1, dev, _ts8(y, mo, d, 8, i), "notification", payload, _ts8(y, mo, d, 8, i)),
+        )
+    conn.commit()
+    conn.close()
+    return db
+
+
+def test_phone_place_full(tmp_path):
+    """轨迹时间线/停留累计/水位/异常进 pack；stays/trips 全量进 detail。"""
+    cfg = _cfg(tmp_path)
+    _seed_langtrack_db(cfg, "2026-09-10")
+    title, pack, detail = dip._build_phone_place("2026-09-10", cfg)
+    assert title == "〔手机·位置轨迹〕"
+    assert "今日轨迹" in pack and "00:00-08:00" in pack and "移动 1 段" in pack
+    # 合成地点 name_confidence=0 → _friendly_label 渲染为 "地址〔label〕"，只断锚点
+    assert "00:00-08:00 → " in pack and "09:00-12:00" in pack
+    assert "停留累计：家 8.0h · 公司 3.0h" in pack
+    assert "数据窗口未闭合（数据至 22:00）" in pack  # 水位 22:00 < 日末
+    assert "异常：new_place 德基广场（访问 1 次）" in pack
+    assert "stays 全量（2 段）" in detail and "trips 全量（1 段）" in detail
+    assert "公司大厦" not in detail  # 地点显示用 label，不带 poi 地址
+
+
+def test_phone_place_no_db(tmp_path):
+    title, pack, detail = dip._build_phone_place("2026-09-10", _cfg(tmp_path))
+    assert "无 langTrack 位置数据" in pack
+    assert dip.classify_body(pack)[0] == "missing_data"
+    assert detail == ""
+
+
+def test_phone_place_empty_day(tmp_path):
+    """有库有 stats 但当日无 stays/trips → 空态行（不冒充有轨迹）。"""
+    cfg = _cfg(tmp_path)
+    _seed_langtrack_db(cfg, "2026-09-10", with_stays=False, notif_payloads=[])
+    title, pack, detail = dip._build_phone_place("2026-09-10", cfg)
+    assert "当日无手机位置数据" in pack
+    assert dip.classify_body(pack)[0] == "missing_data"
+    assert detail == ""
+
+
+def test_phone_usage_full(tmp_path):
+    """聚合行/App Top5/通知计数/作息进 pack；detail=排行全量+通知来源分布。"""
+    cfg = _cfg(tmp_path)
+    _seed_langtrack_db(cfg, "2026-09-10")
+    title, pack, detail = dip._build_phone_usage("2026-09-10", cfg)
+    assert title == "〔手机·使用统计〕"
+    assert "屏幕 6.0h · 解锁 30 · 切换 80" in pack
+    assert "App Top：App0 1.0h、App1 0.9h、App2 0.8h、App3 0.8h、App4 0.7h" in pack
+    assert "通知 12 条 · 点击 3 条 · 来源 微信、飞书" in pack
+    assert "作息 睡 23:40 起 06:30（400min）" in pack
+    assert "App 排行全量（10 个）" in detail  # 卡内截 8，detail 直查 daily_stats 全量
+    assert "通知来源分布：微信×8、飞书×4" in detail
+
+
+def test_phone_usage_no_stats(tmp_path):
+    cfg = _cfg(tmp_path)
+    _seed_langtrack_db(cfg, "2026-09-10", with_stats=False)
+    title, pack, detail = dip._build_phone_usage("2026-09-10", cfg)
+    assert "当日无手机使用统计" in pack
+    assert dip.classify_body(pack)[0] == "missing_data"
+    assert detail == ""
+
+
+def test_phone_notif_tail_and_merge(tmp_path):
+    """尾窗取最近 8（军规①）+ 连续同源合并 + 单条 50 字截断（唯一截断点）。"""
+    import json
+
+    payloads = [
+        json.dumps({"app": "微信", "title": "群A", "text": f"消息{i}", "clicked": "False"})
+        for i in range(5)
+    ]
+    payloads.append(json.dumps({"app": "微信", "title": "群B", "text": "长" * 80, "clicked": "False"}))
+    payloads.append(json.dumps({"app": "电话", "text": "未接来电", "clicked": "True"}))
+    payloads += [
+        json.dumps({"app": "飞书", "title": "群C", "text": f"连发{i}", "clicked": "False"})
+        for i in range(3)
+    ]
+    payloads.append(json.dumps({"pkg": "com.android.systemui", "removed": "True"}))  # 无文本标记
+    cfg = _cfg(tmp_path)
+    _seed_langtrack_db(cfg, "2026-09-10", notif_payloads=payloads)
+    title, pack, detail = dip._build_phone_notif("2026-09-10", cfg)
+    assert title == "〔手机·通知摘要〕"
+    assert "内容事件 4 条，取最近 8" in pack  # 群A×5、群C×3 各合并为 1，移除标记剔除
+    assert "（连续 5 条）" in pack and "（连续 3 条）" in pack
+    assert "长" * 50 in pack and "长" * 51 not in pack  # 截断在 50 字
+    assert "[08:06] 电话：未接来电" in pack
+    assert "全量（4 条，同源已合并）" in detail
+    assert "removed" not in detail
+
+
+def test_phone_notif_empty(tmp_path):
+    import json
+
+    cfg = _cfg(tmp_path)
+    _seed_langtrack_db(cfg, "2026-09-10", notif_payloads=[json.dumps({"app": "x", "removed": "True"})])
+    title, pack, detail = dip._build_phone_notif("2026-09-10", cfg)
+    assert "当日无通知事件" in pack
+    assert dip.classify_body(pack)[0] == "missing_data"
+    assert detail == ""
+
+
+def test_phone_sources_registered_and_config_disabled(tmp_path, monkeypatch):
+    """三源进注册表（priority 严格升序）；config enabled=false 停用生效。外部工具一律 stub 保持封闭。"""
+    monkeypatch.setattr(dip, "_BILLI_FN", lambda **k: {"entries": [], "total": 0})
+    monkeypatch.setattr(dip, "_BROWSER_FN", lambda **k: {"entries": []})
+    monkeypatch.setattr(dip, "_NCM_ME_FN", lambda: {"nickname": "x"})
+    monkeypatch.setattr(dip, "_NCM_PLAYLIST_FN", lambda **k: {"playlists": []})
+    monkeypatch.setattr(dip, "_run_git", lambda root, date: (0, ""))
+    cfg = _cfg(tmp_path)
+    _seed_langtrack_db(cfg, "2026-09-10")
+    priorities = {s.key: s.priority for s in dip.SOURCES}
+    assert list(priorities.values()) == sorted(priorities.values())
+    assert priorities["_PHONE_PLACE"] == 15 and priorities["_PHONE_USAGE"] == 45
+    _write_source_config(cfg, {"pack_budget": 12000, "sources": {"_PHONE_NOTIF": {"enabled": False}}})
+    pack, stats = dip.build_info_pack_report("2026-09-10", cfg)
+    by = {s["key"]: s for s in stats}
+    assert by["_PHONE_NOTIF"]["status"] == "disabled"
+    assert "〔手机·通知摘要" not in pack
+    assert "〔手机·位置轨迹" in pack and "〔手机·使用统计" in pack
+

@@ -16,8 +16,9 @@
 - **双文件落盘（全部 best-effort）**：``info_pack_health.jsonl``（每日一行元数据）+
   ``pack_detail/{date}/{key}.md``（三节详情，保留 90 天）；事实卡支线 ``_FACT_CARD.md`` 由
   context.build_system_prompt 经 ``write_fact_card_detail`` 覆盖写。
-- langTrack 手机细维度不再有独立信息包源（C2 A′）：唯一渲染出口是 fact_card compact
-  （system prompt 注入），睡眠/时段×应用已下沉为 fact_card section。
+- langTrack 手机事实源（v3.3，C2 A′ 局部修订）：_PHONE_PLACE/_PHONE_USAGE/_PHONE_NOTIF
+  进包（当日全天视角）；fact_card compact（"当前时刻"卡）仍是 chat system prompt 的唯一
+  注入出口，睡眠/时段×应用语义字段仍下沉在 fact_card section。
 
 模块级 ``_*_FN`` 名字是对外接入点：测试通过 monkeypatch 这些名字注入 fake 取数（空/满双向），
 不触碰真实 CLI / 数据库。
@@ -61,6 +62,9 @@ _FILES_CAP: int = 1000    # 当日文件活动 top15
 _NCM_CAP: int = 700       # ncm 歌单/收藏静态基线
 _MEDIA_CAP: int = 900     # 当日听歌与视频伴音（music_play 分两类）
 _MEMORY_CAP: int = 900    # 前日日报摘要（可选）
+_PHONE_PLACE_CAP: int = 800  # 手机·位置轨迹（见文件尾手机事实源区）
+_PHONE_USAGE_CAP: int = 600  # 手机·使用统计
+_PHONE_NOTIF_CAP: int = 800  # 手机·通知摘要
 
 _LONG_TERM_LINES: int = 40  # 画像 compact 行数上限（对齐 _summarize_long_term 默认）
 _BILI_TOP: int = 20         # B站当日观看 top N
@@ -147,7 +151,8 @@ def _instruction_head(date: str) -> str:
         "- 消费覆盖（C7）：每个标注“状态:全量”的信息源至少被正文消费一次；"
         "确无可用信息的源，在 daily note 归档节点名跳过原因（不进邮件正文）。\n"
         "- 降级说明：单个信息源失败会标注“该源失败/无今日数据”，属正常降级，不影响整体写作；"
-        "近 2 日 daily notes 摘要与当日生活事实卡 compact 已随系统提示注入，此处不重复。\n"
+        "近 2 日 daily notes 摘要已随系统提示注入，此处不重复。当日生活事实卡（fact_card）"
+        "注入的是“当前时刻”视角；当日的全天轨迹/使用统计/通知以 _PHONE_* 源为准，两者不重复。\n"
     )
 
 
@@ -571,6 +576,262 @@ def _build_memory(date: str, cfg: Config) -> tuple[str, str, str]:
 
 
 # --------------------------------------------------------------------------- #
+# 手机事实源（v3.3）：复用 fact_card.build 纯读卡（地名解析/裁剪/降级全复用）， #
+# 通知摘要另查 events（fact_card 不读通知内容）。与 fact_card 的分工：fact_card #
+# 是"当前时刻"卡（chat system prompt 注入），本组源是"当日全天"事实（日报进包）。#
+# --------------------------------------------------------------------------- #
+_PHONE_PLACE_CAP: int = 800   # 当日位置轨迹（stays/trips 时间线+停留累计+异常）
+_PHONE_USAGE_CAP: int = 600   # 当日手机使用统计（屏幕/App Top/解锁/通知计数）
+_PHONE_NOTIF_CAP: int = 800   # 当日通知摘要（点击过的消息，最多 8 条）
+_PHONE_NOTIF_TOP: int = 8     # 进包点击消息条数上限（取最近，军规①尾窗）
+_PHONE_TEXT_CLIP: int = 50    # 单条消息文本截断长度（唯一截断点，军规②）
+
+
+def _lang_track_card(date: str, cfg: Config) -> dict[str, Any] | None:
+    """读 langTrack 事实卡（纯读、支持任意历史日）；库缺失返回 None，读失败降级空卡不抛。"""
+    from gacore.langTrack import fact_card
+
+    db = cfg.root / "data" / "langTrack.db"
+    if not db.exists():
+        return None
+    return fact_card.build(day=date, detail="full", db_path=db, outlet="info_pack")
+
+
+def _lang_track_notifs(date: str, cfg: Config, device_id: str | None) -> list[dict[str, Any]]:
+    """当日通知内容事件（含 title/text 的载体事件，按时间升序）；库缺失返回 []。
+
+    payload 里 removed/无文本事件是通知移除标记，不是消息，跳过。
+    """
+    import sqlite3
+
+    db = cfg.root / "data" / "langTrack.db"
+    if not db.exists():
+        return []
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        sql = (
+            "SELECT ts, payload FROM events WHERE type='notification' "
+            "AND date(ts/1000,'unixepoch','+8 hours')=?"
+        )
+        args: list[Any] = [date]
+        if device_id:
+            sql += " AND device_id=?"
+            args.append(device_id)
+        sql += " ORDER BY ts ASC"
+        out: list[dict[str, Any]] = []
+        for row in conn.execute(sql, args):
+            try:
+                p = json.loads(row["payload"])
+            except (TypeError, ValueError):
+                continue
+            text = str(p.get("text") or "")
+            title = str(p.get("title") or "")
+            if not text and not title:
+                continue
+            out.append({
+                "hhmm": _dt.datetime.fromtimestamp(row["ts"] / 1000, _CN_TZ).strftime("%H:%M"),
+                "app": str(p.get("app") or p.get("pkg") or ""),
+                "title": title,
+                "text": text,
+                "clicked": p.get("clicked") == "True",
+            })
+        return out
+    finally:
+        conn.close()
+
+
+def _merge_consecutive(notifs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """连续同源（app+title 相同）事件合并为一条：保留最新文本与时刻，记 merged 条数。
+
+    微信等连发场景一次轰炸十几条同会话消息，不合并会把尾窗整段吃掉。
+    """
+    out: list[dict[str, Any]] = []
+    for n in notifs:
+        if out and out[-1].get("app") == n["app"] and out[-1].get("title") == n["title"]:
+            out[-1]["text"] = n["text"]
+            out[-1]["hhmm"] = n["hhmm"]
+            out[-1]["clicked"] = out[-1].get("clicked") or n["clicked"]
+            out[-1]["merged"] = out[-1].get("merged", 1) + 1
+        else:
+            out.append({**n, "merged": 1})
+    return out
+
+
+def _notif_head(n: dict[str, Any]) -> str:
+    """单条通知的 "应用·标题" 头，缺标题只留应用，全缺则空串。"""
+    head = n.get("app") or ""
+    if n.get("title"):
+        head = f"{head}·{n['title']}" if head else str(n["title"])
+    return head
+
+
+def _build_phone_place(date: str, cfg: Config) -> tuple[str, str, str]:
+    """当日位置轨迹（v3.3 新增）：stays/trips 时间线+停留累计+异常标记。
+
+    pack=时间线（超长折叠复用 fact_card 同款）+停留累计+数据窗口+异常 top5；
+    detail=stays/trips/anomalies 全量逐条。措辞口径与 fact_card 不失真（复用其 section 文本）。
+    """
+    title = "〔手机·位置轨迹〕"
+    try:
+        from gacore.langTrack.fact_card import _build_stay_section, _build_timeline_section
+
+        card = _lang_track_card(date, cfg)
+        if card is None:
+            return title, "- 无 langTrack 位置数据（data/langTrack.db 不存在）", ""
+        stays = card.get("stays") or []
+        trips = card.get("trips") or []
+        if not stays and not trips:
+            return title, "- 当日无手机位置数据（无 stays/trips）", ""
+        lines: list[str] = []
+        tl = _build_timeline_section(card)
+        if tl:
+            lines.append(f"- {tl['text']}")
+        st = _build_stay_section(card)
+        if st:
+            lines.append(f"- {st['text']}")
+        if not card.get("day_window_closed") and card.get("data_as_of"):
+            lines.append(f"- 数据窗口未闭合（数据至 {str(card['data_as_of'])[11:16]}）")
+        anomalies = card.get("anomalies") or []
+        for a in anomalies[:5]:
+            lines.append(f"- 异常：{a.get('kind', '')} {a.get('poi', '')}（{a.get('detail', '')}）")
+        detail_lines = [f"- stays 全量（{len(stays)} 段）："]
+        detail_lines += [
+            f"  - {s['label']} {s['start_hhmm']}-{s['end_hhmm']}"
+            f"（{s['mins']}min，{s['point_count']}点）"
+            for s in stays
+        ]
+        detail_lines.append(f"- trips 全量（{len(trips)} 段）：")
+        detail_lines += [
+            f"  - {t['start_hhmm']}-{t['end_hhmm']} {t['from_label'] or '?'}→"
+            f"{t['to_label'] or '?'}（{t['dist_m']}m）"
+            for t in trips
+        ]
+        detail_lines += [
+            f"- 异常：{a.get('kind', '')} {a.get('poi', '')}（{a.get('detail', '')}）"
+            for a in anomalies
+        ]
+        return title, "\n".join(lines), "\n".join(detail_lines)
+    except Exception as exc:  # noqa: BLE001 - 最后防线：源失败不中断整包
+        logger.warning("daily_info_pack: phone_place failed", error_type=type(exc).__name__, error=str(exc))
+        return title, f"- 该源失败：{exc}", ""
+
+
+def _build_phone_usage(date: str, cfg: Config) -> tuple[str, str, str]:
+    """当日手机使用统计（v3.3 新增）：daily_stats 聚合（屏幕/App/解锁/通知计数/作息）。
+
+    pack=聚合行+App Top5；detail=App 排行全量+通知来源分布+作息字段。睡眠字段 ETL 未
+    产出时自然缺行；"未见熬夜信号"属默认态不写，只有疑似熬夜才进包。
+    """
+    title = "〔手机·使用统计〕"
+    try:
+        from gacore.langTrack.fact_card import _hhmm_text
+
+        card = _lang_track_card(date, cfg)
+        if card is None:
+            return title, "- 无 langTrack 使用数据（data/langTrack.db 不存在）", ""
+        if not card.get("available"):
+            return title, "- 当日无手机使用统计（daily_stats 缺失）", ""
+        parts = [f"屏幕 {card.get('screen_hours', 0.0):.1f}h"]
+        if card.get("unlock_count"):
+            parts.append(f"解锁 {card['unlock_count']}")
+        if card.get("switch_count"):
+            parts.append(f"切换 {card['switch_count']}")
+        lines = ["- " + " · ".join(parts)]
+        apps = card.get("top_apps") or []
+        if apps:
+            top = "、".join(f"{a.get('app', '')} {(a.get('ms') or 0) / 3600000:.1f}h" for a in apps[:5])
+            lines.append(f"- App Top：{top}")
+        n, c = card.get("notification_count", 0), card.get("notification_clicked", 0)
+        if n:
+            src = "、".join(a.get("app", "") for a in (card.get("top_notification_apps") or [])[:3])
+            lines.append(f"- 通知 {n} 条 · 点击 {c} 条" + (f" · 来源 {src}" if src else ""))
+        start, end = card.get("sleep_start_hhmm"), card.get("sleep_end_hhmm")
+        if start or end:
+            w = "作息"
+            if start:
+                w += f" 睡 {_hhmm_text(start)}"
+            if end:
+                w += f" 起 {_hhmm_text(end)}"
+            if card.get("sleep_duration_min"):
+                w += f"（{card['sleep_duration_min']}min）"
+            lines.append(f"- {w}")
+        signal = str(card.get("sleep_signal") or "")
+        if signal.startswith("凌晨"):
+            lines.append(f"- 熬夜信号：{signal}")
+        # detail：App 排行全量直查 daily_stats（fact_card 卡内截 8），另附通知来源分布
+        detail_lines: list[str] = []
+        import sqlite3
+
+        db = cfg.root / "data" / "langTrack.db"
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                "SELECT app_ranking_json, top_notification_apps_json FROM daily_stats WHERE day=?",
+                (date,),
+            ).fetchall()
+        finally:
+            conn.close()
+        if len(rows) == 1:
+            full_apps = json.loads(rows[0]["app_ranking_json"] or "[]")
+            if full_apps:
+                detail_lines.append(
+                    f"- App 排行全量（{len(full_apps)} 个）："
+                    + "、".join(f"{a.get('app', '')} {(a.get('ms') or 0) / 3600000:.2f}h" for a in full_apps)
+                )
+            full_src = json.loads(rows[0]["top_notification_apps_json"] or "[]")
+            if full_src:
+                detail_lines.append(
+                    "- 通知来源分布：" + "、".join(f"{a.get('app', '')}×{a.get('n', 0)}" for a in full_src)
+                )
+        elif len(rows) > 1:
+            detail_lines.append(f"- 当日 daily_stats 有 {len(rows)} 行（多设备），detail 不合并只提示")
+        return title, "\n".join(lines), "\n".join(detail_lines)
+    except Exception as exc:  # noqa: BLE001 - 最后防线：源失败不中断整包
+        logger.warning("daily_info_pack: phone_usage failed", error_type=type(exc).__name__, error=str(exc))
+        return title, f"- 该源失败：{exc}", ""
+
+
+def _build_phone_notif(date: str, cfg: Config) -> tuple[str, str, str]:
+    """当日通知摘要（v3.3 新增）：内容事件尾窗（最近 N 条，连续同源合并）。
+
+    采样策略实证（2026-10-05，近 10 天 1359 事件）：payload clicked=True 只出现在无文本的
+    移除标记上，"只取点击过的"会永远空转 → 改为尾窗取最近内容事件（军规①取尾）；点击
+    行为计数由 _PHONE_USAGE 的 daily_stats 聚合行承载，本源不重复。
+    隐私边界（2026-10-05 用户拍板）：通知原文仅进本地日报与本人邮箱，不出网；
+    短信/输入法/剪贴板永不进包（AGENTS.md 采样军规负清单）。
+    """
+    title = "〔手机·通知摘要〕"
+    try:
+        card = _lang_track_card(date, cfg)
+        device_id = (card or {}).get("device_id") or None
+        notifs = _merge_consecutive(_lang_track_notifs(date, cfg, device_id))
+        if not notifs:
+            return title, "- 当日无通知事件（notification 无内容载体）", ""
+        lines: list[str] = [
+            f"- 当日消息摘录（内容事件 {len(notifs)} 条，取最近 {_PHONE_NOTIF_TOP}）："
+        ]
+        for n in notifs[-_PHONE_NOTIF_TOP:]:
+            head = _notif_head(n)
+            text = n["text"][:_PHONE_TEXT_CLIP]
+            body = f"[{n['hhmm']}] {head}：{text}" if head else f"[{n['hhmm']}] {text}"
+            if n.get("merged", 1) > 1:
+                body += f"（连续 {n['merged']} 条）"
+            lines.append(f"  - {body}")
+        detail_lines = [f"- 通知内容事件全量（{len(notifs)} 条，同源已合并）："]
+        for n in notifs:
+            head = _notif_head(n)
+            mark = "点击" if n["clicked"] else "未点击"
+            extra = f"，连续 {n['merged']} 条" if n.get("merged", 1) > 1 else ""
+            detail_lines.append(f"  - [{n['hhmm']}] {head}：{n['text']}（{mark}{extra}）")
+        return title, "\n".join(lines), "\n".join(detail_lines)
+    except Exception as exc:  # noqa: BLE001 - 最后防线：源失败不中断整包
+        logger.warning("daily_info_pack: phone_notif failed", error_type=type(exc).__name__, error=str(exc))
+        return title, f"- 该源失败：{exc}", ""
+
+
+# --------------------------------------------------------------------------- #
 # 状态分类（C1）：builder 文案约定 → 机器可读状态的唯一执行点                  #
 # --------------------------------------------------------------------------- #
 _MISSING_DATA_RE = re.compile(
@@ -706,11 +967,16 @@ class SourceSpec:
 
 
 SOURCES: Final[tuple[SourceSpec, ...]] = (
+    # 注册顺序即 priority 升序（stats 顺序与之对齐）；手机事实源（v3.3）填 ×10 序列空位，
+    # 细维度仍不做源（C2 A′ 局部修订：当日全天视角进包，fact_card 保留"当前时刻"出口）
     SourceSpec("_LONG_TERM", _LONG_TERM_CAP, 10, _build_long_term_picture),
+    SourceSpec("_PHONE_PLACE", _PHONE_PLACE_CAP, 15, _build_phone_place),
     SourceSpec("_CHAT", _CHAT_CAP, 20, _build_chat),
     SourceSpec("_BILI", _BILI_CAP, 40, _build_bili),
+    SourceSpec("_PHONE_USAGE", _PHONE_USAGE_CAP, 45, _build_phone_usage),
     SourceSpec("_EDGE", _EDGE_CAP, 50, _build_edge),
     SourceSpec("_MEDIA", _MEDIA_CAP, 60, _build_media),
+    SourceSpec("_PHONE_NOTIF", _PHONE_NOTIF_CAP, 65, _build_phone_notif),
     SourceSpec("_GIT", _GIT_CAP, 70, _build_git),
     SourceSpec("_FILES", _FILES_CAP, 80, _build_files),
     SourceSpec("_NCM", _NCM_CAP, 90, _build_ncm),

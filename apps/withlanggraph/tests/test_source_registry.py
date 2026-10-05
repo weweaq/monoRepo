@@ -53,8 +53,9 @@ def test_registry_priority_strictly_increasing_in_pack_order():
     priorities = [s.priority for s in dip.SOURCES]
     assert priorities == sorted(priorities)
     assert len(set(priorities)) == len(priorities)
-    # _LANGTRACK（priority 30）移除后留空位不重排，保证历史 jsonl 可比
-    assert all(p % 10 == 0 for p in priorities)
+    # 历史编号稳定：_LANGTRACK（priority 30）移除后留空位不重排，保证历史 jsonl 可比；
+    # v3.3 手机源在空位以 5 步长插入（15/45/65），故只要求 5 的倍数
+    assert all(p % 5 == 0 for p in priorities)
 
 
 def test_langtrack_removed_from_registry():
@@ -122,6 +123,10 @@ def _inject_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cfg: Config
         monkeypatch.setattr(dip, "_NCM_ME_FN", _raise)
     elif key == "_MEMORY":
         monkeypatch.setattr(dip, "_latest_prev_report", _raise)
+    elif key in ("_PHONE_PLACE", "_PHONE_USAGE", "_PHONE_NOTIF"):
+        # 三个手机源共用 _lang_track_card（fact_card.build 内部吞异常降级，不抛），
+        # 打桩到读卡入口才能触发 builder 的内层 try/except 产出 sentinel
+        monkeypatch.setattr(dip, "_lang_track_card", _raise)
     else:
         pytest.fail(f"新增源 {key} 未在 test_source_registry 登记失败注入方式——"
                     "请补齐后确认其失败输出遵循 '- 该源失败：' sentinel 约定")

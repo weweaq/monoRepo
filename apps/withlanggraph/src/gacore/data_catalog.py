@@ -29,18 +29,18 @@ _HIST_EPOCH_MS: Final = 1767225600000  # 2026-01-01：早于该时间的事件 t
 # 事件类型 → 消费方完整描述（/data 右详情展示）
 CONSUMERS: Final[dict[str, str]] = {
     "music_play": "_MEDIA 源（report._listen_music）",
-    "location": "stays/trips ETL → fact_card · dashboard 地图",
-    "session": "daily_stats ETL → fact_card · langTrack_stats",
-    "usage": "daily_stats ETL → fact_card · langTrack_stats",
-    "notification": "daily_stats ETL 聚合 → fact_card 通知累计（内容未消费）",
+    "location": "stays/trips ETL → _PHONE_PLACE 源 · fact_card · dashboard 地图",
+    "session": "daily_stats ETL → _PHONE_USAGE 源 · fact_card · langTrack_stats",
+    "usage": "daily_stats ETL → _PHONE_USAGE 源 · fact_card · langTrack_stats",
+    "notification": "_PHONE_NOTIF 源（内容尾窗）+ daily_stats 聚合 → _PHONE_USAGE · fact_card",
     "accel": "无消费方",
     "battery": "无消费方",
     "network": "无消费方",
     "sms": "无消费方（验证码为主，永不进包）",
-    "input": "无消费方",
-    "clipboard": "无消费方",
+    "input": "无消费方（永不进包，军规负清单）",
+    "clipboard": "无消费方（永不进包，军规负清单）",
     "screen_content": "无消费方",
-    "audio_env": "无消费方",
+    "audio_env": "无消费方（fact_card 熬夜信号间接计数）",
     "audio_clip": "无消费方",
     "app_lifecycle": "无消费方",
     "snapshot": "无消费方",
@@ -49,10 +49,10 @@ CONSUMERS: Final[dict[str, str]] = {
 # 事件类型 → 消费方短标（/data 左目录展示；未知类型回退"未接"）
 CONSUMER_SHORT: Final[dict[str, str]] = {
     "music_play": "_MEDIA 源",
-    "location": "ETL→fact_card·地图",
-    "session": "ETL→fact_card·stats",
-    "usage": "ETL→fact_card·stats",
-    "notification": "ETL聚合→fact_card",
+    "location": "_PHONE_PLACE·fact_card",
+    "session": "_PHONE_USAGE·stats",
+    "usage": "_PHONE_USAGE·stats",
+    "notification": "_PHONE_NOTIF·聚合",
 }
 
 # 事件类型缺省映射兜底：不在 CONSUMERS 里的新类型按"未接"处理
