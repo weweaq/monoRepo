@@ -1108,3 +1108,7 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 ### [2026-10-05] _BILI 单次拉取上限 50→100
 
 用户要求提高 B 站观看源取数覆盖。`_build_bili` 的 `_BILLI_FN(limit=50)` 改 `_BILI_FETCH_LIMIT=100`（工具 `_MAX_LIMIT` 本即 100，非扩工具）；detail 边界尾注同步常量化（`len(entries) >= _BILI_FETCH_LIMIT` 才标注「拉取上限 100 条」，不再硬编码）；tech §9.24 v3.2 采样修正④同步。测试 `test_bili_detail_window_note` 改 100 条断言 + 补"未触顶不加尾注"对照。51 项 daily_info_pack 测试全绿。8010 已重启，/health 页对该日「↻ 重算体检」即以新上限重拉。
+
+### [2026-10-05] v3.2.4 拉取条数上 /config——逐源 fetch_limit 旋钮 + 保存改合并语义
+
+用户要求把 _BILI 拉取上限做成网页配置项（"各个源有单独的配置项也正常"）。`_FETCH_LIMIT_SPECS`（key→默认/min/max，max 受工具硬上限约束：`_BILI`/`_EDGE` 均为 10~100，默认 100）+ `effective_fetch_limit(cfg,key)`（config `sources[key].fetch_limit` 覆盖+钳制，现读现用）；`_build_bili`/`_build_edge` 改读旋钮，窗口边界尾注随生效值。`/config` 页加「拉取条数」列（仅旋钮源有输入框，其余显示 —），POST 校验：无旋钮源带 fetch_limit 400、越界 400。**保存接口改合并语义**：实测踩坑——curl 单源 POST 曾把既有配置（NCM disabled 等）整体清掉；现 payload 只覆盖显式给出的源/字段，其余保留（页面全量发送行为不变）。测试 +2+1（daily_info_pack 旋钮覆盖/钳制/默认、review_server 列渲染/落盘回读/越界拒绝/合并保留），113 项全绿；真实 API 验证 150→400、30 落盘、页面回显 30；8010 已重启。

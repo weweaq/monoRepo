@@ -39,3 +39,5 @@ adb_reconnect.ps1
 rerun_daily.py
 memory/qq_chat_log.jsonl
 git_commit_msg.txt
+# 源预算网页配置（/config 页写、构建现读的运行时状态，与 .env 同理不入库）
+config/info_pack.json
