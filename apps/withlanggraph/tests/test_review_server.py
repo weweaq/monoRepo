@@ -738,6 +738,25 @@ class TestSourceConfig:
                     headers=_headers())
         assert r3.status_code == 400
 
+    def test_post_partial_preserves_other_sources(self, tmp_path: Path, monkeypatch):
+        """合并语义：payload 只带 _BILI 时，既有 _GIT/_NCM 设置不被清掉。"""
+        cfg = Config.for_tests(tmp_path)
+        cfg.root.joinpath("config").mkdir(parents=True)
+        (cfg.root / "config" / "info_pack.json").write_text(json.dumps({
+            "pack_budget": 9000,
+            "sources": {"_GIT": {"cap": 1500, "priority": 70}, "_NCM": {"enabled": False}},
+        }, ensure_ascii=False), encoding="utf-8")
+        c = _client(cfg, monkeypatch)
+        r = c.post("/api/config/sources",
+                   json={"pack_budget": 8000, "sources": {"_BILI": {"fetch_limit": 30}}},
+                   headers=_headers())
+        assert r.status_code == 200
+        written = json.loads((cfg.root / "config" / "info_pack.json").read_text(encoding="utf-8"))
+        assert written["sources"]["_GIT"]["cap"] == 1500      # 既有设置保留
+        assert written["sources"]["_NCM"]["enabled"] is False
+        assert written["sources"]["_BILI"]["fetch_limit"] == 30  # 新设置写入
+        assert written["pack_budget"] == 8000                    # 预算仍随 payload
+
 
 class TestNoStore:
     """HTML 页统一 no-store：重算体检后 location.reload() 必须拿到新页（v3.2.2 追补）。"""

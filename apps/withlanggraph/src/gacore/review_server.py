@@ -1607,7 +1607,16 @@ def create_app(cfg: Config | None = None) -> FastAPI:
                 prio = max(1, min(999, int(o.get("priority") or 0)))
                 entry["priority"] = prio
             norm_sources[key] = entry
-        data = {"pack_budget": budget, "sources": norm_sources}
+        # 合并语义：payload 只覆盖其显式给出的源/字段，其余既有设置原样保留
+        # （页面全量发送时行为不变；防部分 POST 意外清掉其他源配置）。
+        from gacore.daily_info_pack import load_source_config as _load_src_cfg
+
+        merged: dict[str, Any] = dict(_load_src_cfg(config))
+        merged_sources = dict(merged.get("sources") or {})
+        merged_sources.update(norm_sources)
+        merged["pack_budget"] = budget
+        merged["sources"] = merged_sources
+        data = merged
         path = _source_config_path(config)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
