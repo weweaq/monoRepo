@@ -1409,6 +1409,26 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 
 ---
 
+## 9.27 新闻热榜 MCP 桥接工具（news_mcp，2026-10-05）
+
+**背景**：用户要求给主 graph 接入 ModelScope 收录的 `aigroup-news-mcp`（Node.js stdio MCP server，MIT，免 key；`npx -y aigroup-news-mcp`），让聊天中"遇到有趣的事情可以搜一下"。三个上游工具：`get_hotest_latest_news(id, count)`（知乎/微博/GitHub/百度/B站热榜）、`search_news(keyword, source?, count?)`、`list_news_sources()`。
+
+**实现**（`src/gacore/tools/news_mcp.py`，依赖 `mcp>=2.3.0` 落 pyproject）：
+- **常驻桥接 `_McpBridge`**：后台 daemon 线程独占事件循环 + 持久 `ClientSession`（stdio 子进程）。为什么常驻：npx 冷启实测 47.8s（含拉起+初始化+抓取）、热会话往返 0.6~2.8s——每 run spawn 不可接受。gacore 的异步路径（QQ `graph.astream`）与同步路径（日报 `graph.invoke`）共用同一会话：LangChain 同步工具在异步上下文自动走线程执行器，故三个工具暴露为同步 `@tool`，桥内 `run_coroutine_threadsafe` 调度。
+- **工具三件套**：`news_hot_list` / `news_search` / `news_list_sources`（注册进 `tools/__init__.py`，TOOL_NAMES 尾部追加，总数 27→30）；`search` 的可选 `source` 参数缺省时不传（外部契约参数名不改）。
+- **stdout 脏行过滤**：该 server 会往 stdout 打人读日志（如"成功加载新闻源配置"），mcp SDK 把解析失败的行作为 `Exception` 项送入读流，ClientSession 收到即挂——在 `stdio_client` 与 `ClientSession` 之间插过滤流（只放行 `SessionMessage`，脏行丢弃；注意 `create_memory_object_stream` 返回 (send, receive)，Session 读端要 receive）。
+- **死锁教训**：`_acall` 运行在桥接循环上，等待会话就绪绝不能用 `threading.Event.wait()` 阻塞该循环（就绪信号正是靠它 set 的），必须 `asyncio.to_thread` 让出。
+- **降级约定**：npx 缺失/启动超时（90s）/调用超时（60s）/会话崩溃 → 一律返回"新闻工具暂不可用：{原因}"可读文本，绝不 raise 中断对话；会话崩溃后下次调用自动重开。
+- **语义注意**：`search_news` 是**热榜标题内关键词匹配**（上游 NewsNow 风格榜单），不是搜索引擎——榜上无该词即 0 命中（实测"人工智能"0 命中属正常）；weibo 源上游适配器 2026-10-05 时点已坏（`reading 'cards'`），zhihu/github/baidu/bilibili 正常。
+
+**测试**：`tests/test_news_mcp.py` 5 条封闭单测（注册 presence / 崩溃降级 / 参数透传含可选 source 缺省 / `_format_content` 拼接兜底），绝不真启 npx；真实端到端验证见 ROADMAP。
+
+**验证**（真实链路 2026-10-05）：`news_hot_list(zhihu)` 47.8s（首次冷启）返回真实热榜；`news_hot_list(github)` 2.8s；`news_search("人工智能")` 0.6s 0 命中（榜单标题内无该词，语义如上）；全仓 `pytest` 1349 passed。
+
+**生效方式**：新工具随 QQ 前端/日报等 gacore 进程下次重启加载（8010 评审服务不绑工具，无需动）。
+
+---
+
 ## 10. 核心链路字段流转示例（优先字段字典之上的"字段的一生"，吸收自原 langTrack-tech-v2.md）
 
 > 前面是"字段字典"，这一节是"字段的一生"——挑 4 条最难懂的链路，用带具体数值的例子看字段怎么一步步串成最终输出。所有示例均为说明用合理取值，非真实数据。读取方映射见 §4.4，字段含义见 §4。

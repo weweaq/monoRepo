@@ -1134,3 +1134,18 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 ### [2026-10-05] v3.4.1 异地标注补全省市区
 
 用户反馈"补充全一点又没有坏处，为啥不把省市区都标上"。`region_suffix` 增 address 参数：regeo 的 address 恒以"省+市+区"开头，截取起点到 district 结尾即得全量区域（"张垛（安徽省马鞍山市当涂县）"、直辖市如"北京市海淀区"天然无重复）；address 不含 district（合成/旧数据）退化为仅 district。零 API 零建列（不依赖此前搁置的行政区划缓存表）。fact_card StayBrief 装配传 address；测试断言同步，全仓 1333 passed，tech §5.6 同步。
+
+## [2026-10-05] v3.4 主 graph 接入新闻热榜 MCP（aigroup-news-mcp → news_hot_list/news_search/news_list_sources）
+
+**背景**：用户给 ModelScope 收录的 `aigroup-news-mcp`（Node.js stdio MCP server，MIT 免 key，热榜来源知乎/微博/GitHub/百度/B站），要求接进 gacore 主 graph，聊天中"遇到有趣的事情可以搜一下"。评估结论：值得接（热榜是日报与聊天都缺的"外部世界"维度），但stdio MCP 是异步子进程协议、npx 冷启实测 47.8s，必须常驻会话而非每 run spawn。
+
+**已完成**：
+- 新增 `src/gacore/tools/news_mcp.py`：`_McpBridge` 后台 daemon 线程独占事件循环 + 持久 `ClientSession`，同步/异步两条执行路径（QQ astream / 日报 invoke）共用同一会话；三个同步 `@tool`（news_hot_list/news_search/news_list_sources）注册进 `tools/__init__.py`（27→30）。
+- 两个真实 bug 修复（详见 tech §9.27）：① 该 server 往 stdout 打人读日志，mcp SDK 把解析失败的行作为 Exception 项送入读流致 ClientSession 挂死——在 stdio_client 与 ClientSession 之间插过滤流只放行 SessionMessage；② `_acall` 运行在桥接循环上却用 `threading.Event.wait()` 阻塞该循环等待就绪信号（信号正是靠该循环 set 的）→ 死锁 90s——改 `asyncio.to_thread` 让出循环。
+- 依赖 `mcp>=2.3.0` 落 pyproject（R2）；测试 `tests/test_news_mcp.py` 5 条封闭单测（注册/降级/参数透传/content 格式化），绝不真启 npx。
+
+**实测验证**（真实链路）：zhihu 47.8s（首次冷启，含拉起+初始化+抓取）返回真实热榜；github 2.8s、search 0.6s（热会话+LRU 缓存）；降级路径（桥接崩溃→"新闻工具暂不可用：npx 进程崩溃"）单测覆盖。全仓 pytest 1349 passed，ruff 全绿。
+
+**偏差说明**：① `search_news` 实测语义为**热榜标题内关键词匹配**而非搜索引擎（"人工智能"0 命中属正常），工具描述已写明预期；② weibo 源上游适配器当前已坏（server 端 `reading 'cards'`），zhihu/github/baidu/bilibili 正常——上游问题不修，等 server 更新；③ 评审服务 8010 不绑工具无需重启，新工具随 QQ 前端/日报进程下次重启生效。
+
+**待办更新**：观察聊天中工具实际调用频率与价值；若日报需要"当日热点"维度，可另做确定性 `_NEWS` 信息包源（复用同一桥接会话，进包可观测可预算）——尚未拍板。

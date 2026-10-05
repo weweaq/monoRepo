@@ -23,7 +23,7 @@ flowchart TD
             subgraph PR["③ process = create_agent 子图<br/>(gacore_core)·核心智能"]
                 direction LR
                 MD["model 节点<br/>调用 LLM"]
-                TN[("tool 节点<br/>27 个工具轮询")]
+                TN[("tool 节点<br/>30 个工具轮询")]
                 MD <-->|"reAct 循环<br/>until END/tool 结束"| TN
             end
 
@@ -56,6 +56,7 @@ flowchart TD
         T4["ncm_* / ocr / ask_user"]
         T5["send_email/qq_push"]
         T6["langTrack_stats<br/>读 ETL 事实"]
+        T7["news_hot_list/news_search/news_list_sources<br/>MCP 桥接 aigroup-news-mcp<br/>(npx stdio 常驻会话+stdout 脏行过滤<br/>崩溃降级为可读错误文本)"]
     end
 
     subgraph LANG["⑤ langTrack 数据子系统"]
