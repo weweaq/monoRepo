@@ -726,16 +726,23 @@ def user_tag_of(label: str) -> str:
     return label if label and label != "未知" else ""
 
 
-def region_suffix(district: str, home_district: str) -> str:
-    """异地标注（§2.6 补充）：地点区县 != 家所在区县 → "（区县）"，否则空串。
+def region_suffix(district: str, home_district: str, address: str = "") -> str:
+    """异地标注（§2.6 补充）：地点区县 != 家所在区县 → "（…）"，否则空串。
 
-    解决"张垛是哪里的张垛"：POI 名不带行政区划时，异地点补区县后缀
-    （如 张垛（当涂县））；本地（家所在区县）与未知区县不加，避免噪音。
+    解决"张垛是哪里的张垛"：POI 名不带行政区划时，异地点补区域后缀；
+    本地（家所在区县）与未知区县不加，避免噪音。标注正文尽量补全省市区——
+    regeo 的 address 恒以"省+市+区"开头，截取起点到 district 结尾即得
+    （如 "安徽省马鞍山市当涂县"）；address 不含 district（合成/旧数据）时
+    退化为仅 district。直辖市 address 以"北京市…"开头，截取天然无重复。
     """
     d = (district or "").strip()
     h = (home_district or "").strip()
     if not d or not h or d == h:
         return ""
+    addr = (address or "").strip()
+    idx = addr.find(d)
+    if idx >= 0:
+        return f"（{addr[: idx + len(d)]}）"
     return f"（{d}）"
 
 

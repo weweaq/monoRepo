@@ -523,7 +523,7 @@ flowchart LR
 | 出口 | 行为 |
 |---|---|
 | `fact_card._load_places` | 语义 tag 覆盖 place dict 的 label（一次叠加全链路受益） |
-| StayBrief 新字段 | `region=region_suffix(district, home_district)`（区县≠家所在区县 → "（区县）"，本地/未知区县空串）；`note=place_semantics.note_for(place_id, poi)` |
+| StayBrief 新字段 | `region=region_suffix(district, home_district, address)`（区县≠家所在区县 → "（…）"，本地/未知区县空串；正文尽量补全省市区——regeo address 恒以"省+市+区"开头，截取起点到 district 结尾，如"安徽省马鞍山市当涂县"，address 不含 district 时退化为仅 district）；`note=place_semantics.note_for(place_id, poi)` |
 | 时间线 `_build_timeline_section` | 相邻同点 stay 合并（place_id 相同；缺 place_id 退化为同显示名），合并段括注期间短出（`（期间 03:06 短出 2.0km、…）`）；trips 尾注口径：全部 trips 均为同点往返（from/to 同 place_id）→ "短出 N 次合计 X.Xkm"，否则 "移动 N 段"（`_trips_summary`）；stay 末端命中日窗终点渲染 "24:00"（此前 "00:00"） |
 | 日报 `_build_phone_place` detail | stays 全量行带 region；追加 `地点背景：{label}——{note}` 与 `区县背景：{district}——{note}`（去重，仅 detail 不占 compact 预算） |
 | ETL `detect_route_changes` | route_change 详情端点地名化：from/to place_id 直查 places（poi>address>district）→ 无 place_id 端点 500m 内就近匹配 → 坐标兜底；v1 库缺列自动落坐标 |

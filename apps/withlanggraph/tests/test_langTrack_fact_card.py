@@ -1036,7 +1036,7 @@ def test_v2_log_built_reports_quality_fields(monkeypatch):
 
 
 def _short_out_db() -> sqlite3.Connection:
-    """同点短出合成库：张垛（当涂县）三段 stay + 两次同点往返；家在玄武区作异地基准。"""
+    """同点短出合成库：张垛（安徽省马鞍山市当涂县）三段 stay + 两次同点往返；家在玄武区作异地基准。"""
     conn = _make_db()
     cur = conn.cursor()
     for table in ("stays", "trips", "anomalies", "places", "place_cells"):
@@ -1077,11 +1077,11 @@ def test_timeline_merges_same_place_short_out():
     card = fc.build(conn=conn, day="2026-08-18", device_id="dev1")
     text = fc.render_compact(card)
     assert (
-        "今日轨迹：张垛（当涂县） 00:00-17:06（期间 03:05 短出 2.0km、14:14 短出 0.4km）；"
+        "今日轨迹：张垛（安徽省马鞍山市当涂县） 00:00-17:06（期间 03:05 短出 2.0km、14:14 短出 0.4km）；"
         "短出 2 次合计 2.4km" in text
     )
     assert card["home_district"] == "玄武区"
-    assert card["stays"][0]["region"] == "（当涂县）"
+    assert card["stays"][0]["region"] == "（安徽省马鞍山市当涂县）"
     # 同点往返不再切成三段同名 stay
     assert len(card["stays"]) == 3 and len([s for s in card["stays"] if s["place_id"] == "p_zd"]) == 3
 
@@ -1100,7 +1100,7 @@ def test_semantics_tag_and_note_overlay(tmp_path, monkeypatch):
     conn = _short_out_db()
     card = fc.build(conn=conn, day="2026-08-18", device_id="dev1")
     text = fc.render_compact(card)
-    assert "张垛〔张威的老家〕（当涂县） 00:00-17:06" in text
+    assert "张垛〔张威的老家〕（安徽省马鞍山市当涂县） 00:00-17:06" in text
     assert card["stays"][0]["note"] == "乌溪镇"
     assert card["stays"][0]["user_tag"] == "张威的老家"
 
@@ -1111,4 +1111,4 @@ def test_semantics_absent_file_is_noop():
     card = fc.build(conn=conn, day="2026-08-18", device_id="dev1")
     assert card["stays"][0]["user_tag"] == ""
     assert card["stays"][0]["note"] == ""
-    assert card["stays"][0]["region"] == "（当涂县）"
+    assert card["stays"][0]["region"] == "（安徽省马鞍山市当涂县）"

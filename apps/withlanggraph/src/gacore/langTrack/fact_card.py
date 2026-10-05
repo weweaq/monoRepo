@@ -732,7 +732,11 @@ def _fill_card(
             mins=mins,
             point_count=int((place or {}).get("point_count") or 0),
             avg_accuracy_m=s.get("avg_accuracy_m"),
-            region=region_suffix((place.get("district") or "") if place else "", home_district),
+            region=region_suffix(
+                (place.get("district") or "") if place else "",
+                home_district,
+                (place.get("address") or "") if place else "",
+            ),
             note=place_semantics.note_for(
                 (str(place["place_id"]) if place and place.get("place_id") else None),
                 poi,

@@ -1130,3 +1130,7 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 **偏差说明**：① 现有 3 项 fact_card 断言因异地标注/合并行为更新（test_compact_timeline_example_format 精串、900 字折叠用例改交替地点构造超长、budget 用例阈值 120→200）——均为契约演进而非回归；② route_change 地名化只影响新检测事件，存量 anomalies detail 保持坐标；③ 高德天气 API 仅实况/预报无历史，历史日天气背景暂缓；④ 语义配置为 data/ 下 gitignore 用户数据，格式以 tech §5.6 为准。
 
 **待办更新**：区县人文背景先手写 place_semantics.json districts note；LLM 蒸馏画像待办不变（可顺带预填区县/地点 note 后人工复核）。
+
+### [2026-10-05] v3.4.1 异地标注补全省市区
+
+用户反馈"补充全一点又没有坏处，为啥不把省市区都标上"。`region_suffix` 增 address 参数：regeo 的 address 恒以"省+市+区"开头，截取起点到 district 结尾即得全量区域（"张垛（安徽省马鞍山市当涂县）"、直辖市如"北京市海淀区"天然无重复）；address 不含 district（合成/旧数据）退化为仅 district。零 API 零建列（不依赖此前搁置的行政区划缓存表）。fact_card StayBrief 装配传 address；测试断言同步，全仓 1333 passed，tech §5.6 同步。
