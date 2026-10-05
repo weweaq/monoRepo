@@ -191,7 +191,7 @@ _PAGE_TMPL = """<!doctype html>
 <body>
 <header><div class="wrap">
 <span class="brand"><a href="/review">日报评审</a></span>
-<nav><a href="/review">日报评审</a><a href="/health">源体检</a><a href="/llm-requests">运行回放</a><a href="/config">源预算</a><a href="/data">数据目录</a></nav>
+<nav><a href="/review">日报评审</a><a href="/health">源体检</a><a href="/llm-requests">运行回放</a><a href="/config">源预算</a><a href="/data">数据目录</a><a href="/places">语义地点</a></nav>
 </div></header>
 <main class="wrap">
 __BODY__
@@ -1351,6 +1351,26 @@ class SourceConfigIn(BaseModel):
     sources: dict[str, dict[str, Any]]
 
 
+class PlaceLabelItem(BaseModel):
+    place_id: str = ""
+    poi: str = ""
+    label: str = ""
+    note: str = ""
+
+
+class PlacesLabelsIn(BaseModel):
+    items: list[PlaceLabelItem]
+
+
+class DistrictNoteItem(BaseModel):
+    district: str
+    note: str = ""
+
+
+class DistrictNotesIn(BaseModel):
+    items: list[DistrictNoteItem]
+
+
 def _deliver_revised(cfg: Config, date: str) -> dict:
     """修订后邮件重发：与 redeliver_day 同通道（scheduler._deliver → _deliver_email），
     但不走它的 applied-pending 守卫——评审页批注落的是 corrections，不是 pending 草稿，
@@ -1550,6 +1570,51 @@ def create_app(cfg: Config | None = None) -> FastAPI:
     @app.get("/data", response_class=HTMLResponse)
     def data_page() -> Response:
         return _html(_data_page(config))
+
+    @app.get("/places", response_class=HTMLResponse)
+    def places_page() -> Response:
+        from gacore.places_page import _places_page
+
+        return _html(_page("语义地点", _places_page(config)))
+
+    @app.post("/api/places/labels")
+    def api_places_labels(request: Request, payload: PlacesLabelsIn):
+        """保存自定义标签/地点 note：直写 places.label / places.note（DB 即真源）。"""
+        guard = _guard(request)
+        if guard is not None:
+            return guard
+        import sqlite3
+
+        from gacore.langTrack.place_semantics import save_place_labels
+
+        items = [
+            {"place_id": it.place_id, "poi": it.poi, "label": it.label, "note": it.note}
+            for it in payload.items
+        ]
+        try:
+            n = save_place_labels(config.root / "data" / "langTrack.db", items)
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        except sqlite3.Error as exc:
+            return JSONResponse({"ok": False, "error": str(exc)[:160]}, status_code=500)
+        return {"ok": True, "updated": n}
+
+    @app.post("/api/places/districts")
+    def api_places_districts(request: Request, payload: DistrictNotesIn):
+        """保存区县背景 note（place_semantics.json，整表替换）。"""
+        guard = _guard(request)
+        if guard is not None:
+            return guard
+        from gacore.langTrack.place_semantics import save_district_notes
+
+        items = [{"district": it.district, "note": it.note} for it in payload.items]
+        try:
+            n = save_district_notes(
+                items, config.root / "data" / "place_semantics.json"
+            )
+        except OSError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)[:160]}, status_code=500)
+        return {"ok": True, "saved": n}
 
     @app.get("/api/data/events")
     def api_data_events(type: str, day: str, limit: int = 500):
