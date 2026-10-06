@@ -584,3 +584,29 @@ class TestShadowAccuracyFilter:
         assert len(places) == 1
         assert places[0]["point_count"] == 8            # §2.3 原始点数
         assert places[0]["visit_count"] == 1
+
+
+def test_etl_does_not_consume_place_labels_json(v1_db, shadow_env, monkeypatch, tmp_path):
+    """v3.5「DB 即真源」：etl.run 不再消费 place_labels.json（2026-10-06 退役收尾）。
+
+    编辑器直写 places.label/note 后，json 恢复路径只剩"用旧值覆盖用户编辑"一个
+    效果——rebuild UPSERT 本就保留 label 现值，ETL 不应再回写。模块保留仅供
+    迁移编排（activate_location_v2 的 pending 标签恢复）使用。
+    """
+    from gacore.langTrack import label_places
+
+    labels = tmp_path / "place_labels.json"
+    labels.write_text(
+        json.dumps(
+            {"version": 2, "labels": [{"device_id": "dev1", "grid_key": "31.992,118.783", "tag": "家"}]},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(label_places, "CONFIG_PATH", labels)
+    called: list = []
+    monkeypatch.setattr(label_places, "apply_labels", lambda db: called.append(db) or 0)
+
+    etl.run(v1_db, run_geocode=False, run_route=False, run_poi=False)
+
+    assert called == []  # json 恢复路径已退役：ETL 全程不触 apply_labels

@@ -2403,7 +2403,7 @@ def run(db_path: Path = DB_PATH, device_id: str | None = None, run_geocode: bool
     from gacore.langTrack.location_reader import ensure_note_column
 
     if ensure_note_column(conn):
-        print("[etl] places.note 列已添加（user_version -> 3）")
+        print("[etl] places.note 列已添加（列存在性探测，不递增 user_version）")
 
     # 位置事实 v2 守卫：激活后（user_version>=2）places/stays/trips 为 v2 冻结
     # schema（place_id 主键 + 三个计数语义）。v1 位置管线禁止触碰——否则
@@ -2561,23 +2561,11 @@ def run(db_path: Path = DB_PATH, device_id: str | None = None, run_geocode: bool
 
         _build_location_v1(conn, events, incremental_active, affected_days)
 
-    # 恢复持久化的家/公司标签（data/place_labels.json）
+    # place_labels.json 恢复路径已随 v3.5「DB 即真源」退役（ROADMAP 2026-10-05）：
+    # rebuild UPSERT 保留 places.label/note 现值，编辑器保存的标签跨 ETL 存活，
+    # 不再被 json 旧值覆盖；label_places 模块保留仅供迁移编排使用。
 
-    try:
-
-        from gacore.langTrack.label_places import apply_labels
-
-        n = apply_labels(db_path)
-
-        if n:
-
-            print(f"[etl] 恢复持久化地点标签: {n} 个")
-
-    except ImportError:
-
-        pass
-
-    # P1-3：新地点/异常事件探测（依赖 places 标签已恢复，家/公司网格集合准确）
+    # P1-3：新地点/异常事件探测（家/公司标签已在 places.label 中，UPSERT 保留）
 
     conn = sqlite3.connect(db_path)
 
