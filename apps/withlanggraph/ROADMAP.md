@@ -1168,3 +1168,17 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 **偏差说明**：①设计三次演进（json tag 叠加 v3.4 → 角色绑定（未提交即废弃）→ DB 直写 v3.5），历史 ROADMAP 记录不回改；②home_district 基准仍=label=="家"，用户把别的点标成"家"会改变异地基准与深夜判定——UI 已提示；③地图/编辑器对 v1 无 place_id 的点按 poi 匹配兜底（同名点有误伤可能，待办歧义提醒兜住）；④8010 本次以 ZCode 后台任务拉起（python.exe），会话结束即停，日常由 dev-console 管理。
 
 **待办更新**：按自定义标签的到访频率趋势/距离圈层（用户点名的"有趣指标"，未排期）；区县背景待用户手写；add-info-source skill 不受影响。
+
+## [2026-10-06] 每日体检修复——ETL 退役 place_labels.json 恢复路径收尾
+
+**背景**：例行体检子代理核查发现，v3.5.0 三处文档一致声明 `label_places`/`place_labels.json` 已退役"无消费者"，但 `etl.py` 每次 ETL 末尾仍调 `label_places.apply_labels(db_path)` 从 json 恢复标签直写 `places.label`（tech §5.6 与 §6 ETL 时序图也因此自相矛盾）。实际风险：用户在 /places 编辑器改"家/公司"标签后，下一次 ETL 会被 json 旧值覆盖，违背"DB 即真源"。属代码未跟上已拍板设计。
+
+**已完成**：
+- 删除 `etl.run` 中 apply_labels 调用块；安全性依据：`rebuild_location_v2` 对 places 按 (device_id, place_id) UPSERT 且 **label/geocode 列保留现值**（location_migration.py:928），标签跨 ETL 存活，json 路径只剩覆盖用户编辑一个效果。
+- `label_places` 模块保留（迁移编排 `activate_location_v2` 的 pending 标签恢复仍依赖）。
+- 顺手修 etl.py:2406 误导日志："places.note 列已添加（user_version -> 3）"→ 实际不递增 user_version（v3.5 踩坑修正后残留文案）。
+- 新增回归测试 `test_etl_does_not_consume_place_labels_json` 钉住"ETL 全程不触 apply_labels"。
+
+**实测验证**：test_langTrack_etl_location 21 passed（含新测试）；test_langTrack_location_rebuild + test_langTrack_place_semantics 共 21 passed；ruff 全过。
+
+**待办更新**：无（data/place_labels.json 文件保留未删，家/公司 2 条标签已在库内，json 仅作历史存档）。
