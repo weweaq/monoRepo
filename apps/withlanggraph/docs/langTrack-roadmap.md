@@ -3200,6 +3200,11 @@ batterystats 实测 weiCheckApp 耗电 67.7 mAh，其中 GNSS 64.4 mAh（引擎�
 
 ### 状态
 - 代码完成（SensorCollector.kt 重写 ~600 行），assembleDebug 通过。
-- [ ] 实机安装验证（无线调试被 ColorOS 超时关闭，待用户重开）。
-- [ ] 跑一天后对比 GNSS 引擎分钟数验证收益。
-- [ ] 用户授予 ACTIVITY_RECOGNITION → steps 哨兵生效。
+- [x] 实机安装验证（2026-10-06 22:41，v1.0.13 基座 + v2 定位）：logcat 确认状态机按设计运转
+      ——重启后 CONFIRM 突发 → 第 2 点位移 <3m 渐进中止（abort-still）回 IDLE，IDLE 只挂
+      NETWORK 300s/200m 连续监听（GPS 连续不再注册），SMD（sns_smd）成功上膛；无崩溃，
+      location 事件正常产出。
+- [ ] 跑一天后对比 GNSS 引擎分钟数验证收益（基线 51.5min/天）。
+- [ ] 用户授予 ACTIVITY_RECOGNITION → steps 哨兵生效（ColorOS 拦 adb，须 UI 手动）。
+- [x] 顺带：PC 重启后 gacore.langTrack（:8000）没起来，手机跨网段积压 ~2900 条传不上去；
+      已按原命令行重启服务（0.0.0.0:8000，HTTP 200），积压以 500 条/批恢复补传（22:45 起全部 ok）。
