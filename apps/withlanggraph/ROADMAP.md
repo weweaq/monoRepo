@@ -1182,3 +1182,19 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 **实测验证**：test_langTrack_etl_location 21 passed（含新测试）；test_langTrack_location_rebuild + test_langTrack_place_semantics 共 21 passed；ruff 全过。
 
 **待办更新**：无（data/place_labels.json 文件保留未删，家/公司 2 条标签已在库内，json 仅作历史存档）。
+
+## [2026-10-11] /health 体检矩阵全窗口恒渲染 + 点表头补全 + ETL 一键转换
+
+**背景**：用户实际使用中发现两个交互断点——①10-07/10-08 两天日报任务没跑（笔记本当时没开机/服务未起，scheduler 错过 23:50 不补跑），矩阵里这两天的列**整个消失**，"缺了哪天"本身反而看不见，且补数据后必须靠「↻ 重算体检」逐日点；②体检数据上游是 langTrack ETL（raw events→事实表），但 ETL 按钮只在 :8000 仪表盘，体检页想刷新数据得跨两个页面。
+
+**已完成**：
+- **14 天全窗口恒渲染**：`_health_matrix` 的列不再来自"jsonl 里出现过的日期"，而是窗口 14 天全量生成；没跑过日报的天整列 `hcol-norec` 弱化占位（斜体灰），行集合改为自最新往旧全窗口扫描（原"末日记录定行序"逻辑在末日无记录时会 KeyError，一并消除）。
+- **点日期表头=重算该日**：表头带 `data-date` + ↻ 徽标，点击对任意窗口内日期（含无记录天）`POST /api/health/refresh`，成功后整页刷新——补全入口从"顶部按钮只能重算末日"扩展到 14 天任意一天。
+- **「⟳ 立即转换 ETL」按钮**（矩阵导航）：`POST /api/etl/run`（token 保护）+ `GET /api/etl/status` 两个新端点，经 `_langtrack_proxy` 转发 langTrack 接收服务 `:8000`（`LANGTRACK_BASE_URL` 可覆盖）；前端轮询至转换结束**自动重算窗口末日并刷新**，一条龙完成 ETL→体检更新。代理而非本地起子进程：防重入锁（`_ETL_STATE_LOCK`）在 langTrack 进程内，本地另起会与其周期 ETL（默认 30 分钟）并发写同一 SQLite。
+- **顺手修测试午夜地雷**：`_make_langtrack_db` 种子的 sms/music_play 行用 `now-偏移`，午夜后几分钟内落到昨天导致 `test_events_for_day_api` 断言 total 不符（本会话实踩）——当日种子行统一改锚东八区当天正午（location 行仍 now-48h，天然落在前天不受影响）。该测试的"锚定"注释原为虚设，现已名副其实。
+
+**实测验证**：TestHealthPages/TestHealthRefresh/TestEtlProxy 73 passed；代理链路真机验证——POST /api/etl/run 返回 `{"status":"started"}`，`/api/etl/status` last_finished_at 23:55→00:07 推进、last_ok=true，`/api/etl/status` reachable=true；8010 已用 dev-console API 重启加载新代码，实抓 /health：14 列齐全（2026-10-11~09-28）、etlbtn/表头脚本/hcol-norec 均在。ruff 全绿。
+
+**偏差说明**：①10-10 23:43 的三条 backfill 记录（10-10/09/08）系当时手动重算产生，与本次改动无关；②LANGTRACK_BASE_URL 未入 `.env.example`（非密钥，默认值即本机拓扑，与 LANGTRACK_ETL_INTERVAL_SECONDS 同等对待）；③ETL 按钮只加在矩阵页（单源详情页保持原样）；④架构图 codemap skill 本环境不可用，改动节点（RVW 端点清单+RVW-.->ET 新边）已逐一对照源码核实后手改。
+
+**待办更新**：无新增。观察 ETL 按钮实际使用频率；若 10-07 这类"服务未起"频发，考虑 scheduler 补跑或开机自检提醒（未排期）。
