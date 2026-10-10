@@ -453,6 +453,19 @@ class TestHealthPages:
         page = c.get("/health").text
         assert "暂无数据" in page
 
+    def test_matrix_renders_full_window_with_missing_days(self, tmp_path: Path, monkeypatch):
+        """没跑过日报的天也整列渲染（hcol-norec 弱化），点表头可重算补全——缺日不静默消失。"""
+        cfg = Config.for_tests(tmp_path)
+        _write_health_jsonl(cfg, [_sample_line(DATE)])
+        c = _client(cfg, monkeypatch)
+        page = c.get(f"/health?end={DATE}").text
+        first = (datetime.datetime.strptime(DATE, "%Y-%m-%d") - datetime.timedelta(days=13)).strftime("%Y-%m-%d")
+        assert DATE in page and first in page  # 窗口 14 天全部成列（含无记录的最老一天）
+        assert "hcol-norec" in page and "hcol-cur" in page
+        assert 'data-date="' + first + '"' in page  # 表头带 data-date 供点击重算
+        assert "querySelectorAll('th.hcol')" in page  # 表头点击脚本
+        assert 'href="/health/source/' + DATE + '/_CHAT"' in page  # 有记录日单元格仍正常
+
     def test_source_page_renders_three_sections_and_bars(self, tmp_path: Path, monkeypatch):
         cfg = Config.for_tests(tmp_path)
         _write_health_jsonl(cfg, [_sample_line(DATE, chars=120)])
@@ -653,6 +666,54 @@ class TestHealthRefresh:
         c = _client(cfg, monkeypatch)
         assert "hrefresh" in c.get("/health").text
         assert "hrefresh" in c.get(f"/health/source/{DATE}/_CHAT").text
+
+
+class TestEtlProxy:
+    """POST /api/etl/run + GET /api/etl/status：代理 langTrack 接收服务(:8000)。
+
+    _langtrack_proxy 在测试里被打桩——这里只验证 review_server 侧的路由/鉴权/透传。
+    """
+
+    def test_401_without_token(self, tmp_path: Path, monkeypatch):
+        c = _client(Config.for_tests(tmp_path), monkeypatch, token=None)
+        assert c.post("/api/etl/run").status_code == 401
+
+    def test_run_and_status_proxied(self, tmp_path: Path, monkeypatch):
+        import gacore.review_server as rs
+
+        calls: list[tuple[str, str]] = []
+
+        def fake_proxy(method: str, path: str, timeout: float = 8.0):
+            calls.append((method, path))
+            if path == "/etl/run":
+                return 200, {"status": "started"}
+            return 200, {"running": False, "last_ok": True, "last_finished_at": "t"}
+
+        monkeypatch.setattr(rs, "_langtrack_proxy", fake_proxy)
+        c = _client(Config.for_tests(tmp_path), monkeypatch)
+        r = c.post("/api/etl/run", headers=_headers())
+        assert r.status_code == 200 and r.json()["status"] == "started"
+        s = c.get("/api/etl/status").json()
+        assert s["reachable"] is True and s["running"] is False
+        assert calls == [("POST", "/etl/run"), ("GET", "/etl/status")]
+
+    def test_run_unreachable_reports_502(self, tmp_path: Path, monkeypatch):
+        import gacore.review_server as rs
+
+        monkeypatch.setattr(
+            rs, "_langtrack_proxy", lambda m, p, timeout=8.0: (502, {"ok": False, "error": "不可达"})
+        )
+        c = _client(Config.for_tests(tmp_path), monkeypatch)
+        r = c.post("/api/etl/run", headers=_headers())
+        assert r.status_code == 502 and r.json()["ok"] is False
+
+    def test_matrix_has_etl_button(self, tmp_path: Path, monkeypatch):
+        cfg = Config.for_tests(tmp_path)
+        _write_health_jsonl(cfg, [_sample_line(DATE)])
+        c = _client(cfg, monkeypatch)
+        page = c.get("/health").text
+        assert "etlbtn" in page and "/api/etl/run" in page  # ETL 按钮只在矩阵页，源详情页不需要
+        assert "etlbtn" not in c.get(f"/health/source/{DATE}/_CHAT").text
 
 
 class TestSourceConfig:

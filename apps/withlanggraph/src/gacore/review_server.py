@@ -139,6 +139,11 @@ tbody th{font-family:ui-monospace,Consolas,monospace;font-weight:500}
 .st-disabled{background:#d0d7de;color:#57606a}
 .legend{color:var(--mut);font-size:12px;margin:10px 0}
 .legend .cell{margin:0 2px}
+th.hcol{cursor:pointer;user-select:none}
+th.hcol-cur{background:#ddf4ff}
+th.hcol:hover{background:#ddf4ff;color:var(--acc)}
+th.hcol .r{font-size:10px;color:var(--acc);margin-left:2px;font-weight:400}
+th.hcol-norec{color:var(--mut);font-style:italic}
 .report{border:1px solid var(--line);border-radius:8px;padding:8px 20px;margin:10px 0}
 .report h2{font-size:16px;border-bottom:1px solid var(--line);padding-bottom:4px}
 .report ul{margin:6px 0;padding-left:20px}
@@ -500,6 +505,28 @@ def _review_page(cfg: Config, date: str) -> str:
 
 # --------------------------------------------------------------------------- /health 源体检
 
+# langTrack 接收服务地址（/api/etl/* 代理目标）；默认 :8000，环境变量可覆盖
+_LANGTRACK_BASE = (os.environ.get("LANGTRACK_BASE_URL") or "http://127.0.0.1:8000").rstrip("/")
+
+
+def _langtrack_proxy(method: str, path: str, timeout: float = 8.0) -> tuple[int, dict]:
+    """转发请求到 langTrack 接收服务。返回 (http_status, json)；不可达 → (502, {ok:false, error})。
+
+    ETL 防重入锁在 langTrack 进程内（周期线程与手动按钮共用），必须走它而非本地起子进程，
+    否则可能与其周期 ETL 并发写同一 SQLite。
+    """
+    import urllib.request
+
+    req = urllib.request.Request(f"{_LANGTRACK_BASE}{path}", method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8") or "{}")
+    except Exception as exc:  # noqa: BLE001 — 代理失败统一 502 回传，不让 /health 页 500
+        return 502, {
+            "ok": False,
+            "error": f"langTrack 服务({_LANGTRACK_BASE})不可达：{type(exc).__name__}",
+        }
+
 
 def _load_health_records(cfg: Config) -> list[dict]:
     """读 info_pack_health.jsonl，容错：缺文件/坏行跳过，返回按文件顺序的记录列表。"""
@@ -527,6 +554,22 @@ def _source_of(rec: dict, key: str) -> dict | None:
     return None
 
 
+def _health_day_header(d: str, end_s: str, has_rec: bool) -> str:
+    """日期表头：可点击重算该日体检；无记录的天也渲染（弱化样式，点击补全），缺日不再静默消失。"""
+    mark = "▼ " if d == end_s else ""
+    cur = " hcol-cur" if d == end_s else ""
+    norec = " hcol-norec" if not has_rec else ""
+    tip = (
+        "重算该日体检：以当前数据回放（零 LLM 零邮件）"
+        if has_rec
+        else "该日无体检记录（当日 daily job 未跑）——点击重算补全"
+    )
+    return (
+        f'<th class="hcol{cur}{norec}" data-date="{d}" title="{tip}">'
+        f'{html.escape(mark)}{html.escape(d)}<span class="r">↻</span></th>'
+    )
+
+
 def _health_matrix(cfg: Config, end: str | None = None) -> str:
     """14 天 × 源 状态矩阵。end（YYYY-MM-DD）为窗口末日，默认今天——支持回看历史窗口。"""
     recs = _load_health_records(cfg)
@@ -544,44 +587,33 @@ def _health_matrix(cfg: Config, end: str | None = None) -> str:
     except ValueError:
         end_d = datetime.now().astimezone()
     end_s = end_d.strftime("%Y-%m-%d")
-    window = {
-        d: by_date[d]
-        for d in by_date
-        if (end_d - timedelta(days=_HEALTH_DAYS - 1)).strftime("%Y-%m-%d") <= d <= end_s
-    }
-    dates = sorted(window, reverse=True)
-    if not dates:
+    # 全窗口恒渲染：没跑过日报的天也占一列（hcol-norec 弱化），点表头重算补全——
+    # 缺日不再从矩阵里静默消失，"哪天没数据"本身就是要展示的信息。
+    dates = [(end_d - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(_HEALTH_DAYS)]
+    if not any(d in by_date for d in dates):
         empty = (
             f'<p class="empty">窗口 {end_d.strftime("%Y-%m-%d")} 之前的 {_HEALTH_DAYS} 天内没有体检数据'
-            '（该源/该时段尚未运行 daily job）</p>'
+            "（该时段尚未运行 daily job；点日期表头可重算补全）</p>"
         )
         return _page("信息包源体检", f"<h1>信息包源体检</h1>{_matrix_nav(end_s)}{empty}")
 
-    newest = by_date[dates[0]]
     rows: list[str] = []
-    for s in newest.get("sources", []):
-        key = str(s.get("key") or "")
-        if key and key not in rows:
-            rows.append(key)
-    for d in dates[1:]:  # 近期消失的源排在末尾，不丢信息
-        for s in by_date[d].get("sources", []):
+    for d in dates:  # 自最新往旧扫描：新出现的源排前，消失的源排后（缺日无记录则跳过）
+        for s in (by_date.get(d) or {}).get("sources", []):
             key = str(s.get("key") or "")
             if key and key not in rows:
                 rows.append(key)
 
     head = (
         "<tr><th>源</th>"
-        + "".join(
-            f'<th style="{"background:#ddf4ff" if d == end_s else ""}">{"▼ " if d == end_s else ""}{html.escape(d)}</th>'
-            for d in dates
-        )
+        + "".join(_health_day_header(d, end_s, d in by_date) for d in dates)
         + "</tr>"
     )
     body_rows: list[str] = []
     for key in rows:
         cells: list[str] = []
         for d in dates:
-            s = _source_of(by_date[d], key)
+            s = _source_of(by_date.get(d) or {}, key)
             if s is None:
                 cells.append('<td><span class="cell cell-none" title="该日无记录">-</span></td>')
                 continue
@@ -598,14 +630,42 @@ def _health_matrix(cfg: Config, end: str | None = None) -> str:
 
     body = (
         "<h1>信息包源体检</h1>"
-        f'<div class="sub">窗口 {dates[-1]} ~ {dates[0]}（{_HEALTH_DAYS} 天）× 源 · 点单元格进单源详情 · 行序按窗口内最新一天</div>'
+        f'<div class="sub">窗口 {dates[-1]} ~ {dates[0]}（{_HEALTH_DAYS} 天）× 源 · 点单元格进单源详情 · '
+        "点日期表头重算该日 · 行序按窗口内最新一天</div>"
         f"{_matrix_nav(end_s)}"
         '<div class="legend">图例：<span class="cell st-ok">ok</span><span class="cell st-empty">empty</span>'
         '<span class="cell st-failed">failed</span><span class="cell st-missing">missing_data</span>'
         "（单元格文字为 chars）</div>"
         f'<table><thead>{head}</thead><tbody>{"".join(body_rows)}</tbody></table>'
+        f"{_health_matrix_script()}"
     )
     return _page("信息包源体检", body)
+
+
+def _health_matrix_script() -> str:
+    """矩阵日期表头的点击重算脚本：POST /api/health/refresh 该日，成功后整页刷新。
+
+    没记录的天同样可点（重算即补全该日体检行）；token 与评审页同存 localStorage。
+    """
+    js = (
+        "(function(){"
+        "function tk(msg){var t=localStorage.getItem('review_token')||'';"
+        "if(t&&!msg)return t;t=prompt(msg||'请输入 REVIEW_TOKEN（见 .env）')||'';"
+        "if(t)localStorage.setItem('review_token',t);return t;}"
+        "document.querySelectorAll('th.hcol').forEach(function(th){"
+        "th.onclick=function(){var d=th.getAttribute('data-date');var t=tk();if(!t)return;"
+        "th.style.opacity='.5';"
+        'fetch("/api/health/refresh",{method:"POST",'
+        'headers:{"Content-Type":"application/json","X-Review-Token":t},'
+        'body:JSON.stringify({date:d})})'
+        ".then(function(r){if(r.status===401)return Promise.reject('token');return r.json();})"
+        ".then(function(j){if(j.ok){location.reload();}else{th.style.opacity='';"
+        'alert("重算失败："+(j.result||j.error||"未知"));}})'
+        ".catch(function(e){th.style.opacity='';"
+        "if(e==='token'){localStorage.removeItem('review_token');alert('令牌无效，请重试');}"
+        'else{alert("异常："+e);}});};});})();'
+    )
+    return f"<script>{js}</script>"
 
 
 def _matrix_nav(end_s: str) -> str:
@@ -624,6 +684,7 @@ def _matrix_nav(end_s: str) -> str:
         f'<input type="date" value="{end_s}" onchange="location=\'/health?end=\'+this.value">'
         f'<a class="dnav-btn" href="/health">今天</a>'
         f'{_health_refresh_widget(end_s)}'
+        f'{_health_etl_widget(end_s)}'
         '<span class="small muted">矩阵显示以该日为末日的 14 天窗口</span></div>'
     )
 
@@ -654,6 +715,54 @@ def _health_refresh_widget(date: str) -> str:
     return (
         '<button id="hrefresh" class="dnav-btn" title="以当前数据重算该日体检（零 LLM 零邮件，'
         '画像类源为当前态；B站/Edge 受历史窗口限制）">↻ 重算体检</button>'
+        f"<script>{js}</script>"
+    )
+
+
+def _health_etl_widget(end_s: str) -> str:
+    """「⟳ 立即转换 ETL」按钮：代理 langTrack 接收服务(:8000) /etl/run，转换完自动重算窗口末日并刷新。
+
+    review_server 不自己跑 ETL——转发给 langTrack 服务触发，那边进程内防重入
+    （周期线程与手动按钮共用一把锁，本地再起子进程可能与其周期 ETL 并发写同一 SQLite）。
+    """
+    js = (
+        "(function(){var b=document.getElementById('etlbtn'),s=document.getElementById('etlst');"
+        "if(!b)return;"
+        "function tk(msg){var t=localStorage.getItem('review_token')||'';"
+        "if(t&&!msg)return t;t=prompt(msg||'请输入 REVIEW_TOKEN（见 .env）')||'';"
+        "if(t)localStorage.setItem('review_token',t);return t;}"
+        "function done(){b.disabled=false;b.textContent='⟳ 立即转换 ETL';}"
+        "b.onclick=function(){b.disabled=true;b.textContent='ETL 启动中…';"
+        "var t=tk();if(!t){done();return;}"
+        'fetch("/api/etl/run",{method:"POST",headers:{"X-Review-Token":t}})'
+        ".then(function(r){if(r.status===401)return Promise.reject('token');return r.json();})"
+        ".then(function(j){"
+        "if(j.status==='busy'){alert('已有 ETL 在运行，请等它跑完再试');done();return;}"
+        "if(!j.status){alert('langTrack 接收服务不可达：'+(j.error||'未知')+'（:8000 是否在运行？）');done();return;}"
+        "s.textContent='转换中…';var n=0;"
+        "var iv=setInterval(function(){n+=2;s.textContent='转换中… '+n+'s';"
+        "if(n>240){clearInterval(iv);done();s.textContent='';"
+        "alert('ETL 超过 240s 仍未见结束，请到 langTrack 仪表盘查看');return;}"
+        'fetch("/api/etl/status").then(function(r){return r.json();}).then(function(st){'
+        "if(st.reachable===false){clearInterval(iv);done();s.textContent='';"
+        "alert('langTrack 接收服务不可达');return;}"
+        "if(!st.running){clearInterval(iv);s.textContent='转换完成，重算体检…';"
+        'fetch("/api/health/refresh",{method:"POST",'
+        'headers:{"Content-Type":"application/json","X-Review-Token":t},'
+        'body:JSON.stringify({date:"' + end_s + '"})})'
+        ".then(function(r){return r.json();}).then(function(j2){"
+        "if(j2.ok){location.reload();}else{done();s.textContent='';"
+        "alert('ETL 完成，但重算失败：'+(j2.result||j2.error||'未知'));}});}"
+        "}).catch(function(e){clearInterval(iv);done();s.textContent='';"
+        "alert('状态查询异常：'+e);});},2000);"
+        "}).catch(function(e){done();"
+        "if(e==='token'){localStorage.removeItem('review_token');alert('令牌无效，请重试');}"
+        "else{alert('异常：'+e);}});};})();"
+    )
+    return (
+        '<button id="etlbtn" class="dnav-btn" title="先跑 langTrack ETL（全量重建事实表，异步），'
+        "完成后自动重算窗口末日体检并刷新。需要 langTrack 接收服务(:8000)在运行\">"
+        '⟳ 立即转换 ETL</button><span id="etlst" class="small muted"></span>'
         f"<script>{js}</script>"
     )
 
@@ -1562,6 +1671,22 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         except Exception as exc:  # noqa: BLE001 — 取数源异常统一回传，不让 /health 刷新 500
             return {"ok": False, "result": f"fail:{type(exc).__name__}:{exc}"[:160]}
         return {"ok": res == "ok", "result": res, "date": payload.date}
+
+    @app.post("/api/etl/run")
+    def api_etl_run(request: Request):
+        """手动触发 langTrack ETL（代理 :8000 /etl/run，异步启动；防重入在对方进程内）。"""
+        guard = _guard(request)
+        if guard is not None:
+            return guard
+        code, body = _langtrack_proxy("POST", "/etl/run")
+        return JSONResponse(body, status_code=code)
+
+    @app.get("/api/etl/status")
+    def api_etl_status():
+        """langTrack ETL 运行状态透传（running/last_ok/last_finished_at + reachable）。"""
+        code, body = _langtrack_proxy("GET", "/etl/status", timeout=5.0)
+        body["reachable"] = code < 500
+        return JSONResponse(body, status_code=code)
 
     @app.get("/config", response_class=HTMLResponse)
     def config_page() -> Response:
