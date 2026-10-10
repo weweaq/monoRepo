@@ -864,11 +864,16 @@ class TestDataPage:
             " type TEXT, payload TEXT, received_at TEXT, created_at TEXT, updated_at TEXT)"
         )
         now_ms = int(time.time() * 1000)
+        # 当日行统一锚定东八区当天正午：now-偏移 在午夜后几分钟内会落到昨天，
+        # 当日日窗查询（test_events_for_day_api 的 total 断言）就会查空——正午锚定全天免疫
+        _tz8 = datetime.timezone(datetime.timedelta(hours=8))
+        _noon = datetime.datetime.now(_tz8).replace(hour=12, minute=0, second=0, microsecond=0)
+        noon_ms = int(_noon.timestamp() * 1000)
         rows = [
-            (now_ms - 300_000, "music_play", json.dumps({"pkg": "ncm", "song": "x"}, ensure_ascii=False)),
-            (now_ms - 600_000, "sms", json.dumps({"number": "106", "text": "验证码 1"}, ensure_ascii=False)),
+            (noon_ms - 300_000, "music_play", json.dumps({"pkg": "ncm", "song": "x"}, ensure_ascii=False)),
+            (noon_ms, "sms", json.dumps({"number": "106", "text": "验证码 1"}, ensure_ascii=False)),
             (now_ms - 86400_000 * 2, "location", json.dumps({"lat": 31.1, "lon": 118.6}, ensure_ascii=False)),
-            (now_ms, "bad_json", "not-json{"),
+            (noon_ms, "bad_json", "not-json{"),
         ]
         con.executemany(
             "INSERT INTO events (ts, type, payload) VALUES (?, ?, ?)",
