@@ -157,6 +157,19 @@ th.hcol-norec{color:var(--mut);font-style:italic}
 .actions{display:flex;gap:10px;align-items:center;margin:12px 0}
 .review-nav{display:flex;gap:8px;align-items:center;margin:12px 0 4px}
 .review-nav input[type=date]{font:inherit;color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:4px 8px}
+.cal-panel{border:1px solid var(--line);border-radius:8px;padding:10px 12px;margin:8px 0;max-width:280px}
+.cal-panel.hidden{display:none}
+.cal-head{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.cal-head button{padding:2px 10px}
+#cal-title{font-family:ui-monospace,Consolas,monospace;font-size:13px;min-width:70px;text-align:center}
+#cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:2px}
+.cal-dow{text-align:center;color:var(--mut);font-size:11px;padding:2px 0}
+.cal-cell{text-align:center;border-radius:4px;padding:3px 0;font-size:12px;font-family:ui-monospace,Consolas,monospace;min-height:22px}
+.cal-cell[data-d]{cursor:pointer}
+.cal-cell[data-d]:hover{background:#ddf4ff;color:var(--acc)}
+.cal-has{background:#dafbe1;font-weight:600}
+.cal-cur{border:1px solid var(--acc)}
+.cal-future{color:var(--miss);cursor:default}
 #pending .chip{display:inline-block;border:1px solid var(--line);border-radius:12px;padding:1px 10px;margin:2px 4px;font-size:12px;background:#f6f8fa}
 #pending .chip button{border:none;background:none;padding:0 0 0 6px;color:var(--bad)}
 .side{position:fixed;top:0;right:0;width:340px;max-width:92vw;height:100%;background:#fff;border-left:1px solid var(--line);box-shadow:-4px 0 16px rgba(0,0,0,.06);padding:14px 16px;z-index:10;overflow:auto}
@@ -492,7 +505,7 @@ $("btn-rerun").onclick = async () => {
 
 
 def _review_nav(date: str, today: str) -> str:
-    """评审页日期导航条：prev/next/today 锚点 + date input 跳转。"""
+    """评审页日期导航条：prev/next/today 锚点 + date input 跳转 + 日历开关/面板骨架。"""
     d = datetime.strptime(date, "%Y-%m-%d").date()
     prev_d = (d - timedelta(days=1)).isoformat()
     next_d = (d + timedelta(days=1)).isoformat()
@@ -504,8 +517,71 @@ def _review_nav(date: str, today: str) -> str:
         f'<button id="btn-goday" type="button">跳转</button>'
         f'<a href="/review/{next_d}" class="nav-link">后一天 →</a>'
         f'<a href="/review/{t}" class="nav-link" data-nav="today">今天</a>'
+        '<button id="btn-cal" type="button" title="按月挑选日期">📅</button>'
+        "</div>"
+        '<div id="cal-panel" class="cal-panel hidden">'
+        '<div class="cal-head">'
+        '<button id="cal-prev" type="button">‹</button>'
+        '<span id="cal-title"></span>'
+        '<button id="cal-next" type="button">›</button>'
+        "</div>"
+        '<div id="cal-grid"></div>'
         "</div>"
     )
+
+
+_DATE_IN_TEXT_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _collect_has_report_dates(cfg: Config) -> list[str]:
+    """日历打点数据：delivered_report 文件名 ∪ scheduled 文件内容中的日期（mtime 最近 90 份）。"""
+    dates: set[str] = set()
+    delivered = cfg.logs_dir / "delivered_report"
+    if delivered.is_dir():
+        for p in delivered.glob("*.md"):
+            if _DATE_RE.fullmatch(p.stem):
+                dates.add(p.stem)
+    sched = cfg.logs_dir / "scheduled"
+    if sched.is_dir():
+        files = sorted(sched.glob("daily-report_*.md"), key=lambda x: x.stat().st_mtime, reverse=True)[:90]
+        for p in files:
+            try:
+                content = p.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            dates.update(_DATE_IN_TEXT_RE.findall(content))
+    return sorted(dates)
+
+
+def _calendar_script(has_report: list[str], date: str) -> str:
+    """迷你日历纯 JS：HAS_REPORT 打点、点格跳转、未来置灰、切月重绘（UTC 正午法）。"""
+    return f"""<script>
+const HAS_REPORT = {json.dumps(has_report, ensure_ascii=False)};
+const CAL_CUR = {json.dumps(date)};
+let calY = +CAL_CUR.slice(0,4), calM = +CAL_CUR.slice(5,7);
+function renderCal(){{
+  $("cal-title").textContent = calY + "-" + String(calM).padStart(2,"0");
+  const first = new Date(Date.UTC(calY, calM-1, 1));
+  const startDow = first.getUTCDay();
+  const daysInM = new Date(Date.UTC(calY, calM, 0)).getUTCDate();
+  const todayS = new Date().toLocaleDateString("sv");
+  let h = ["日","一","二","三","四","五","六"].map(d => '<span class="cal-dow">' + d + '</span>').join("");
+  for (let i = 0; i < startDow; i++) h += '<span class="cal-cell"></span>';
+  for (let d = 1; d <= daysInM; d++){{
+    const ds = calY + "-" + String(calM).padStart(2,"0") + "-" + String(d).padStart(2,"0");
+    const cls = ["cal-cell"];
+    if (HAS_REPORT.indexOf(ds) >= 0) cls.push("cal-has");
+    if (ds === CAL_CUR) cls.push("cal-cur");
+    if (ds > todayS) {{ h += '<span class="' + cls.join(" ") + ' cal-future">' + d + '</span>'; }}
+    else {{ h += '<span class="' + cls.join(" ") + '" data-d="' + ds + '">' + d + '</span>'; }}
+  }}
+  $("cal-grid").innerHTML = h;
+  $("cal-grid").querySelectorAll("[data-d]").forEach(el => {{ el.onclick = () => {{ location.href = "/review/" + el.dataset.d; }}; }});
+}}
+$("btn-cal").onclick = () => {{ $("cal-panel").classList.toggle("hidden"); renderCal(); }};
+$("cal-prev").onclick = () => {{ calM--; if (calM < 1) {{ calM = 12; calY--; }} renderCal(); }};
+$("cal-next").onclick = () => {{ calM++; if (calM > 12) {{ calM = 1; calY++; }} renderCal(); }};
+</script>"""
 
 
 def _empty_rerun_block(date: str, is_future: bool) -> str:
@@ -571,6 +647,7 @@ $("btn-rerun").onclick = async () => {{
 def _review_page(cfg: Config, date: str) -> str:
     today = datetime.now(_UTC8).date().isoformat()
     nav = _review_nav(date, today)
+    cal_js = _calendar_script(_collect_has_report_dates(cfg), date)
     resolved = _resolve_report(cfg, date)
     if resolved is None:
         is_future = date > today
@@ -579,6 +656,7 @@ def _review_page(cfg: Config, date: str) -> str:
             f"<h1>日报评审 · {html.escape(date)}</h1>"
             '<p class="empty">暂无数据：该日没有已投递日报存档（delivered_report 与 scheduled 均未命中）</p>'
             f"{_empty_rerun_block(date, is_future)}"
+            f"{cal_js}"
         )
         return _page(f"日报评审 · {date}", body)
     text, src = resolved
@@ -586,7 +664,7 @@ def _review_page(cfg: Config, date: str) -> str:
     ver = current_report_version(cfg, date)
     page = (
         _REVIEW_TMPL.replace("__DATE__", date)
-        .replace("__NAV__", nav)
+        .replace("__NAV__", f"{nav}{cal_js}")
         .replace("__SRC__", html.escape(src))
         .replace("__VER__", str(ver))
         .replace("__REPORT__", f'<div class="report">{report_html}</div>')

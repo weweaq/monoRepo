@@ -670,6 +670,31 @@ class TestReviewPage:
         assert 'disabled' in page
         assert "未来日期无法生成日报" in page
 
+    def test_has_report_dates_embedded(self, tmp_path: Path, monkeypatch):
+        """delivered 文件名进入 HAS_REPORT；scheduled 内容日期也进入。"""
+        cfg = Config.for_tests(tmp_path)
+        save_delivered(cfg, DATE, REPORT)
+        sched = cfg.logs_dir / "scheduled"
+        sched.mkdir(parents=True, exist_ok=True)
+        (sched / "daily-report_x.md").write_text("## Reply\n2026-10-05 的日报\n", encoding="utf-8")
+        c = _client(cfg, monkeypatch)
+        page = c.get(f"/review/{DATE}").text
+        assert "HAS_REPORT" in page
+        assert '"2026-10-03"' in page
+        assert '"2026-10-05"' in page
+
+    def test_calendar_panel_present(self, tmp_path: Path, monkeypatch):
+        """日历开关与面板骨架存在（有报页与空态页都有）。"""
+        c = _client(Config.for_tests(tmp_path), monkeypatch)
+        page = c.get(f"/review/{DATE}").text
+        assert 'id="cal-panel"' in page
+        assert 'id="btn-cal"' in page
+        cfg = Config.for_tests(tmp_path)
+        save_delivered(cfg, DATE, REPORT)
+        c2 = _client(cfg, monkeypatch)
+        page2 = c2.get(f"/review/{DATE}").text
+        assert 'id="cal-panel"' in page2
+
 
 class TestHealthRefresh:
     """POST /api/health/refresh：单日体检重放按钮（backfill_health.refresh_day）。"""
