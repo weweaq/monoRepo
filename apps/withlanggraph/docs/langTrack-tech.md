@@ -587,6 +587,19 @@ ALTER ADD COLUMN（判据=列存在性），etl.run 开头与编辑器保存路�
 搜索候选带自身坐标时一并填坐标修正）；「坐标 / 地址修正」区块可改有效坐标、一键恢复自动坐标；
 「合并同名地点」区块列出 800m 内候选（同名优先、按距离排序）并预览统计后执行。
 
+**「选名依据」区块（v3.6.1，`renderNameBox`）**：把自动选名那一步摊开给用户看——
+当前采用名（人工改判 > 自动 poi > 地址）与自动判定名并列、`name_evidence` 人话化
+（`regeo:AOI` → "高德 regeo 命中 AOI（点在该地块内）"）、`places.poi_candidates` 渲染成
+可点候选 chip（`[POI 141m]` / `[AOI 院内 0m]`，点击即填入改判框；带 `location` 的候选
+顺带填坐标修正）、以及规则说明（阈值由 `/places` 与 `/api/places/data` 下发的
+`aoi_contains_max_m` 渲染，前端不写死数字）。该点库里无候选时（老点/编码失败）按有效坐标
+现查一次 `/api/places/name_candidates`，结果缓存到页面数据的 `_cands`（一次会话只查一次）。
+
+**内嵌 JS 语法门禁**：`places_page._PLACES_JS` 以 `__DATA__` 占位内嵌，改动后必须
+`node --check` 通过（提取脚本见会话做法：`_PLACES_JS.replace("__DATA__","{}")` 落盘再 check）。
+本次实测抓到两处字符串拼接语法错误（`\n` 被写成真实换行、漏 `+`），都是纯文本批量替换
+引入的，最终以 `node --check` 退出码 0 为准。
+
 **数据层**：`place_semantics.editor_data()` 纯读收集 places 全量（访问降序）+ 近 14 天
 出现线索（stay 按 place_id/grid_key 归点）+ 区县聚合 + 家基准区县 + AMap JS key；
 db 缺失/缺表降级空态。
