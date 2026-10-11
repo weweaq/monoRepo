@@ -247,6 +247,25 @@ class TestSaveCorrection:
         assert keep["has_coord_override"] is True
         assert keep["lat"] != keep["eff_lat"]  # 原始聚类中心保留显示
 
+    def test_editor_data_exposes_name_evidence_for_ui(self, tmp_path: Path) -> None:
+        """v3.6.1：/places 编辑面板"选名依据"要的字段（证据/置信度/候选池）齐全。"""
+        db = _make_db(tmp_path)
+        conn = sqlite3.connect(db)
+        ensure_correction_columns(conn)  # 夹具库初始无 v3.6 列（真实库由迁移补齐）
+        conn.execute(
+            "UPDATE places SET name_evidence='regeo:AOI', name_confidence=0.65, "
+            "poi_candidates=? WHERE place_id='p_keep'",
+            (json.dumps([{"name": "观云润府", "kind": "AOI", "distance_m": 0.0}],
+                        ensure_ascii=False),),
+        )
+        conn.commit()
+        conn.close()
+        d = ps.editor_data(db_path=db, config_path=tmp_path / "sem.json")
+        keep = next(p for p in d["places"] if p["place_id"] == "p_keep")
+        assert keep["name_evidence"] == "regeo:AOI"
+        assert keep["name_confidence"] == 0.65
+        assert keep["poi_candidates"][0]["name"] == "观云润府"
+
 
 # ------------------------------------------------------------------ 合并
 

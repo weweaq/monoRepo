@@ -55,6 +55,9 @@ _PLACES_CSS = """
 .pl-box{border:1px solid var(--line,#d0d7de);border-radius:6px;padding:10px 12px;margin:10px 0;background:#fbfdff}
 .pl-box h4{margin:0 0 6px;font-size:13px}
 .pl-warn{color:#9a6700}
+.pl-chip{display:inline-block;font-size:12px;line-height:18px;border:1px solid var(--line,#d0d7de);border-radius:10px;padding:0 8px;margin:2px 4px 2px 0;background:#fff;cursor:pointer}
+.pl-chip:hover{background:#ddf4ff;border-color:#0969da}
+.pl-chip b{font-weight:600}
 """
 
 # 交互脚本。__DATA__ 占位符在 _places_page 内替换为内嵌 JSON（已做 </ 转义）。
@@ -128,6 +131,58 @@ function renderList(){
 }
 function pickPlace(p){cur=p;curDist=-1;renderList();renderEditor();}
 function pickDistrict(i){cur=null;curDist=i;renderList();renderDistrictEditor(i);}
+function candLabel(c){
+  var d=(c.distance_m==null)?'':(' '+Math.round(c.distance_m)+'m');
+  return '['+c.kind+d+']';
+}
+function candList(p){
+  var cs=(p.poi_candidates||[]).filter(function(c){return c&&c.name;});
+  if(cs.length)return cs;
+  return (p._cands||[]);   // 本次会话按有效坐标现查回来的候选
+}
+function ruleText(){
+  var m=(D.aoi_contains_max_m==null)?25:D.aoi_contains_max_m;
+  return '规则：POI 与 AOI 按高德距离比较，AOI ≤'+m
+    +'m（说明你确实在该地块内）时取 AOI 名，否则取最近 POI；人工改判优先于两者。';
+}
+function sourceText(p){
+  var ev=(p.name_evidence||'').trim();
+  if(!ev)return '';
+  if(ev==='regeo:AOI')return '高德 regeo 命中 AOI（点在该地块内）';
+  if(ev==='regeo:POI')return '高德 regeo 命中 POI';
+  if(ev==='regeo:around')return '高德 regeo 无命中，周边搜索兜底';
+  return ev.replace('regeo:','高德 regeo 仅命中');
+}
+function selName(p){
+  // 与后端 resolve_place_name 同序：人工覆盖 > 自动 poi > 地址
+  return ((p.poi_override||'').trim()||(p.poi||'').trim()||(p.address||'').trim());
+}
+function renderNameBox(p){
+  var el=document.getElementById('pl_namebox');if(!el)return;
+  var cs=candList(p);
+  var ov=(p.poi_override||'').trim();
+  var chips=cs.slice(0,6).map(function(c){
+    return '<span class="pl-chip" data-n="'+esc(c.name)+'" data-loc="'+esc(c.location||'')+'">'
+      +esc(c.name)+'<b> '+candLabel(c)+'</b></span>';}).join('');
+  el.innerHTML='<div class="pl-cur">当前采用名：<b>'+esc(selName(p)||'（空）')+'</b>'
+      +(ov?' <span class="pl-tag t-custom">人工改判</span>':'')
+      +' ｜ 自动判定：<b>'+esc(p.poi||'（空）')+'</b>'
+      +(p.name_evidence?(' · '+esc(p.name_evidence)):'')
+      +'</div>'
+    +'<div class="pl-cur">'+esc(sourceText(p))+'</div>'
+    +(chips?('<div style="margin-top:4px"><span class="pl-cur" style="display:block">候选（点一个即填入下面改判框）：</span>'+chips+'</div>')
+      :'<div class="pl-cur">（该点无候选记录：用下面「按坐标校准」向高德现查）</div>')
+    +'<div class="pl-cur" style="color:#57606a">'+esc(ruleText())+'</div>';
+  el.querySelectorAll('.pl-chip').forEach(function(b){b.onclick=function(){
+    document.getElementById('pl_pov').value=b.dataset.n;
+    var loc=(b.dataset.loc||'').split(',');
+    if(loc.length===2){   // 候选自带坐标（搜索候选）→ 顺便填坐标修正
+      document.getElementById('pl_lon').value=parseFloat(loc[0]).toFixed(6);
+      document.getElementById('pl_lat').value=parseFloat(loc[1]).toFixed(6);
+    }
+    document.getElementById('pl_pov').dispatchEvent(new Event('input'));
+    toast2('已填入「'+b.dataset.n+'」，点「保存修正」生效');};});
+}
 function effName(p){
   // 显示名 = 人工覆盖 > 自动 poi > 地址（与后端 resolve_place_name 同序）
   if((p.poi_override||'').trim())return p.poi_override.trim();
@@ -165,7 +220,7 @@ function renderEditor(){
   D.districts.forEach(function(d){if(d.district===p.district)dnote=d.note||'';});
   var opts=mergeOptions(p);
   var optHtml=opts.map(function(o,i){
-    return '<option value="'+i+'">'+esc((o.same?'同名 · ':'')+(named(o.p)||'(无名)')+' · '
+    return '<option value="'+i+'">'+esc((o.same?'同名 · ':'')+(named(o.p)||'(无名)'))+' · '
       +Math.round(o.d)+'m · '+o.p.vc+' 次</option>';}).join('');
   el.innerHTML='<h2 style="margin-top:0">'+esc(effName(p)||'(无名地点)')+'</h2>'
     +'<div class="pl-kv">'
@@ -179,8 +234,7 @@ function renderEditor(){
 
     // ---- 地名（自动 vs 人工改判）----
     +'<div class="pl-box"><h4>地点名</h4>'
-    +'<div class="pl-cur">系统自动判定：<b>'+esc(p.poi||'（空）')+'</b>'
-      +(p.poi_override?' <span class="pl-tag t-custom">已被人工覆盖</span>':'')+'</div>'
+    +'<div id="pl_namebox"></div>'
     +'<div class="pl-fld"><label>人工改判地名（写库即真源；留空 = 回到自动判定）</label>'
     +'<input id="pl_pov" maxlength="120" value="'+esc(p.poi_override||'')+'" placeholder="如：观云润府">'
     +'<div class="pl-row"><button class="pl-ghost" id="pl_lookup">按坐标校准（问高德）</button>'
@@ -242,6 +296,10 @@ function renderEditor(){
     document.getElementById('pl_label').value=b.dataset.q;upd();};});
   upd();
 
+  // 选名依据对照（候选池来自库；缺则按有效坐标拉一次并缓存到页面数据）
+  renderNameBox(cur);
+  if(!(cur.poi_candidates||[]).length)fillCandidates(cur);
+
   // 保存标签/note（行为与 v3.5 一致）
   document.getElementById('pl_save').onclick=savePlace;
 
@@ -271,7 +329,7 @@ function renderEditor(){
     var o=opts[parseInt(document.getElementById('pl_merge').value,10)];
     if(!o)return;
     if(!confirm('把「'+(named(o.p)||'(无名)')+'」('+o.p.place_id+') 合并到「'
-      +(named(p)||'(无名)')+'」('+p.place_id+')？\n'
+      +(named(p)||'(无名)')+'」('+p.place_id+')？'
       +'它的 '+o.p.vc+' 次停留 / 网格将改挂到本点，该点被删除。'))return;
     postJSON('/api/places/merge',{keep_id:p.place_id,drop_id:o.p.place_id},function(j){
       if(j.ok){
@@ -311,6 +369,16 @@ function lookupNames(){
       document.getElementById('pl_pov').dispatchEvent(new Event('input'));
     };
   }).catch(function(){info.textContent='网络错误';});
+}
+function fillCandidates(p){
+  // 库里没存候选（老点/编码失败）→ 按有效坐标现查一次，缓存到页面数据
+  var u='/api/places/name_candidates?place_id='+encodeURIComponent(p.place_id)
+    +'&device_id='+encodeURIComponent(p.device_id||'');
+  fetch(u).then(function(r){return r.json();}).then(function(j){
+    if(!j.ok||!(j.candidates||[]).length)return;
+    p._cands=j.candidates;
+    if(cur===p)renderNameBox(p);
+  }).catch(function(){});
 }
 function saveCorrection(){
   var body={place_id:cur.place_id,device_id:cur.device_id||'',
@@ -425,6 +493,7 @@ def _places_page(cfg) -> str:
     """语义地点编辑页：自定义标签直写 places.label/note（DB 即真源，v3.5）。"""
     from gacore.langTrack import place_semantics
     from gacore.langTrack.dashboard import _amap_js_key, _amap_js_security_code
+    from gacore.langTrack.geocode import AOI_CONTAINS_MAX_M
 
     data = place_semantics.editor_data(
         db_path=cfg.root / "data" / "langTrack.db",
@@ -432,6 +501,8 @@ def _places_page(cfg) -> str:
     )
     data["amap_js_key"] = _amap_js_key() or ""
     data["amap_js_sec"] = _amap_js_security_code() or ""
+    # 选名规则阈值随数据下发（页面"选名依据"解释用，前端不写死 magic number）
+    data["aoi_contains_max_m"] = AOI_CONTAINS_MAX_M
     payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")  # 防 </script> 提前闭合
     note = f'<div class="pl-note">{html.escape(data["db_note"])}</div>' if data["db_note"] else ""
     body = (

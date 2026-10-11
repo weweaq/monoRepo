@@ -1745,13 +1745,23 @@ def create_app(cfg: Config | None = None) -> FastAPI:
 
     @app.get("/api/places/data")
     def api_places_data():
-        """编辑器数据（places 全量 + 区县聚合），保存/合并后前端就地重取。"""
+        """编辑器数据（places 全量 + 区县聚合）；保存/合并后前端就地重取。
+
+        与 `_places_page` 同一份载荷：amap_js_key/amap_js_sec（地图 tab 与页面内嵌
+        数据一致）与 aoi_contains_max_m（"选名依据"规则阈值）一并下发，否则前端
+        refreshData() 覆盖 D 时会把这些字段抹掉。
+        """
         from gacore.langTrack import place_semantics
+        from gacore.langTrack.dashboard import _amap_js_key, _amap_js_security_code
+        from gacore.langTrack.geocode import AOI_CONTAINS_MAX_M
 
         data = place_semantics.editor_data(
             db_path=config.root / "data" / "langTrack.db",
             config_path=config.root / "data" / "place_semantics.json",
         )
+        data["amap_js_key"] = _amap_js_key() or ""
+        data["amap_js_sec"] = _amap_js_security_code() or ""
+        data["aoi_contains_max_m"] = AOI_CONTAINS_MAX_M
         return {"ok": True, **data}
 
     @app.get("/api/places/name_candidates")

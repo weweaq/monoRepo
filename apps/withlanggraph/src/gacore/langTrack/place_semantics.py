@@ -166,6 +166,8 @@ def editor_data(db_path: Path | str = DB_PATH, config_path: Path | str | None = 
         sel_town = "township" if "township" in cols else "'' AS township"
         # v3.6 人工修正列（缺列库按 NULL 降级，页面仍可用）
         sel_cands = "poi_candidates" if "poi_candidates" in cols else "NULL AS poi_candidates"
+        sel_ev = "name_evidence" if "name_evidence" in cols else "NULL AS name_evidence"
+        sel_conf = "name_confidence" if "name_confidence" in cols else "NULL AS name_confidence"
         sel_pov = "poi_override" if "poi_override" in cols else "NULL AS poi_override"
         sel_aov = (
             "address_override" if "address_override" in cols else "NULL AS address_override"
@@ -176,7 +178,7 @@ def editor_data(db_path: Path | str = DB_PATH, config_path: Path | str | None = 
             f"SELECT {sel_pid}, device_id, grid_key, lat, lon, label, "
             f"first_seen, last_seen, visit_count, {sel_poi}, {sel_addr}, "
             f"{sel_dist}, {sel_town}, {sel_note}, {sel_cands}, {sel_pov}, "
-            f"{sel_aov}, {sel_latov}, {sel_lonov} "
+            f"{sel_aov}, {sel_latov}, {sel_lonov}, {sel_ev}, {sel_conf} "
             "FROM places ORDER BY visit_count DESC"
         ).fetchall()
         v2 = is_v2(conn)
@@ -201,6 +203,8 @@ def editor_data(db_path: Path | str = DB_PATH, config_path: Path | str | None = 
                 "vc": int(r["visit_count"] or 0),
                 "poi": r["poi"] or "",
                 "poi_candidates": parse_candidates(r["poi_candidates"]),
+                "name_evidence": r["name_evidence"] or "",
+                "name_confidence": r["name_confidence"],
                 "poi_override": r["poi_override"] or "",
                 "address": r["address"] or "",
                 "address_override": r["address_override"] or "",
