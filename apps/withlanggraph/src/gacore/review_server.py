@@ -508,15 +508,77 @@ def _review_nav(date: str, today: str) -> str:
     )
 
 
+def _empty_rerun_block(date: str, is_future: bool) -> str:
+    """空态页的动作区 + 重生成脚本：无锚点可批注，只留整体重生成（未来日期禁用）。"""
+    if is_future:
+        actions = (
+            '<div class="actions">'
+            '<button id="btn-rerun" class="danger" disabled>整体重生成</button>'
+            '<span class="warn">未来日期无法生成日报</span>'
+            "</div>"
+            '<div id="rerun-status" class="sub"></div>'
+        )
+        return actions
+    # 与 _REVIEW_TMPL 的重生成脚本同语义（独立内联：空态页无 revise/pending 元素，不复用整份脚本）
+    return f"""<div class="actions">
+  <button id="btn-rerun" class="danger">整体重生成</button>
+</div>
+<div id="rerun-status" class="sub"></div>
+<script>
+const DATE = {json.dumps(date)};
+let token = localStorage.getItem("review_token") || "";
+const $ = (id) => document.getElementById(id);
+function esc(s){{const d=document.createElement("div");d.textContent=s==null?"":String(s);return d.innerHTML;}}
+function needToken(msg){{
+  const t = prompt(msg || "请输入 REVIEW_TOKEN（见 .env）") || "";
+  if (t) {{ token = t; localStorage.setItem("review_token", t); }}
+  return t;
+}}
+async function post(url, body){{
+  if (!token && !needToken()) return null;
+  for (let i = 0; i < 2; i++){{
+    const r = await fetch(url, {{method:"POST", headers:{{"Content-Type":"application/json","X-Review-Token":token}}, body: JSON.stringify(body)}});
+    if (r.status !== 401) return r;
+    if (!needToken("令牌无效或未授权，请重新输入 REVIEW_TOKEN")) return null;
+  }}
+  return null;
+}}
+function pollRerun(){{
+  const timer = setInterval(async () => {{
+    const j = await fetch("/api/rerun/" + DATE + "/status").then(r => r.json()).catch(() => null);
+    if (!j) return;
+    $("rerun-status").textContent = "整体重生成: " + j.state +
+      (j.exit_reason ? " · exit=" + esc(j.exit_reason) : "") +
+      (j.error ? " · " + esc(j.error) : "") +
+      (j.output_path ? " · " + esc(j.output_path) : "") +
+      (j.state === "done" ? " · 生成完成，可刷新页面查看" : "");
+    if (j.state !== "running") clearInterval(timer);
+  }}, 2000);
+}}
+$("btn-rerun").onclick = async () => {{
+  if (!confirm("该日暂无日报存档。\\n整体重生成会为该日生成日报并发送邮件（主题带重生成版本号）。确定继续？")) return;
+  const r = await post("/api/rerun", {{date: DATE, email: true}});
+  if (!r) return;
+  const j = await r.json().catch(() => ({{}}));
+  if (r.status === 409) {{ alert("该日已有重生成任务在运行"); return; }}
+  if (r.status !== 202 || j.ok !== true) {{ alert("启动失败: " + esc(j.error || r.status)); return; }}
+  $("rerun-status").textContent = "整体重生成: running";
+  pollRerun();
+}};
+</script>"""
+
+
 def _review_page(cfg: Config, date: str) -> str:
     today = datetime.now(_UTC8).date().isoformat()
     nav = _review_nav(date, today)
     resolved = _resolve_report(cfg, date)
     if resolved is None:
+        is_future = date > today
         body = (
             f"{nav}"
             f"<h1>日报评审 · {html.escape(date)}</h1>"
             '<p class="empty">暂无数据：该日没有已投递日报存档（delivered_report 与 scheduled 均未命中）</p>'
+            f"{_empty_rerun_block(date, is_future)}"
         )
         return _page(f"日报评审 · {date}", body)
     text, src = resolved

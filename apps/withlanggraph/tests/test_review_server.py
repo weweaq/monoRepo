@@ -654,6 +654,22 @@ class TestReviewPage:
         assert 'id="f-date"' in page
         assert 'data-nav="today"' in page
 
+    def test_empty_state_has_rerun_button(self, tmp_path: Path, monkeypatch):
+        """空态页：有整体重生成按钮，无提交修订按钮。"""
+        c = _client(Config.for_tests(tmp_path), monkeypatch)
+        page = c.get(f"/review/{DATE}").text
+        assert "整体重生成" in page
+        assert "提交修订" not in page
+
+    def test_empty_state_future_date_disables_rerun(self, tmp_path: Path, monkeypatch):
+        """未来日期空态：重生成按钮禁用并提示。"""
+        c = _client(Config.for_tests(tmp_path), monkeypatch)
+        future = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+        page = c.get(f"/review/{future}").text
+        assert 'id="btn-rerun"' in page
+        assert 'disabled' in page
+        assert "未来日期无法生成日报" in page
+
 
 class TestHealthRefresh:
     """POST /api/health/refresh：单日体检重放按钮（backfill_health.refresh_day）。"""
