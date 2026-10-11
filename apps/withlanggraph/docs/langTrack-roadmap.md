@@ -3208,3 +3208,39 @@ batterystats 实测 weiCheckApp 耗电 67.7 mAh，其中 GNSS 64.4 mAh（引擎�
 - [ ] 用户授予 ACTIVITY_RECOGNITION → steps 哨兵生效（ColorOS 拦 adb，须 UI 手动）。
 - [x] 顺带：PC 重启后 gacore.langTrack（:8000）没起来，手机跨网段积压 ~2900 条传不上去；
       已按原命令行重启服务（0.0.0.0:8000，HTTP 200），积压以 500 条/批恢复补传（22:45 起全部 ok）。
+
+## 2026-10-11：评审页日期导航 + 迷你日历 + 空态重生成 + rerun 未来守卫
+
+### 背景
+评审页 `/review/{date}` 只能看当天/手敲 URL，无法方便地回看任意日期的日报。设计稿见
+`docs/superpowers/specs/2026-10-11-review-date-nav-design.md`（方案 1+3，用户已拍板），
+实现计划 `docs/superpowers/plans/2026-10-11-review-date-nav.md`。
+
+### 已完成（4 个代码提交 + 1 个文档提交）
+- ✅ **导航条** `_review_nav(date, today)`（commit 36663d5）：← 前一天 / 后一天 → / 今天锚点
+  + `#f-date` date input + 跳转按钮；`_REVIEW_TMPL` 首行 `__NAV__` 占位注入，有报页与
+  空态页共用；跨月/跨年算术用 `datetime.strptime(...).date()` ± `timedelta(days=1)`。
+- ✅ **`POST /api/rerun` 未来日期守卫**（commit 8749b47）：日期格式校验后、job 查找前，
+  `date > today`（东八区，today 可生成）→ `400 {"ok": false, "error": "future_date"}`。
+- ✅ **空态页"整体重生成"按钮**（commit f80b961）：`_empty_rerun_block(date, is_future)` —
+  有报锚点为空时不复用整份 `_REVIEW_TMPL` 脚本（无 revise/pending 元素），独立内联
+  rerun 轮询脚本（post/needToken/pollRerun，done 时提示刷新）；未来日期按钮
+  `disabled` + 「未来日期无法生成日报」提示；空态页不含"提交修订"。
+- ✅ **迷你日历**（commit ad854c1）：`_collect_has_report_dates(cfg)` 打点数据 =
+  delivered_report 文件名 ∪ scheduled 内容日期（mtime 最近 90 份）；`#cal-panel` 纯 JS
+  渲染（UTC 正午法算月首星期/天数），有报绿格、当前日边框、未来灰格禁点、点格跳
+  `/review/{date}`、‹› 切月；`.review-nav`/`.cal-*` CSS 进 `_CSS`，有报页与空态页均注入。
+
+### 实测验证
+- `uv run pytest tests/test_review_server.py -q` → **81 passed**（新增 8 个用例：导航
+  3 + rerun 守卫 1 + 空态 2 + 日历 2）。
+- `uv run ruff check src/gacore/review_server.py tests/test_review_server.py` → All checks passed。
+
+### 偏差说明
+- 计划中 Task 3 建议"复用 `_REVIEW_TMPL` 加 `__ACTIONS__` 占位"，实际改为独立
+  `_empty_rerun_block` 内联脚本——空态页无 revise/pending 元素，复用整份模板脚本反而
+  引入缺元素报错风险，语义等价（同 post/pollRerun 链）。
+- f-string 内 JS `({})` 需转义为 `({{}})`，首次实现踩过 SyntaxError（已修）。
+
+### 待办更新
+- （无新增；本任务全部完成）
