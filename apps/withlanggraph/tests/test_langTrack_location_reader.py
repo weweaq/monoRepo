@@ -45,6 +45,9 @@ PLACE_FIELDS = {
     "name_confidence", "name_evidence", "parent_poi",
     "poi_l1", "poi_l2", "poi_l3",
     "note",  # v3 列（编辑器直写的手写背景注记；未迁移库恒 NULL）
+    # v3.6 列（/places 编辑器人工改判：候选池证据 + 地名/地址/坐标覆盖）
+    "poi_candidates", "poi_override", "address_override",
+    "lat_override", "lon_override",
 }
 STAY_FIELDS = {
     "device_id", "place_id", "start_ts", "end_ts", "duration_ms",

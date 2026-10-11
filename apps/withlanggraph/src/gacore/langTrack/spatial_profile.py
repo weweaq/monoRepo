@@ -478,6 +478,8 @@ def _frequent_places(
             parent_poi=pl.get("parent_poi") or "",
             name_confidence=float(pl.get("name_confidence") or 0.0),
             label=pl.get("label") or "",
+            poi_override=pl.get("poi_override") or "",
+            address_override=pl.get("address_override") or "",
         )
         name = "" if _src == "unknown" else pn
         tag = user_tag_of(pl.get("label") or "")

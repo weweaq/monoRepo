@@ -668,13 +668,36 @@ def _pick_name(
     business_area: str,
     parent_poi: str,
     name_confidence: float,
+    poi_override: str = "",
+    address_override: str = "",
 ) -> tuple[str, str, str]:
     """按 name_confidence 决定粒度（§2.6）：
 
-    高置信 venue → 具体 POI；商场/园区内不确定 → parent_poi / business_area；
-    住宅附近不稳定 → address 中小区或 township；仍不确定 → district；完全无语义 → 未知地点。
+    人工覆盖 → 高置信 venue POI → parent_poi / business_area →
+    「地址包含该 POI/AOI 名」→ address → township → district → 未知地点。
     返回 (place_name, name_source, display_granularity)。
+
+    人工覆盖（v3.6）：poi_override / address_override 来自 /places 编辑器
+    （places 列，DB 即真源），优先级高于任何自动命名——用户改判过的地名
+    不允许被下一轮 regeo 或置信度阶梯改写；留空即回到自动命名。
+
+    地址包含名（v3.6）：AOI 级命名（name_confidence=0.65）不足 venue 门槛，
+    原阶梯会落到整串 address（"江苏省南京市…机场二通道辅路观云润府"）。
+    高德 formatted_address 以 POI 名结尾，因此地址含该名时收敛为该名，
+    日报读起来才是"观云润府"而不是一串行政区划。
     """
+    # 人工修正优先：name_source 走 "override"/"override_address"，
+    # display_granularity 保持 venue/address，避免下游按 area 降级展示。
+    if (poi_override or "").strip():
+        return poi_override.strip(), "override", "venue"
+    if (address_override or "").strip() and not poi:
+        return address_override.strip(), "override_address", "address"
+
+    def _addr_contains_poi() -> bool:
+        """地址串里是否含选中的 POI/AOI 名（高德 formatted_address 的既定格式）。"""
+        p = (poi or "").strip()
+        a = (address or "").strip()
+        return bool(p) and len(p) >= 2 and p in a
     # 优先级与分值映射（分值仅用于选粒度，不表示到访置信度）；
     # 阶梯顺序对齐 §2.6：address(0.60) > township/district(0.40)，township 先于 district
     if name_confidence >= 0.75 and poi:
@@ -683,6 +706,10 @@ def _pick_name(
         return parent_poi, "poi", "area"
     if business_area and name_confidence >= 0.55:
         return business_area, "poi_fallback", "area"
+    if _addr_contains_poi():
+        # 地址已含真名（AOI/道路级命名）：显示该名而不是整串地址
+        gran = "area" if name_confidence >= 0.60 else "neighborhood"
+        return poi.strip(), "poi", gran
     if address:
         return address, "address", "address"
     if township:
@@ -703,11 +730,14 @@ def resolve_place_name(
     parent_poi: str = "",
     name_confidence: float = 0.0,
     label: str = "",
+    poi_override: str = "",
+    address_override: str = "",
 ) -> tuple[str, str, str]:
     """统一地名派生纯函数（§2.6）：所有出口只能调用本函数，禁止各自写 fallback 链。
 
     返回 (place_name, name_source, display_granularity)。
     label 只作为 user_tag 展示用，不参与地名选择。
+    poi_override / address_override 是 /places 编辑器写入的人工改判（优先级最高）。
     """
     return _pick_name(
         poi or "",
@@ -718,7 +748,25 @@ def resolve_place_name(
         business_area or "",
         parent_poi or "",
         float(name_confidence or 0.0),
+        poi_override=poi_override or "",
+        address_override=address_override or "",
     )
+
+
+def effective_coord(
+    lat: float, lon: float, lat_override: object = None, lon_override: object = None
+) -> tuple[float, float]:
+    """地点有效坐标：人工修正（lat_override/lon_override）优先，否则聚类中心。
+
+    单一出口（§2.6 同理）：编辑器展示、"按坐标校准地名"、regeo 重编都调这里，
+    禁止各处自行拼覆盖逻辑。
+    """
+    try:
+        if lat_override is not None and lon_override is not None:
+            return float(lat_override), float(lon_override)
+    except (TypeError, ValueError):
+        pass
+    return float(lat), float(lon)
 
 
 def user_tag_of(label: str) -> str:

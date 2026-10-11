@@ -48,6 +48,13 @@ _PLACES_CSS = """
 .pl-drow:hover{background:#eff2f5}
 .pl-note{color:#9a6700;font-size:13px;margin:6px 0}
 .pl-ghost{background:#fff;color:#0969da;border:1px solid #d0d7de;border-radius:6px;padding:2px 10px;font-size:12px;cursor:pointer}
+.pl-fld select{width:100%;padding:5px 8px;border:1px solid var(--line,#d0d7de);border-radius:4px;font:inherit;background:#fff}
+.pl-cur{font-size:12px;color:var(--mut,#57606a);margin:4px 0 0}
+.pl-cur b{color:#1f2328}
+.pl-row{display:flex;gap:8px;align-items:center;margin-top:4px;flex-wrap:wrap}
+.pl-box{border:1px solid var(--line,#d0d7de);border-radius:6px;padding:10px 12px;margin:10px 0;background:#fbfdff}
+.pl-box h4{margin:0 0 6px;font-size:13px}
+.pl-warn{color:#9a6700}
 """
 
 # 交互脚本。__DATA__ 占位符在 _places_page 内替换为内嵌 JSON（已做 </ 转义）。
@@ -121,19 +128,66 @@ function renderList(){
 }
 function pickPlace(p){cur=p;curDist=-1;renderList();renderEditor();}
 function pickDistrict(i){cur=null;curDist=i;renderList();renderDistrictEditor(i);}
+function effName(p){
+  // 显示名 = 人工覆盖 > 自动 poi > 地址（与后端 resolve_place_name 同序）
+  if((p.poi_override||'').trim())return p.poi_override.trim();
+  if((p.poi||'').trim())return p.poi.trim();
+  return (p.address||'').trim();
+}
+function named(p){return p.poi||'';}
+function mergeOptions(p){
+  // 候选被并点：同名优先，其余按距离升序（<=800m），排除自己
+  var out=[];
+  D.places.forEach(function(x){
+    if(x===p||x.place_id===p.place_id)return;
+    if(x.device_id&&p.device_id&&x.device_id!==p.device_id)return;
+    var d=hav(x.eff_lat,x.eff_lon,p.eff_lat,p.eff_lon);
+    if(d>800)return;
+    out.push({p:x,d:d,same:!!(named(x)&&named(p)&&named(x)===named(p))});
+  });
+  out.sort(function(a,b){
+    if(a.same!==b.same)return a.same?-1:1;
+    return a.d-b.d;});
+  return out.slice(0,30);
+}
+function hav(la1,lo1,la2,lo2){
+  if(la1==null||lo1==null||la2==null||lo2==null)return 1e9;
+  var R=6371000,r=Math.PI/180;
+  var dla=(la2-la1)*r,dlo=(lo2-lo1)*r;
+  var a=Math.sin(dla/2)*Math.sin(dla/2)
+    +Math.cos(la1*r)*Math.cos(la2*r)*Math.sin(dlo/2)*Math.sin(dlo/2);
+  return 2*R*Math.asin(Math.sqrt(a));
+}
 function renderEditor(){
   var el=document.getElementById('plpane');
   if(!cur){el.innerHTML='<h2 style="margin-top:0">编辑</h2><div class="meta">← 左侧选一个地点（键盘 ↑↓ 可导航）。「待办」tab 列出了最值得先配的点。</div>';return;}
   var p=cur;var dnote='';
   D.districts.forEach(function(d){if(d.district===p.district)dnote=d.note||'';});
-  el.innerHTML='<h2 style="margin-top:0">'+esc(p.poi||'(无名地点)')+'</h2>'
+  var opts=mergeOptions(p);
+  var optHtml=opts.map(function(o,i){
+    return '<option value="'+i+'">'+esc((o.same?'同名 · ':'')+(named(o.p)||'(无名)')+' · '
+      +Math.round(o.d)+'m · '+o.p.vc+' 次</option>';}).join('');
+  el.innerHTML='<h2 style="margin-top:0">'+esc(effName(p)||'(无名地点)')+'</h2>'
     +'<div class="pl-kv">'
     +'<span class="k">place_id</span><span>'+(p.place_id?esc(p.place_id):'<i>无（v1 网格点，按名称匹配）</i>')+'</span>'
     +'<span class="k">区域</span><span>'+esc(regionOf(p))+(p.township?(' · '+esc(p.township)):'')+'</span>'
-    +'<span class="k">完整地址</span><span>'+esc(p.address||'—')+'</span>'
+    +'<span class="k">完整地址</span><span>'+esc(p.address||'—')+(p.address_override?' <span class="pl-tag t-custom">已人工改判</span>':'')+'</span>'
     +'<span class="k">访问</span><span>'+p.vc+' 次 · 最近停留 '+esc(p.last_day?fmtDay(p.last_day):fmtDay(p.last_seen))+'</span>'
-    +'<span class="k">坐标</span><span class="num">'+p.lat+', '+p.lon+'</span>'
+    +'<span class="k">坐标</span><span class="num">'+p.eff_lat+', '+p.eff_lon
+      +(p.has_coord_override?' <span class="pl-tag t-custom">已修正</span>':'')+'</span>'
     +'</div>'
+
+    // ---- 地名（自动 vs 人工改判）----
+    +'<div class="pl-box"><h4>地点名</h4>'
+    +'<div class="pl-cur">系统自动判定：<b>'+esc(p.poi||'（空）')+'</b>'
+      +(p.poi_override?' <span class="pl-tag t-custom">已被人工覆盖</span>':'')+'</div>'
+    +'<div class="pl-fld"><label>人工改判地名（写库即真源；留空 = 回到自动判定）</label>'
+    +'<input id="pl_pov" maxlength="120" value="'+esc(p.poi_override||'')+'" placeholder="如：观云润府">'
+    +'<div class="pl-row"><button class="pl-ghost" id="pl_lookup">按坐标校准（问高德）</button>'
+    +'<input id="pl_kw" placeholder="关键词搜索（可空）" style="flex:1;min-width:120px;padding:4px 8px;border:1px solid #d0d7de;border-radius:4px">'
+    +'</div><select id="pl_cands" style="display:none"></select>'
+    +'<div class="pl-cur" id="pl_candinfo"></div></div></div>'
+
     +'<div class="pl-fld"><label>自定义标签（写库即真源；<span class="pl-hint">「家」「公司」参与计算：深夜在外判定/停留分桶/异地基准</span>；留空恢复「未知」）</label>'
     +'<input id="pl_label" maxlength="24" value="'+esc((p.label&&p.label!=='未知')?p.label:'')+'" placeholder="如：张威的老家 / 公司 / 家">'
     +'<div style="margin-top:4px"><button class="pl-ghost" data-q="家">标为家</button> <button class="pl-ghost" data-q="公司">标为公司</button></div></div>'
@@ -141,26 +195,147 @@ function renderEditor(){
     +'<textarea id="pl_note" maxlength="500">'+esc(p.note||'')+'</textarea></div>'
     +'<div class="pl-fld"><label>区县背景——'+esc(p.district||'（无区县）')+'（按区县共享，随本表单一并保存）</label>'
     +'<textarea id="pl_dnote" maxlength="500">'+esc(dnote)+'</textarea></div>'
+
+    // ---- 坐标修正 ----
+    +'<div class="pl-box"><h4>坐标 / 地址修正</h4>'
+    +'<div class="pl-cur">聚类中心：'+p.lat+', '+p.lon+'（原始上报经纬度，不随修正改变）</div>'
+    +'<div class="pl-row"><input id="pl_lat" value="'+p.eff_lat+'" style="width:130px;padding:4px 8px;border:1px solid #d0d7de;border-radius:4px">'
+    +'<input id="pl_lon" value="'+p.eff_lon+'" style="width:130px;padding:4px 8px;border:1px solid #d0d7de;border-radius:4px">'
+    +'<button class="pl-ghost" id="pl_resetcoord">恢复自动坐标</button></div>'
+    +'<div class="pl-fld"><label>地址覆盖（留空 = 用高德地址）</label>'
+    +'<input id="pl_aov" maxlength="120" value="'+esc(p.address_override||'')+'"></div>'
+    +'<div class="pl-row"><button id="pl_savecorr">保存修正</button>'
+    +'<button class="pl-ghost" id="pl_clearcorr">清空修正</button>'
+    +'<span class="meta" id="pl_corrsaved"></span></div></div>'
+
+    // ---- 合并同名地点 ----
+    +'<div class="pl-box"><h4>合并同名地点</h4>'
+    +'<div class="pl-cur">把另一处并到这里（它的停留/网格/行程全部改挂本点，并删除该点）。'
+      +'同名歧义（如"张垛"被切成两行）用这里收口。</div>'
+    +(opts.length?('<div class="pl-row"><select id="pl_merge" style="flex:1">'+optHtml+'</select>'
+      +'<button id="pl_domerge">合并到这里</button></div>'
+      +'<div class="pl-cur" id="pl_mergeinfo"></div>')
+      :'<div class="pl-cur">800m 内没有可合并的其它点</div>')
+    +'</div>'
+
     +'<div class="pl-prev"><b style="font-size:12px">渲染预览（实时）</b><pre id="pl_prev"></pre></div>'
-    +'<button id="pl_save">保存</button> <span class="meta" id="pl_saved"></span>';
+    +'<button id="pl_save">保存标签与 note</button> <span class="meta" id="pl_saved"></span>';
+
   function upd(){
     var lbl=document.getElementById('pl_label').value.trim();
     var eff=lbl||(cur.label!=='未知'?cur.label:'');
+    var nm=document.getElementById('pl_pov').value.trim()||effName(cur);
+    var shown={poi:nm,address:cur.address,district:cur.district};
     var r=regionOf(cur);
-    var lines=['今日轨迹：'+fmtLine(cur,eff)+' 00:00-24:00；短出 2 次合计 2.4km'];
+    var lines=['今日轨迹：'+fmtLine(shown,eff)+' 00:00-24:00；短出 2 次合计 2.4km'];
     var nt=document.getElementById('pl_note').value.trim();
     var dn2=document.getElementById('pl_dnote').value.trim();
-    if(nt)lines.push('地点背景：'+fmtLine(cur,eff)+'——'+nt);
+    if(nt)lines.push('地点背景：'+fmtLine(shown,eff)+'——'+nt);
     if(dn2)lines.push('区县背景：'+cur.district+'——'+dn2);
     document.getElementById('pl_prev').textContent=lines.join('\n');
   }
   document.getElementById('pl_label').oninput=upd;
   document.getElementById('pl_note').oninput=upd;
   document.getElementById('pl_dnote').oninput=upd;
-  el.querySelectorAll('.pl-ghost').forEach(function(b){b.onclick=function(){
+  document.getElementById('pl_pov').oninput=upd;
+  el.querySelectorAll('.pl-ghost[data-q]').forEach(function(b){b.onclick=function(){
     document.getElementById('pl_label').value=b.dataset.q;upd();};});
   upd();
+
+  // 保存标签/note（行为与 v3.5 一致）
   document.getElementById('pl_save').onclick=savePlace;
+
+  // 按坐标校准地名
+  document.getElementById('pl_lookup').onclick=lookupNames;
+
+  // 保存人工修正
+  document.getElementById('pl_savecorr').onclick=saveCorrection;
+  document.getElementById('pl_resetcoord').onclick=function(){
+    cur.has_coord_override=false;
+    document.getElementById('pl_lat').value=cur.lat;
+    document.getElementById('pl_lon').value=cur.lon;
+    document.getElementById('pl_resetcoord').dataset.reset='1';
+    toast2('已标记恢复自动坐标，点「保存修正」生效');};
+  document.getElementById('pl_clearcorr').onclick=function(){
+    document.getElementById('pl_pov').value='';
+    document.getElementById('pl_aov').value='';
+    document.getElementById('pl_lat').value=cur.lat;
+    document.getElementById('pl_lon').value=cur.lon;
+    cur.has_coord_override=false;
+    document.getElementById('pl_resetcoord').dataset.reset='1';
+    upd();toast2('已清空改判，点「保存修正」生效');};
+
+  // 合并
+  var mb=document.getElementById('pl_domerge');
+  if(mb)mb.onclick=function(){
+    var o=opts[parseInt(document.getElementById('pl_merge').value,10)];
+    if(!o)return;
+    if(!confirm('把「'+(named(o.p)||'(无名)')+'」('+o.p.place_id+') 合并到「'
+      +(named(p)||'(无名)')+'」('+p.place_id+')？\n'
+      +'它的 '+o.p.vc+' 次停留 / 网格将改挂到本点，该点被删除。'))return;
+    postJSON('/api/places/merge',{keep_id:p.place_id,drop_id:o.p.place_id},function(j){
+      if(j.ok){
+        toast2('已合并：移入停留 '+(j.moved.stays||0)+' 段');
+        cur=null;refreshData();
+      }else toast2('合并失败：'+(j.error||''));
+    });};
+}
+function lookupNames(){
+  var kw=document.getElementById('pl_kw').value.trim();
+  var info=document.getElementById('pl_candinfo');
+  info.textContent='查询中…';
+  var u='/api/places/name_candidates?place_id='+encodeURIComponent(cur.place_id)
+    +'&device_id='+encodeURIComponent(cur.device_id||'')
+    +'&keyword='+encodeURIComponent(kw);
+  fetch(u).then(function(r){return r.json();}).then(function(j){
+    var sel=document.getElementById('pl_cands');
+    if(!j.ok){info.innerHTML='<span class="pl-warn">'+esc(j.error||'查询失败')+'</span>';sel.style.display='none';return;}
+    if(!j.candidates||!j.candidates.length){info.textContent='高德未返回候选（可换关键词再搜）';sel.style.display='none';return;}
+    sel.innerHTML='<option value="">— 选一个候选（按距离）—</option>'
+      +j.candidates.map(function(c,i){
+        return '<option value="'+i+'">'+esc(c.name)+' · '+esc(c.kind)
+          +(c.distance_m!=null?(' · '+Math.round(c.distance_m)+'m'):'')
+          +(c.source==='search'?' · 搜索':'')+'</option>';}).join('');
+    sel.style.display='block';
+    info.textContent='共 '+j.candidates.length+' 个候选（坐标 '+j.lat+', '+j.lon+'）';
+    sel.onchange=function(){
+      var c=j.candidates[parseInt(this.value,10)];
+      if(!c)return;
+      document.getElementById('pl_pov').value=c.name;
+      // 搜索候选带自身坐标：一并填进坐标修正，方便"位置也偏了"的场景
+      var loc=(c.location||'').split(',');
+      if(c.source==='search'&&loc.length===2){
+        document.getElementById('pl_lon').value=parseFloat(loc[0]).toFixed(6);
+        document.getElementById('pl_lat').value=parseFloat(loc[1]).toFixed(6);
+      }
+      document.getElementById('pl_pov').dispatchEvent(new Event('input'));
+    };
+  }).catch(function(){info.textContent='网络错误';});
+}
+function saveCorrection(){
+  var body={place_id:cur.place_id,device_id:cur.device_id||'',
+    poi_override:document.getElementById('pl_pov').value.trim(),
+    address_override:document.getElementById('pl_aov').value.trim()};
+  if(document.getElementById('pl_resetcoord').dataset.reset==='1'){body.reset_coord=true;}
+  else{
+    body.lat=parseFloat(document.getElementById('pl_lat').value);
+    body.lon=parseFloat(document.getElementById('pl_lon').value);
+    if(isNaN(body.lat)||isNaN(body.lon)){toast2('坐标非法');return;}
+  }
+  postJSON('/api/places/correction',body,function(j){
+    if(j.ok){
+      document.getElementById('pl_corrsaved').textContent='已写入数据库';
+      toast2('已保存修正');
+      document.getElementById('pl_resetcoord').dataset.reset='';
+      refreshData();
+    }else toast2('保存失败：'+(j.error||''));
+  });
+}
+function refreshData(){
+  fetch('/api/places/data').then(function(r){return r.json();}).then(function(j){
+    if(!j||!j.places)return;
+    D=j;cur=null;curDist=-1;renderList();renderEditor();
+  }).catch(function(){});
 }
 function renderDistrictEditor(i){
   var d=D.districts[i];var el=document.getElementById('plpane');

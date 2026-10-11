@@ -131,6 +131,13 @@ CREATE TABLE IF NOT EXISTS places_v2 (
   display_granularity TEXT NOT NULL DEFAULT 'neighborhood',
   name_confidence REAL NOT NULL DEFAULT 0,
   name_evidence TEXT NOT NULL DEFAULT '',
+  -- v3.6：高德候选池（自动命名证据）+ 人工改判（地名/地址/坐标覆盖，
+  -- 由 /places 编辑器直写；显示层优先级高于一切自动命名）
+  poi_candidates TEXT,
+  poi_override TEXT,
+  address_override TEXT,
+  lat_override REAL,
+  lon_override REAL,
   created_at TEXT NOT NULL DEFAULT (datetime('now','+8 hours')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now','+8 hours')),
   UNIQUE(device_id, place_id),

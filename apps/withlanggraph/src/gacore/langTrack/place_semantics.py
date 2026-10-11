@@ -1,4 +1,4 @@
-"""区县背景配置 + 语义地点编辑器数据层（v3.5 重构）。
+"""区县背景配置 + 语义地点编辑器数据层（v3.5 重构 + v3.6 人工修正）。
 
 v3.4 曾把地点 tag/note 放本配置文件（显示层叠加）；v3.5 按用户拍板改为
 **数据库即真源**：自定义标签与地点 note 由编辑器直写 places.label /
@@ -127,7 +127,14 @@ def editor_data(db_path: Path | str = DB_PATH, config_path: Path | str | None = 
     """
     import sqlite3
 
-    from gacore.langTrack.location_reader import ensure_note_column, is_v2, table_columns
+    from gacore.langTrack.location_facts import effective_coord
+    from gacore.langTrack.location_reader import (
+        ensure_correction_columns,
+        ensure_note_column,
+        is_v2,
+        parse_candidates,
+        table_columns,
+    )
 
     db_path = Path(db_path)
     out: dict = {
@@ -141,10 +148,11 @@ def editor_data(db_path: Path | str = DB_PATH, config_path: Path | str | None = 
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
-        try:
-            ensure_note_column(conn)
-        except sqlite3.OperationalError:
-            pass  # 只读连接无法迁移：note 列缺失时该字段为空，页面仍可用
+        for _migrate in (ensure_note_column, ensure_correction_columns):
+            try:
+                _migrate(conn)
+            except sqlite3.OperationalError:
+                pass  # 只读连接无法迁移：缺列时该字段为空，页面仍可用
         cols = table_columns(conn, "places")
         if not cols:
             out["db_note"] = "places 表缺失（库尚未跑过 ETL）"
@@ -156,27 +164,46 @@ def editor_data(db_path: Path | str = DB_PATH, config_path: Path | str | None = 
         sel_addr = "address" if "address" in cols else "'' AS address"
         sel_dist = "district" if "district" in cols else "'' AS district"
         sel_town = "township" if "township" in cols else "'' AS township"
+        # v3.6 人工修正列（缺列库按 NULL 降级，页面仍可用）
+        sel_cands = "poi_candidates" if "poi_candidates" in cols else "NULL AS poi_candidates"
+        sel_pov = "poi_override" if "poi_override" in cols else "NULL AS poi_override"
+        sel_aov = (
+            "address_override" if "address_override" in cols else "NULL AS address_override"
+        )
+        sel_latov = "lat_override" if "lat_override" in cols else "NULL AS lat_override"
+        sel_lonov = "lon_override" if "lon_override" in cols else "NULL AS lon_override"
         rows = conn.execute(
             f"SELECT {sel_pid}, device_id, grid_key, lat, lon, label, "
             f"first_seen, last_seen, visit_count, {sel_poi}, {sel_addr}, "
-            f"{sel_dist}, {sel_town}, {sel_note} "
+            f"{sel_dist}, {sel_town}, {sel_note}, {sel_cands}, {sel_pov}, "
+            f"{sel_aov}, {sel_latov}, {sel_lonov} "
             "FROM places ORDER BY visit_count DESC"
         ).fetchall()
         v2 = is_v2(conn)
         places = []
         for r in rows:
+            eff_lat, eff_lon = effective_coord(
+                r["lat"], r["lon"], r["lat_override"], r["lon_override"]
+            )
             places.append({
                 "place_id": r["place_id"] or "",
                 "device_id": r["device_id"] or "",
                 "grid_key": r["grid_key"] or "",
                 "lat": round(float(r["lat"]), 6),
                 "lon": round(float(r["lon"]), 6),
+                # 有效坐标：人工修正优先（"按坐标校准地名"与预览都用它）
+                "eff_lat": round(float(eff_lat), 6),
+                "eff_lon": round(float(eff_lon), 6),
+                "has_coord_override": r["lat_override"] is not None,
                 "label": r["label"] or "未知",
                 "first_seen": r["first_seen"],
                 "last_seen": r["last_seen"],
                 "vc": int(r["visit_count"] or 0),
                 "poi": r["poi"] or "",
+                "poi_candidates": parse_candidates(r["poi_candidates"]),
+                "poi_override": r["poi_override"] or "",
                 "address": r["address"] or "",
+                "address_override": r["address_override"] or "",
                 "district": r["district"] or "",
                 "township": r["township"] or "",
                 "note": r["note"] or "",
@@ -232,21 +259,32 @@ def editor_data(db_path: Path | str = DB_PATH, config_path: Path | str | None = 
     return out
 
 
+def _connect_rw(db_path: Path | str):
+    """编辑器写库连接：确保列迁移到位（note + v3.6 人工修正列）。"""
+    import sqlite3
+
+    from gacore.langTrack.location_reader import (
+        ensure_correction_columns,
+        ensure_note_column,
+    )
+
+    db_path = Path(db_path)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    ensure_note_column(conn)
+    ensure_correction_columns(conn)
+    return conn
+
+
 def save_place_labels(db_path: Path | str, items: list[dict]) -> int:
     """编辑器保存：直写 places.label / places.note（用户自定义标签即真源）。
 
     匹配 place_id 优先、poi 兜底；label ≤24 字、note ≤500 字（超长截断）。
     计算逻辑按精确值"家"/"公司"识别，其余标签纯显示与聚合。返回更新行数。
     """
-    import sqlite3
 
-    db_path = Path(db_path)
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = _connect_rw(db_path)
     try:
-        from gacore.langTrack.location_reader import ensure_note_column
-
-        ensure_note_column(conn)
         cols = {r[1] for r in conn.execute("PRAGMA table_info(places)")}
         if not cols:
             raise ValueError("places 表不存在（先跑 ETL）")
@@ -280,3 +318,342 @@ def save_place_labels(db_path: Path | str, items: list[dict]) -> int:
         return n
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# v3.6 人工修正：改判地名 / 地址 / 坐标；同名地点合并
+# ---------------------------------------------------------------------------
+
+def suggest_place_names(
+    lat: float,
+    lon: float,
+    *,
+    keyword: str = "",
+    city: str = "",
+    coord_system: str = "unknown",
+) -> dict:
+    """「按坐标校准」：给定坐标（可选关键词）返回候选地名。
+
+    坐标候选来自 regeo（POI ∪ AOI，带实测距离）；关键词非空时另加高德 POI
+    搜索结果。返回 {"candidates": [...], "error": ""}；缺 AMAP_KEY 时 error
+    非空、候选为空（页面提示而不是 500）。
+    """
+    from gacore.langTrack import geocode
+
+    out: dict = {"candidates": [], "error": ""}
+    try:
+        key = geocode._amap_key()
+    except SystemExit:
+        out["error"] = "未配置 AMAP_KEY（.env），无法向高德查询候选名"
+        return out
+    cands = geocode.regeo_candidates(lat, lon, key, coord_system=coord_system)
+    for c in cands:
+        c.setdefault("source", "regeo")
+    if (keyword or "").strip():
+        # 按 name 去重：同名候选保留先出现的（regeo 版带真实距离，更可信）
+        seen = {c["name"] for c in cands}
+        for c in geocode.search_place_candidates(keyword, lat, lon, key, city=city):
+            if c["name"] not in seen:
+                cands.append(c)
+                seen.add(c["name"])
+    out["candidates"] = cands
+    return out
+
+
+def save_place_correction(db_path: Path | str, payload: dict) -> dict:
+    """编辑器保存人工改判：地名 / 地址 / 坐标修正（写库即真源，v3.6）。
+
+    payload：{place_id, poi_override, address_override, lat, lon, reset_coord}
+    - 三个覆盖值均可单独留空：留空 = 回到自动命名/自动坐标；
+    - lat/lon 非空即写坐标修正；reset_coord=True 清除坐标修正；
+    - 与 label/note 互不影响（标签仍走 save_place_labels）。
+
+    返回 {"updated": n, "place_id": ..., "changes": [...]}；找不到地点抛 ValueError。
+    """
+    conn = _connect_rw(db_path)
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(places)")}
+        if not cols:
+            raise ValueError("places 表不存在（先跑 ETL）")
+        pid = str(payload.get("place_id") or "")
+        dev = str(payload.get("device_id") or "")
+        if not pid:
+            raise ValueError("place_id 必填")
+        sql_where = "place_id=?"
+        params: list = [pid]
+        if dev and "device_id" in cols:
+            sql_where += " AND device_id=?"
+            params.append(dev)
+        exists = conn.execute(
+            f"SELECT COUNT(*) FROM places WHERE {sql_where}", params
+        ).fetchone()[0]
+        if not exists:
+            raise ValueError(f"place_id 不存在：{pid}")
+
+        sets: list[str] = []
+        args: list = []
+        changes: list[str] = []
+        for field, key in (
+            ("poi_override", "poi_override"),
+            ("address_override", "address_override"),
+        ):
+            if field not in cols:
+                continue
+            if key in payload:
+                val = str(payload.get(key) or "")[:120].strip()
+                sets.append(f"{field}=?")
+                args.append(val or None)
+                changes.append(f"{field}={val or '(清空)'}")
+        if "lat_override" in cols and "lon_override" in cols:
+            if payload.get("reset_coord"):
+                sets += ["lat_override=NULL", "lon_override=NULL"]
+                changes.append("coord_override=(清空)")
+            elif payload.get("lat") is not None and payload.get("lon") is not None:
+                try:
+                    la, lo = float(payload["lat"]), float(payload["lon"])
+                except (TypeError, ValueError) as e:
+                    raise ValueError(f"坐标非法：{payload.get('lat')},{payload.get('lon')}") from e
+                if not (-90 <= la <= 90 and -180 <= lo <= 180):
+                    raise ValueError("坐标越界")
+                sets += ["lat_override=?", "lon_override=?"]
+                args += [la, lo]
+                changes.append(f"coord_override=({la:.6f},{lo:.6f})")
+        if not sets:
+            return {"updated": 0, "place_id": pid, "changes": []}
+        if "updated_at" in cols:
+            sets.append("updated_at=datetime('now','+8 hours')")
+        cur = conn.execute(
+            f"UPDATE places SET {', '.join(sets)} WHERE {sql_where}", [*args, *params]
+        )
+        conn.commit()
+        return {
+            "updated": cur.rowcount,
+            "place_id": pid,
+            "changes": changes,
+        }
+    finally:
+        conn.close()
+
+
+def _place_row(conn, place_id: str, device_id: str = "") -> dict | None:
+    """取单条 places 行（列名 → 值）；不存在返回 None。"""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(places)")}
+    if not cols or "place_id" not in cols:
+        return None
+    sql = "SELECT * FROM places WHERE place_id=?"
+    params: list = [place_id]
+    if device_id and "device_id" in cols:
+        sql += " AND device_id=?"
+        params.append(device_id)
+    cur = conn.execute(sql, params)
+    names = [d[0] for d in cur.description]
+    row = cur.fetchone()
+    return dict(zip(names, row)) if row else None
+
+
+def merge_preview(db_path: Path | str, keep_id: str, drop_id: str) -> dict:
+    """合并预览（纯读）：算出并进来之后的统计与校验结论，不写库。
+
+    返回 {ok, error, keep, drop, merged:{...}}；ok=False 时 error 说明原因
+    （不同设备 / 缺 place_id / 不存在 / 同一个点）。
+    """
+    import sqlite3
+
+    db_path = Path(db_path)
+    if not db_path.exists():
+        return {"ok": False, "error": "data/langTrack.db 不存在"}
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        return _merge_preview_conn(conn, keep_id, drop_id)
+    finally:
+        conn.close()
+
+
+def _merge_preview_conn(conn, keep_id: str, drop_id: str) -> dict:
+    keep = _place_row(conn, keep_id)
+    drop = _place_row(conn, drop_id)
+    if keep is None or drop is None:
+        missing = keep_id if keep is None else drop_id
+        return {"ok": False, "error": f"地点不存在：{missing}"}
+    if keep_id == drop_id:
+        return {"ok": False, "error": "同一个地点，无需合并"}
+    if (keep.get("device_id") or "") != (drop.get("device_id") or ""):
+        return {"ok": False, "error": "两个地点不属于同一设备，禁止合并"}
+    cells = _cells_of(conn, keep_id) | _cells_of(conn, drop_id)
+    stays = _stays_of(conn, [keep_id, drop_id])
+    merged = _merged_stats(keep, drop, stays, cells)
+    return {"ok": True, "error": "", "keep": keep, "drop": drop, "merged": merged}
+
+
+def _cells_of(conn, place_id: str) -> set[str]:
+    try:
+        rows = conn.execute(
+            "SELECT grid_key FROM place_cells WHERE place_id=?", (place_id,)
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - 无 place_cells 表（v1 库）按空集
+        return set()
+    return {r[0] for r in rows if r[0]}
+
+
+def _stays_of(conn, place_ids: list[str]) -> list[dict]:
+    marks = ",".join("?" for _ in place_ids)
+    try:
+        rows = conn.execute(
+            "SELECT place_id, start_ts, end_ts, duration_ms, center_lat, center_lon, grid_key "
+            f"FROM stays WHERE place_id IN ({marks})",
+            place_ids,
+        ).fetchall()
+    except Exception:  # noqa: BLE001 - v1 stays 无 place_id 列
+        return []
+    return [dict(r) for r in rows]
+
+
+def _merged_stats(keep: dict, drop: dict, stays: list[dict], cells: set[str]) -> dict:
+    """合并后的统计：计数相加、时间窗取并、中心按 stay 时长加权。"""
+    def _n(row: dict, key: str) -> int:
+        return int(row.get(key) or 0)
+
+    first = min(
+        [int(x) for x in (keep.get("first_seen"), drop.get("first_seen")) if x] or [0]
+    )
+    last = max(
+        [int(x) for x in (keep.get("last_seen"), drop.get("last_seen")) if x] or [0]
+    )
+    total_ms = sum(int(s.get("duration_ms") or 0) for s in stays)
+    clat = clon = 0.0
+    if total_ms > 0:
+        for s in stays:
+            w = int(s.get("duration_ms") or 0)
+            clat += float(s.get("center_lat") or 0) * w
+            clon += float(s.get("center_lon") or 0) * w
+        clat, clon = clat / total_ms, clon / total_ms
+    else:
+        clat, clon = float(keep.get("lat") or 0), float(keep.get("lon") or 0)
+    return {
+        "place_id": keep["place_id"],
+        "device_id": keep.get("device_id") or "",
+        "grid_keys": sorted(cells),
+        "point_count": _n(keep, "point_count") + _n(drop, "point_count"),
+        "visit_count": _n(keep, "visit_count") + _n(drop, "visit_count"),
+        "stay_ms": _n(keep, "stay_ms") + _n(drop, "stay_ms"),
+        "first_seen": first,
+        "last_seen": last,
+        "lat": round(clat, 6),
+        "lon": round(clon, 6),
+        # 标签/note/覆盖值：保留侧优先，保留侧为空则继承被并侧（人工数据不丢）
+        "label": _inherit(keep.get("label"), drop.get("label")),
+        "note": _inherit(keep.get("note"), drop.get("note")),
+        "poi_override": _inherit(keep.get("poi_override"), drop.get("poi_override")),
+        "address_override": _inherit(
+            keep.get("address_override"), drop.get("address_override")
+        ),
+        "stays": len(stays),
+    }
+
+
+def _inherit(keep_val: object, drop_val: object) -> str:
+    """保留侧非空用自己的；否则继承被并侧。"""
+    k = (str(keep_val) if keep_val not in (None, "") else "").strip()
+    if k and k != "未知":
+        return k
+    d = (str(drop_val) if drop_val not in (None, "") else "").strip()
+    return "" if d == "未知" else d
+
+
+def merge_places(db_path: Path | str, keep_id: str, drop_id: str) -> dict:
+    """合并两个 canonical place：把 drop 的网格/停留/行程/异常全部改挂到 keep。
+
+    写操作（单事务，失败整体回滚）：
+    1. place_cells：改 place_id → keep（与 keep 已有网格去重）；
+    2. stays：改 place_id 为 keep（段数/时长随查询自然并入）；
+    3. trips：from_place_id / to_place_id 命中 drop 即改写；
+    4. anomalies：place_id（v2 列）命中 drop 即改写；
+    5. places：删除 drop 行；keep 行按合并统计刷新计数/时间窗/中心/网格，
+       并把 drop 上的人工标签、note 与地名覆盖（keep 为空时）继承过来。
+
+    返回 {ok, keep_id, dropped_id, moved:{cells,stays,trips,anomalies}, merged:{...}}。
+    校验失败（不同设备/不存在/同一个点）返回 ok=False，不写库。
+    """
+    import sqlite3
+
+    db_path = Path(db_path)
+    if not db_path.exists():
+        return {"ok": False, "error": "data/langTrack.db 不存在"}
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        prev = _merge_preview_conn(conn, keep_id, drop_id)
+        if not prev["ok"]:
+            return {"ok": False, "error": prev["error"]}
+        merged = prev["merged"]
+        moved = {"cells": 0, "stays": 0, "trips": 0, "anomalies": 0}
+        try:
+            conn.execute("BEGIN")
+            moved["cells"] = conn.execute(
+                "UPDATE OR IGNORE place_cells SET place_id=? WHERE place_id=?",
+                (keep_id, drop_id),
+            ).rowcount
+            conn.execute("DELETE FROM place_cells WHERE place_id=?", (drop_id,))
+            moved["stays"] = conn.execute(
+                "UPDATE stays SET place_id=? WHERE place_id=?", (keep_id, drop_id)
+            ).rowcount
+            moved["trips"] = conn.execute(
+                "UPDATE trips SET from_place_id=? WHERE from_place_id=?",
+                (keep_id, drop_id),
+            ).rowcount
+            moved["trips"] += conn.execute(
+                "UPDATE trips SET to_place_id=? WHERE to_place_id=?", (keep_id, drop_id)
+            ).rowcount
+            try:
+                moved["anomalies"] = conn.execute(
+                    "UPDATE anomalies SET place_id=? WHERE place_id=?", (keep_id, drop_id)
+                ).rowcount
+            except sqlite3.OperationalError:
+                moved["anomalies"] = 0  # v1 anomalies 无 place_id 列
+            _refresh_merged_place(conn, merged)
+            conn.execute("DELETE FROM places WHERE place_id=?", (drop_id,))
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        return {
+            "ok": True,
+            "error": "",
+            "keep_id": keep_id,
+            "dropped_id": drop_id,
+            "moved": moved,
+            "merged": merged,
+        }
+    finally:
+        conn.close()
+
+
+def _refresh_merged_place(conn, merged: dict) -> None:
+    """把合并统计写回 keep 行（列级自适应：缺列跳过）。"""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(places)")}
+    sets: list[str] = []
+    args: list = []
+    for field in ("point_count", "visit_count", "stay_ms", "first_seen", "last_seen",
+                  "lat", "lon"):
+        if field in cols:
+            sets.append(f"{field}=?")
+            args.append(merged[field])
+    for field in ("label", "note", "poi_override", "address_override"):
+        if field in cols and merged.get(field):
+            # 只在保留侧为空时继承（SQL 侧用 COALESCE/NULLIF 判断更稳：
+            # 这里显式比对现值，避免覆盖保留侧已有的人工数据）
+            cur = conn.execute(
+                f"SELECT {field} FROM places WHERE place_id=?", (merged["place_id"],)
+            ).fetchone()
+            cur_val = (cur[0] or "") if cur else ""
+            if not cur_val or cur_val == "未知":
+                sets.append(f"{field}=?")
+                args.append(merged[field])
+    if "updated_at" in cols:
+        sets.append("updated_at=datetime('now','+8 hours')")
+    if sets:
+        conn.execute(
+            f"UPDATE places SET {', '.join(sets)} WHERE place_id=?",
+            [*args, merged["place_id"]],
+        )

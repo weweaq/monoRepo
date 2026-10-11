@@ -382,6 +382,25 @@ class TestDisplayContract:
         assert name == "某某路5号"
         assert source == "address"
 
+    def test_aoi_name_used_when_address_contains_it(self):
+        """v3.6：地址串含选中名（AOI 级命名）→ 显示该名而不是整串地址。"""
+        name, source, gran = resolve_place_name(
+            poi="观云润府",
+            address="江苏省南京市雨花台区铁心桥街道机场二通道辅路观云润府",
+            district="雨花台区",
+            name_confidence=0.65,
+        )
+        assert (name, source) == ("观云润府", "poi")
+        assert gran in ("area", "neighborhood")
+
+    def test_unknown_poi_not_in_address_still_falls_back(self):
+        """地址不含该名时不硬造名字（维持 address 兜底）。"""
+        name, source, _gran = resolve_place_name(
+            poi="别的院区", address="江苏省南京市某区某路1号", name_confidence=0.65
+        )
+        assert name == "江苏省南京市某区某路1号"
+        assert source == "address"
+
     def test_all_empty_unknown(self):
         name, source, _gran = resolve_place_name()
         assert name == "未知地点"

@@ -516,6 +516,10 @@ def _place_safe_text(p: dict) -> str:
 
         label=p.get("label") or "",
 
+        poi_override=p.get("poi_override") or "",
+
+        address_override=p.get("address_override") or "",
+
     )
 
     return format_place(pn, user_tag_of(p.get("label") or ""))

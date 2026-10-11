@@ -1471,6 +1471,25 @@ class PlacesLabelsIn(BaseModel):
     items: list[PlaceLabelItem]
 
 
+class PlaceCorrectionIn(BaseModel):
+    """v3.6 人工改判：地名/地址覆盖（留空=回自动）+ 可选坐标修正。"""
+
+    place_id: str
+    device_id: str = ""
+    poi_override: str | None = None
+    address_override: str | None = None
+    lat: float | None = None
+    lon: float | None = None
+    reset_coord: bool = False
+
+
+class PlacesMergeIn(BaseModel):
+    """v3.6 合并同名地点：drop 并入 keep。"""
+
+    keep_id: str
+    drop_id: str
+
+
 class DistrictNoteItem(BaseModel):
     district: str
     note: str = ""
@@ -1723,6 +1742,101 @@ def create_app(cfg: Config | None = None) -> FastAPI:
         except sqlite3.Error as exc:
             return JSONResponse({"ok": False, "error": str(exc)[:160]}, status_code=500)
         return {"ok": True, "updated": n}
+
+    @app.get("/api/places/data")
+    def api_places_data():
+        """编辑器数据（places 全量 + 区县聚合），保存/合并后前端就地重取。"""
+        from gacore.langTrack import place_semantics
+
+        data = place_semantics.editor_data(
+            db_path=config.root / "data" / "langTrack.db",
+            config_path=config.root / "data" / "place_semantics.json",
+        )
+        return {"ok": True, **data}
+
+    @app.get("/api/places/name_candidates")
+    def api_places_name_candidates(
+        place_id: str, keyword: str = "", device_id: str = ""
+    ):
+        """「按坐标校准地名」候选：按该点有效坐标（人工修正优先）问高德要候选名。
+
+        返回 {ok, candidates:[{name,kind,type,distance_m,location,source}]}。
+        坐标非法/缺 AMAP_KEY → ok=False + error（页面提示，不 500）。
+        """
+        import sqlite3
+
+        from gacore.langTrack.location_facts import effective_coord
+        from gacore.langTrack.place_semantics import suggest_place_names
+
+        db = config.root / "data" / "langTrack.db"
+        if not db.exists():
+            return JSONResponse({"ok": False, "error": "langTrack.db 不存在"}, status_code=400)
+        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        # 列探测：未跑 v3.6 迁移的库没有 lat_override/lon_override（缺列按 NULL）
+        pcols = {r[1] for r in conn.execute("PRAGMA table_info(places)")}
+        sel = ["lat", "lon", "district"]
+        sel.append("lat_override" if "lat_override" in pcols else "NULL AS lat_override")
+        sel.append("lon_override" if "lon_override" in pcols else "NULL AS lon_override")
+        try:
+            row = conn.execute(
+                f"SELECT {', '.join(sel)} FROM places "
+                "WHERE place_id=?" + (" AND device_id=?" if device_id else ""),
+                (place_id, device_id) if device_id else (place_id,),
+            ).fetchone()
+        except sqlite3.OperationalError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)[:160]}, status_code=500)
+        finally:
+            conn.close()
+        if row is None:
+            return JSONResponse({"ok": False, "error": f"place_id 不存在：{place_id}"}, status_code=400)
+        lat, lon = effective_coord(row["lat"], row["lon"], row["lat_override"], row["lon_override"])
+        res = suggest_place_names(
+            lat, lon, keyword=keyword, city=(row["district"] or "")
+        )
+        if res.get("error"):
+            return JSONResponse({"ok": False, "error": res["error"]}, status_code=400)
+        return {"ok": True, "lat": lat, "lon": lon, "candidates": res["candidates"]}
+
+    @app.post("/api/places/correction")
+    def api_places_correction(request: Request, payload: PlaceCorrectionIn):
+        """保存人工改判（地名/地址/坐标覆盖）：直写 places 列，DB 即真源。"""
+        guard = _guard(request)
+        if guard is not None:
+            return guard
+        import sqlite3
+
+        from gacore.langTrack.place_semantics import save_place_correction
+
+        try:
+            res = save_place_correction(
+                config.root / "data" / "langTrack.db", payload.model_dump()
+            )
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+        except sqlite3.Error as exc:
+            return JSONResponse({"ok": False, "error": str(exc)[:160]}, status_code=500)
+        return {"ok": True, **res}
+
+    @app.post("/api/places/merge")
+    def api_places_merge(request: Request, payload: PlacesMergeIn):
+        """合并两个常驻点（同名歧义收口）：stays/cells/trips 改挂 + 删被并点。"""
+        guard = _guard(request)
+        if guard is not None:
+            return guard
+        import sqlite3
+
+        from gacore.langTrack.place_semantics import merge_places
+
+        try:
+            res = merge_places(
+                config.root / "data" / "langTrack.db", payload.keep_id, payload.drop_id
+            )
+        except sqlite3.Error as exc:
+            return JSONResponse({"ok": False, "error": str(exc)[:160]}, status_code=500)
+        if not res.get("ok"):
+            return JSONResponse(res, status_code=400)
+        return res
 
     @app.post("/api/places/districts")
     def api_places_districts(request: Request, payload: DistrictNotesIn):

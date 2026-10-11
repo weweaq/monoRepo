@@ -489,26 +489,32 @@ def _nearest_place_index(conn: sqlite3.Connection) -> list[tuple[str, float, flo
     base = ("label, poi, poi_fallback, address, district, township, "
             "business_area, lat, lon")
     tail = " FROM places WHERE lat IS NOT NULL AND lon IS NOT NULL"
-    for extra in (", parent_poi, name_confidence", ""):
-        try:
-            rows = conn.execute(f"SELECT {base}{extra}{tail}").fetchall()
-        except sqlite3.OperationalError:
-            continue
-        for r in rows:
-            name, src, _gran = resolve_place_name(
-                poi=r["poi"] or "", poi_fallback=r["poi_fallback"] or "",
-                address=r["address"] or "", district=r["district"] or "",
-                township=r["township"] or "", business_area=r["business_area"] or "",
-                parent_poi=(r["parent_poi"] or "") if extra else "",
-                name_confidence=float(r["name_confidence"] or 0) if extra else 0.0,
-                label=r["label"] or "",
-            )
-            name = "" if src == "unknown" else name
-            out.append((
-                format_place(name, user_tag_of(r["label"] or "")),
-                float(r["lat"]), float(r["lon"]),
-            ))
-        break
+    # 命名证据列按列存在性追加（老库/合成库缺列时自动退回基础档，语义与
+    # 原"两档 SQL + OperationalError 兜底"一致，但不再依赖列齐全）
+    actual = lr.table_columns(conn, "places")
+    extra_cols = [c for c in ("parent_poi", "name_confidence", "poi_override") if c in actual]
+    extra = (", " + ", ".join(extra_cols)) if extra_cols else ""
+    try:
+        rows = conn.execute(f"SELECT {base}{extra}{tail}").fetchall()
+    except sqlite3.OperationalError:
+        return out
+    for r in rows:
+        name, src, _gran = resolve_place_name(
+            poi=r["poi"] or "", poi_fallback=r["poi_fallback"] or "",
+            address=r["address"] or "", district=r["district"] or "",
+            township=r["township"] or "", business_area=r["business_area"] or "",
+            parent_poi=r["parent_poi"] or "" if "parent_poi" in extra_cols else "",
+            name_confidence=(
+                float(r["name_confidence"] or 0) if "name_confidence" in extra_cols else 0.0
+            ),
+            label=r["label"] or "",
+            poi_override=r["poi_override"] or "" if "poi_override" in extra_cols else "",
+        )
+        name = "" if src == "unknown" else name
+        out.append((
+            format_place(name, user_tag_of(r["label"] or "")),
+            float(r["lat"]), float(r["lon"]),
+        ))
     return out
 
 
@@ -715,32 +721,32 @@ def build_map_day_data(
 
     # canonical 地点名（place_id → §2.6 显示名）
     pnames: dict[str, str] = {}
-    for cols in (
-        ("place_id, label, poi, poi_fallback, address, district, township, "
-         "business_area, parent_poi, name_confidence"),
-        "place_id, label, poi, poi_fallback, address, district, township, business_area",
-    ):
-        try:
-            prows = conn.execute(f"SELECT {cols} FROM places").fetchall()
-        except sqlite3.OperationalError:
-            continue
-        for r in prows:
-            name, src, _gran = resolve_place_name(
-                poi=r["poi"] or "", poi_fallback=r["poi_fallback"] or "",
-                address=r["address"] or "", district=r["district"] or "",
-                township=r["township"] or "", business_area=r["business_area"] or "",
-                parent_poi=(r["parent_poi"] or "") if "parent_poi" in cols else "",
-                name_confidence=(
-                    float(r["name_confidence"] or 0)
-                    if "name_confidence" in cols else 0.0
-                ),
-                label=r["label"] or "",
-            )
-            name = "" if src == "unknown" else name
-            pnames[r["place_id"]] = _map_safe(
-                format_place(name, user_tag_of(r["label"] or ""))
-            )
-        break
+    # place_id/label/poi/... 公共列 + 命名证据列按列存在性追加（缺列库自动降级，
+    # 与 _nearest_place_index 同一策略；见 location_reader.table_columns）
+    actual = lr.table_columns(conn, "places")
+    base_cols = ["place_id", "label", "poi", "poi_fallback", "address", "district",
+                 "township", "business_area"]
+    base_cols += [c for c in ("parent_poi", "name_confidence", "poi_override") if c in actual]
+    try:
+        prows = conn.execute(f"SELECT {', '.join(base_cols)} FROM places").fetchall()
+    except sqlite3.OperationalError:
+        prows = []
+    for r in prows:
+        name, src, _gran = resolve_place_name(
+            poi=r["poi"] or "", poi_fallback=r["poi_fallback"] or "",
+            address=r["address"] or "", district=r["district"] or "",
+            township=r["township"] or "", business_area=r["business_area"] or "",
+            parent_poi=r["parent_poi"] or "" if "parent_poi" in actual else "",
+            name_confidence=(
+                float(r["name_confidence"] or 0) if "name_confidence" in actual else 0.0
+            ),
+            label=r["label"] or "",
+            poi_override=r["poi_override"] or "" if "poi_override" in actual else "",
+        )
+        name = "" if src == "unknown" else name
+        pnames[r["place_id"]] = _map_safe(
+            format_place(name, user_tag_of(r["label"] or ""))
+        )
 
     try:
         rows = conn.execute(

@@ -372,6 +372,9 @@ def _place_ref(place: dict | None) -> PlaceRef | None:
         parent_poi=place.get("parent_poi") or "",
         name_confidence=float(place.get("name_confidence") or 0.0),
         label=place.get("label") or "",
+        # v3.6 人工改判（/places 编辑器直写 places 列）：优先级高于一切自动命名
+        poi_override=place.get("poi_override") or "",
+        address_override=place.get("address_override") or "",
     )
     return PlaceRef(
         place_id=str(place.get("place_id") or "") or "",

@@ -36,7 +36,17 @@ _PLACE_COLS = (
     "id, device_id, grid_key, lat, lon, label, first_seen, last_seen, "
     "visit_count, is_primary, address, poi, poi_fallback, district, township, "
     "business_area, poi_type, behavior, matched_level, candidate_label, "
-    "confidence_home, confidence_work, geocoded_at, poi_l1, poi_l2, poi_l3, note"
+    "confidence_home, confidence_work, geocoded_at, poi_l1, poi_l2, poi_l3, note, "
+    "poi_candidates, poi_override, address_override, lat_override, lon_override"
+)
+
+# v3.6 人工修正列（/places 编辑器直写；列级迁移见 ensure_correction_columns）。
+CORRECTION_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("poi_candidates", "TEXT"),
+    ("poi_override", "TEXT"),
+    ("address_override", "TEXT"),
+    ("lat_override", "REAL"),
+    ("lon_override", "REAL"),
 )
 
 # v2 新增计数列（v1 无，由 reader 兼容映射）。
@@ -84,6 +94,72 @@ def ensure_note_column(conn: sqlite3.Connection) -> bool:
     conn.execute("ALTER TABLE places ADD COLUMN note TEXT")
     conn.commit()
     return True
+
+
+def ensure_correction_columns(conn: sqlite3.Connection) -> list[str]:
+    """v3.6 列迁移（R6）：places 增人工修正列，返回本次新增的列名。
+
+    ⚠️ 与 note 列同一约定：不递增 PRAGMA user_version（该版本号被 location v2
+    占用为"位置事实 schema 版本"）。迁移判据 = 列存在性，ALTER 幂等重放无害。
+    """
+    cols = table_columns(conn, "places")
+    if not cols:
+        return []
+    added: list[str] = []
+    for name, ddl_type in CORRECTION_COLUMNS:
+        if name not in cols:
+            conn.execute(f"ALTER TABLE places ADD COLUMN {name} {ddl_type}")
+            added.append(name)
+    if added:
+        conn.commit()
+    return added
+
+
+def place_correction(conn: sqlite3.Connection, place_id: str, device_id: str = "") -> dict:
+    """读取单个地点的人工修正（JSON 候选池已解析）。
+
+    缺表/缺列/坏 JSON 一律降级为空值不抛——编辑器与重编路径都靠它兜底。
+    """
+    empty: dict = {
+        "poi_candidates": [], "poi_override": "", "address_override": "",
+        "lat_override": None, "lon_override": None,
+    }
+    if not place_id or not table_columns(conn, "places"):
+        return empty
+    ensure_correction_columns(conn)
+    sql = (
+        "SELECT poi_candidates, poi_override, address_override, lat_override, lon_override "
+        "FROM places WHERE place_id=?"
+    )
+    params: list = [place_id]
+    if device_id:
+        sql += " AND device_id=?"
+        params.append(device_id)
+    row = conn.execute(sql, params).fetchone()
+    if row is None:
+        return empty
+    return {
+        "poi_candidates": parse_candidates(row[0]),
+        "poi_override": row[1] or "",
+        "address_override": row[2] or "",
+        "lat_override": row[3],
+        "lon_override": row[4],
+    }
+
+
+def parse_candidates(raw: object) -> list[dict]:
+    """poi_candidates 列（JSON 文本）→ list[dict]；坏数据返回空列表。"""
+    import json
+
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [c for c in data if isinstance(c, dict) and c.get("name")]
 
 
 def table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -160,6 +236,12 @@ def _norm_place(row: sqlite3.Row, *, v2: bool) -> dict:
     out["parent_poi"] = row["parent_poi"] or ""
     # v3 手写背景注记（缺列/未迁移 → 空）
     out["note"] = row["note"] or ""
+    # v3.6 人工修正（缺列/未迁移 → 空值；显示层与重编路径共用）
+    out["poi_candidates"] = row["poi_candidates"] or ""
+    out["poi_override"] = row["poi_override"] or ""
+    out["address_override"] = row["address_override"] or ""
+    out["lat_override"] = row["lat_override"]
+    out["lon_override"] = row["lon_override"]
     return out
 
 
