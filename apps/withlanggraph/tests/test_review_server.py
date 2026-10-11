@@ -617,6 +617,35 @@ class TestReviewPage:
         c = _client(Config.for_tests(tmp_path), monkeypatch)
         assert c.get("/review/not-a-date").status_code == 400
 
+    def test_nav_prev_next_today_links(self, tmp_path: Path, monkeypatch):
+        """导航条：前一天/后一天/今天链接与 date input。"""
+        cfg = Config.for_tests(tmp_path)
+        save_delivered(cfg, DATE, REPORT)
+        c = _client(cfg, monkeypatch)
+        page = c.get(f"/review/{DATE}").text
+        assert 'href="/review/2026-10-02"' in page  # 前一天
+        assert 'href="/review/2026-10-04"' in page  # 后一天
+        assert 'id="f-date"' in page  # date input
+        assert 'data-nav="today"' in page  # 今天链接标记
+
+    def test_nav_date_arithmetic_month_boundary(self, tmp_path: Path, monkeypatch):
+        """月初/年末跨界：01-01 前一天 → 去年 12-31；12-31 后一天 → 次年 01-01。"""
+        cfg = Config.for_tests(tmp_path)
+        save_delivered(cfg, "2026-01-01", REPORT)
+        save_delivered(cfg, "2026-12-31", REPORT)
+        c = _client(cfg, monkeypatch)
+        p1 = c.get("/review/2026-01-01").text
+        assert 'href="/review/2025-12-31"' in p1
+        p2 = c.get("/review/2026-12-31").text
+        assert 'href="/review/2027-01-01"' in p2
+
+    def test_nav_on_empty_state_page(self, tmp_path: Path, monkeypatch):
+        """空态页也有导航条。"""
+        c = _client(Config.for_tests(tmp_path), monkeypatch)
+        page = c.get(f"/review/{DATE}").text
+        assert 'id="f-date"' in page
+        assert 'data-nav="today"' in page
+
 
 class TestHealthRefresh:
     """POST /api/health/refresh：单日体检重放按钮（backfill_health.refresh_day）。"""

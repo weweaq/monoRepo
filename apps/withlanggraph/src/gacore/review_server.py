@@ -155,6 +155,8 @@ th.hcol-norec{color:var(--mut);font-style:italic}
 .sec-h:hover .add-hint{display:inline}
 .anchor:hover{background:#ddf4ff}
 .actions{display:flex;gap:10px;align-items:center;margin:12px 0}
+.review-nav{display:flex;gap:8px;align-items:center;margin:12px 0 4px}
+.review-nav input[type=date]{font:inherit;color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:4px 8px}
 #pending .chip{display:inline-block;border:1px solid var(--line);border-radius:12px;padding:1px 10px;margin:2px 4px;font-size:12px;background:#f6f8fa}
 #pending .chip button{border:none;background:none;padding:0 0 0 6px;color:var(--bad)}
 .side{position:fixed;top:0;right:0;width:340px;max-width:92vw;height:100%;background:#fff;border-left:1px solid var(--line);box-shadow:-4px 0 16px rgba(0,0,0,.06);padding:14px 16px;z-index:10;overflow:auto}
@@ -303,7 +305,8 @@ def _render_report_html(text: str) -> str:
     return "\n".join(out)
 
 
-_REVIEW_TMPL = """<h1>日报评审 · __DATE__</h1>
+_REVIEW_TMPL = """__NAV__
+<h1>日报评审 · __DATE__</h1>
 <div class="sub">来源 __SRC__ · 版本 v__VER__ · 点正文里的 [节-序号] 角标添加批注</div>
 <div class="actions">
   <button id="btn-revise" class="primary">提交修订</button>
@@ -332,6 +335,12 @@ let token = localStorage.getItem("review_token") || "";
 const $ = (id) => document.getElementById(id);
 
 function esc(s){const d=document.createElement("div");d.textContent=s==null?"":String(s);return d.innerHTML;}
+
+$("btn-goday").onclick = () => {
+  const v = $("f-date").value;
+  if (!/^\\d{4}-\\d{2}-\\d{2}$/.test(v)) { alert("日期格式应为 YYYY-MM-DD"); return; }
+  location.href = "/review/" + v;
+};
 
 function needToken(msg){
   const t = prompt(msg || "请输入 REVIEW_TOKEN（见 .env）") || "";
@@ -482,10 +491,30 @@ $("btn-rerun").onclick = async () => {
 </script>"""
 
 
+def _review_nav(date: str, today: str) -> str:
+    """评审页日期导航条：prev/next/today 锚点 + date input 跳转。"""
+    d = datetime.strptime(date, "%Y-%m-%d").date()
+    prev_d = (d - timedelta(days=1)).isoformat()
+    next_d = (d + timedelta(days=1)).isoformat()
+    t = html.escape(today)
+    return (
+        '<div class="review-nav">'
+        f'<a href="/review/{prev_d}" class="nav-link">← 前一天</a>'
+        f'<input type="date" id="f-date" value="{html.escape(date)}">'
+        f'<button id="btn-goday" type="button">跳转</button>'
+        f'<a href="/review/{next_d}" class="nav-link">后一天 →</a>'
+        f'<a href="/review/{t}" class="nav-link" data-nav="today">今天</a>'
+        "</div>"
+    )
+
+
 def _review_page(cfg: Config, date: str) -> str:
+    today = datetime.now(_UTC8).date().isoformat()
+    nav = _review_nav(date, today)
     resolved = _resolve_report(cfg, date)
     if resolved is None:
         body = (
+            f"{nav}"
             f"<h1>日报评审 · {html.escape(date)}</h1>"
             '<p class="empty">暂无数据：该日没有已投递日报存档（delivered_report 与 scheduled 均未命中）</p>'
         )
@@ -495,6 +524,7 @@ def _review_page(cfg: Config, date: str) -> str:
     ver = current_report_version(cfg, date)
     page = (
         _REVIEW_TMPL.replace("__DATE__", date)
+        .replace("__NAV__", nav)
         .replace("__SRC__", html.escape(src))
         .replace("__VER__", str(ver))
         .replace("__REPORT__", f'<div class="report">{report_html}</div>')
