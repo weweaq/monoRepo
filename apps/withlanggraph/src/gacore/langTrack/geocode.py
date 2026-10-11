@@ -26,7 +26,11 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from gacore.langTrack.location_facts import to_amap_coord, warn_unknown_coord_once
+from gacore.langTrack.location_facts import (
+    effective_coord,
+    to_amap_coord,
+    warn_unknown_coord_once,
+)
 
 DB_PATH = Path(__file__).resolve().parents[3] / "data" / "langTrack.db"
 REVERSED_GEO_URL = "https://restapi.amap.com/v3/geocode/regeo"
@@ -150,6 +154,68 @@ _NAME_CONFIDENCE_BY_LEVEL = {
 }
 
 
+# 命名候选粒度（§2.6 选名规则）：点确实落在 AOI 院内时取 AOI 名。
+# 动机（2026-10-11 实测 48 个常驻点）：纯 POI 优先会取"离点最近的那个 POI"，
+# 而高德把院区内的小店（餐厅/驿站/整装馆）排在院区本身前面——于是"停在山姆
+# 会员商店"被写成"停在山姆旁的餐厅"、"停在小区"被写成"小区旁的烤鸭店"。
+# 反过来 AOI 也可能离点很远（实测有 2.5km 的 AOI），所以只在 AOI 距离
+# ≤ 该阈值（点几乎就在院内）时改判，其余仍取最近 POI。
+AOI_CONTAINS_MAX_M = 25.0
+
+
+def _distance_m(raw: object) -> float | None:
+    """高德 distance 字段（字符串，可能为空/非法）→ float | None。"""
+    try:
+        return float(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _candidate(entry: dict, kind: str) -> dict:
+    """高德 regeo 的 POI/AOI 条目 → 统一候选结构（落库 + 编辑器改判共用）。"""
+    return {
+        "name": (entry.get("name") or "").strip(),
+        "kind": kind,
+        "type": entry.get("type", "") or "",
+        "distance_m": _distance_m(entry.get("distance")),
+        "location": entry.get("location", "") or "",
+    }
+
+
+def _nearest(cands: list[dict]) -> dict | None:
+    """距离最近的候选；全无 distance 时取首个（高德 pois/aois 均按距离升序返回）。
+
+    保留这个兜底很重要：distance 字段偶发缺失时，旧行为（取 pois[0]）必须仍然成立，
+    否则会把已经取到的 POI 名丢掉、退化到 around 兜底再打一次 API。
+    """
+    if not cands:
+        return None
+    usable = [c for c in cands if c["distance_m"] is not None]
+    if not usable:
+        return cands[0]
+    return min(usable, key=lambda c: c["distance_m"])
+
+
+def _pick_best_name(pois: list[dict], aois: list[dict]) -> tuple[dict | None, str]:
+    """选名规则单一出口：点落在 AOI 院内（≤AOI_CONTAINS_MAX_M）时取 AOI，否则取最近 POI。
+
+    返回 (选中的候选 | None, matched_level)；无 POI/AOI 时返回 (None, "")，
+    由调用方继续走道路/行政区粒度。
+    """
+    best_poi = _nearest(pois)
+    best_aoi = _nearest(aois)
+    # AOI 把点包在院内（距离足够近）→ 用院区名，它才是"人在哪"
+    if best_aoi and best_aoi["distance_m"] is not None and (
+        best_aoi["distance_m"] <= AOI_CONTAINS_MAX_M
+    ):
+        return best_aoi, "AOI"
+    if best_poi:
+        return best_poi, "POI"
+    if best_aoi:
+        return best_aoi, "AOI"
+    return None, ""
+
+
 def _parse_regeocode(rc: dict) -> dict:
     """解析单个点的 regeocode（兼容批量 regeocodes[i].regeocode 与单点 regeocode 两种结构）。"""
     inner = rc.get("regeocode") or rc
@@ -159,26 +225,27 @@ def _parse_regeocode(rc: dict) -> dict:
     aois = inner.get("aois") or []
     business = inner.get("businessAreas") or []
     roads = inner.get("roads") or []
-    poi = pois[0] if pois else {}
     aoi = aois[0] if aois else {}
-    poi_type = poi.get("type", "") or ""
-    # 语义匹配粒度：POI > AOI > 道路 > 行政区
-    if poi:
-        matched_level = "POI"
-    elif aoi:
-        matched_level = "AOI"
-    elif roads:
-        matched_level = "道路"
-    else:
-        matched_level = "行政区"
+    poi_cands = [c for c in (_candidate(p, "POI") for p in pois) if c["name"]]
+    aoi_cands = [c for c in (_candidate(a, "AOI") for a in aois) if c["name"]]
+    best, matched_level = _pick_best_name(poi_cands, aoi_cands)
+    if not matched_level:
+        # 无语义 POI/AOI：道路 > 行政区（回退文本仍可用）
+        matched_level = "道路" if roads else "行政区"
+    name = best["name"] if best else ""
+    poi_type = best["type"] if best else ""
+    poi_distance_m = best["distance_m"] if best else None
+    # 选中的是 AOI：行为/三级语义按 AOI 类型解析，并在 type 头写死来源，
+    # 下游（behavior_of 取 type 首段）据此得到"商务住宅"等 AOI 大类。
+    if best and best["kind"] == "AOI" and poi_type:
+        poi_type = f"AOI;{poi_type}"
     # P1-2 POI 三级语义：高德 type 为"大类;中类;细类"（如"餐饮服务;中餐厅;中餐馆"）
     type_levels = [t.strip() for t in poi_type.split(";") if t.strip()] if poi_type else []
     poi_l1 = type_levels[0] if len(type_levels) > 0 else ""
     poi_l2 = type_levels[1] if len(type_levels) > 1 else ""
     poi_l3 = type_levels[2] if len(type_levels) > 2 else ""
-    # P1-2 品牌/名称硬信号：POI 名称命中关键词 → 强化行为语义
+    # P1-2 品牌/名称硬信号：选中名命中关键词 → 强化行为语义
     poi_signal = ""
-    name = poi.get("name", "") or ""
     for kw, _beh in SIGNAL_KEYWORDS:
         if kw in name:
             poi_signal = kw
@@ -186,7 +253,7 @@ def _parse_regeocode(rc: dict) -> dict:
     district = address.get("district", "")
     township = address.get("township", "")
     # P1-2 无 POI 兜底：AOI / 道路 / 行政区拼接成人话描述
-    if poi:
+    if name:
         fallback_desc = f"{name}（{district}{township}）" if district or township else name
     else:
         parts: list[str] = []
@@ -213,6 +280,8 @@ def _parse_regeocode(rc: dict) -> dict:
         "business_area": (business[0].get("name", "") if business else ""),
         "road": (roads[0].get("name", "") if roads else ""),
         "aoi": aoi.get("name", ""),
+        "poi_distance_m": poi_distance_m,
+        "poi_candidates": poi_cands + aoi_cands,
         "matched_level": matched_level,
         "name_confidence": _NAME_CONFIDENCE_BY_LEVEL.get(matched_level, 0.30),
         "name_evidence": f"regeo:{matched_level}",
@@ -412,13 +481,19 @@ def infer_label(info: dict | None) -> str:
     return "未知"
 
 
-def incremental_encode(db_path: Path = DB_PATH, force_all: bool = False) -> int:
+def incremental_encode(
+    db_path: Path = DB_PATH, force_all: bool = False, refresh_names: bool = False
+) -> int:
     """增量编码：只对 geocoded_at IS NULL 的常驻点调用高德 regeo（force_all 则全部重编）。
 
     语义字段全量落库；regeo 无 POI 时 around 兜底补一次；成功才标 geocoded_at，
     失败点不标记、下次 ETL 重跑自动重试。ETL 重跑时无新增点 → 零 API 调用。
     每点坐标系按 (device_id, first_seen) 从配置解析，按坐标制分组批量编码
     （§3.3：混合来源不共用一个转换参数）。返回成功编码数。
+
+    refresh_names=True（v3.6）：无视增量缓存全量重编，用于"选名规则改了、要把
+    存量地名按新规则重判"（如 AOI 优先规则修复"家被编成隔壁小区"）。重编只写
+    自动命名列，人工覆盖列（poi_override/address_override）保持不动。
     """
     from gacore.langTrack.etl_config import load_coord_systems, resolve_coord_system
 
@@ -426,14 +501,19 @@ def incremental_encode(db_path: Path = DB_PATH, force_all: bool = False) -> int:
     coord_cfg = load_coord_systems()  # 配置错误（重叠 period 等）直接拒绝本次编码
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
-    if force_all:
-        rows = conn.execute(
-            "SELECT id, device_id, first_seen, lat, lon, grid_key FROM places"
-        ).fetchall()
+    # 人工修正坐标（lat_override/lon_override）可用时优先取；列缺失自动降级
+    from gacore.langTrack.location_reader import (        CORRECTION_COLUMNS,        table_columns,    )
+
+    place_cols = table_columns(conn, "places")
+    has_correction = all(name in place_cols for name, _t in CORRECTION_COLUMNS)
+    ov_lat = "lat_override" if has_correction else "NULL AS lat_override"
+    ov_lon = "lon_override" if has_correction else "NULL AS lon_override"
+    base_sel = f"id, device_id, first_seen, lat, lon, grid_key, {ov_lat}, {ov_lon}"
+    if force_all or refresh_names:
+        rows = conn.execute(f"SELECT {base_sel} FROM places").fetchall()
     else:
         rows = conn.execute(
-            "SELECT id, device_id, first_seen, lat, lon, grid_key FROM places "
-            "WHERE geocoded_at IS NULL"
+            f"SELECT {base_sel} FROM places WHERE geocoded_at IS NULL"
         ).fetchall()
     if not rows:
         print("[geocode] 无新增待编码常驻点（增量缓存命中，零调用）")
@@ -449,8 +529,14 @@ def incremental_encode(db_path: Path = DB_PATH, force_all: bool = False) -> int:
         groups.setdefault(cs, []).append(i)
     results: dict[int, dict] = {}
     failed: list[int] = []
+    def _eff(i: int) -> tuple[float, float]:
+        """编号 i 的有效坐标：人工修正优先（与显示层同一出口）。"""
+        return effective_coord(
+            rows[i]["lat"], rows[i]["lon"], rows[i]["lat_override"], rows[i]["lon_override"]
+        )
+
     for cs, idxs in groups.items():
-        pts = [(rows[i]["lat"], rows[i]["lon"]) for i in idxs]
+        pts = [_eff(i) for i in idxs]
         out, failed_local = batch_reverse_geocode(pts, key, cs)
         for j, original_idx in enumerate(idxs):
             if j in out:
@@ -460,10 +546,11 @@ def incremental_encode(db_path: Path = DB_PATH, force_all: bool = False) -> int:
     now = int(time.time() * 1000)
     # v1 库 places 无命名证据列（name_confidence 系 v2 表列）；按列存在自适应，
     # v1 库跳过置信回填（resolve_place_name 以 0 兜底落 address，属契约设计行为）
-    from gacore.langTrack.location_reader import table_columns
-    place_cols = table_columns(conn, "places")
     name_cols = {"name_confidence", "name_evidence"}
     has_name_cols = name_cols <= place_cols
+    # 候选池/距离证据列（v3.6）：缺列（旧库未迁移）时跳过该两列不影响其它字段
+    cand_cols = {"poi_candidates", "poi_distance_m"}
+    has_cand_cols = cand_cols <= place_cols
     n = 0
     for i, r in enumerate(rows):
         if i not in results:
@@ -471,7 +558,8 @@ def incremental_encode(db_path: Path = DB_PATH, force_all: bool = False) -> int:
         info = results[i]
         # around 兜底：regeo 无 POI 时补一次周边搜索
         if not info.get("poi"):
-            around = around_search(r["lat"], r["lon"], key, coord_system=row_cs[i])
+            alat, alon = _eff(i)
+            around = around_search(alat, alon, key, coord_system=row_cs[i])
             if around:
                 info.update(around)
                 # 周边搜索返回 base 结构，补充三级/信号/兜底字段
@@ -492,11 +580,20 @@ def incremental_encode(db_path: Path = DB_PATH, force_all: bool = False) -> int:
                 info["name_evidence"] = "regeo:around"
         behavior = behavior_of(info.get("poi_type", ""), info.get("poi", ""))
         if has_name_cols:
+            cand_sets = ", poi_candidates=?, poi_distance_m=?" if has_cand_cols else ""
+            cand_args = (
+                [
+                    json.dumps(info.get("poi_candidates") or [], ensure_ascii=False),
+                    info.get("poi_distance_m"),
+                ]
+                if has_cand_cols else []
+            )
             conn.execute(
                 "UPDATE places SET address=?, poi=?, district=?, township=?, business_area=?, "
                 "poi_type=?, matched_level=?, behavior=?, poi_l1=?, poi_l2=?, poi_l3=?, "
-                "poi_signal=?, poi_fallback=?, name_confidence=?, name_evidence=?, "
-                "geocoded_at=?, updated_at=datetime('now','+8 hours') WHERE id=?",
+                "poi_signal=?, poi_fallback=?, name_confidence=?, name_evidence=?"
+                + cand_sets
+                + ", geocoded_at=?, updated_at=datetime('now','+8 hours') WHERE id=?",
                 (
                     info.get("formatted", ""), info.get("poi", ""), info.get("district", ""),
                     info.get("township", ""), info.get("business_area", ""),
@@ -506,6 +603,7 @@ def incremental_encode(db_path: Path = DB_PATH, force_all: bool = False) -> int:
                     info.get("poi_fallback", ""),
                     float(info.get("name_confidence") or 0.0),
                     info.get("name_evidence", ""),
+                    *cand_args,
                     now, r["id"],
                 ),
             )
@@ -532,6 +630,104 @@ def incremental_encode(db_path: Path = DB_PATH, force_all: bool = False) -> int:
     return n
 
 
+PLACE_TEXT_URL = "https://restapi.amap.com/v3/place/text"
+
+
+def _with_local_distance(cands: list[dict], lat: float, lon: float) -> list[dict]:
+    """用候选自身坐标算出"到参考点"的实测距离，覆盖高德 distance 字段。
+
+    regeo 的 distance 是"到请求点"的球面距离，本身可信；这里统一换算一遍是为了
+    让"按修正后坐标问候选"与"关键词搜索"两条路径的距离口径完全一致（可比较、
+    可排序），避免两套量纲混在一个候选列表里。
+    """
+    from gacore.langTrack.location_facts import haversine_m
+
+    out: list[dict] = []
+    for c in cands:
+        loc = (c.get("location") or "").split(",")
+        if len(loc) == 2:
+            try:
+                clon, clat = float(loc[0]), float(loc[1])
+                c = {**c, "distance_m": round(haversine_m(lat, lon, clat, clon), 1)}
+            except ValueError:
+                pass
+        out.append(c)
+    return out
+
+
+def regeo_candidates(
+    lat: float, lon: float, key: str, coord_system: str = "unknown"
+) -> list[dict]:
+    """单点 regeo 候选池（POI ∪ AOI，按距离升序）；请求失败返回空列表。
+
+    与 incremental_encode 落库的 poi_candidates 同一结构（name/kind/type/
+    distance_m/location），区别只是这里现算现给，供编辑器"按坐标校准"。
+    """
+    alat, alon = _to_amap(lat, lon, coord_system)
+    params = urllib.parse.urlencode({
+        "location": f"{alon},{alat}",
+        "key": key,
+        "extensions": "all",
+        "radius": "500",
+    })
+    try:
+        with urllib.request.urlopen(f"{REVERSED_GEO_URL}?{params}", timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:  # noqa: BLE001 - 编辑器查询失败不抛，返回空候选
+        print(f"[geocode] 候选查询失败 ({alat},{alon}): {e}")
+        return []
+    if data.get("status") != "1":
+        return []
+    inner = (data.get("regeocode") or {})
+    cands = [_candidate(p, "POI") for p in (inner.get("pois") or [])]
+    cands += [_candidate(a, "AOI") for a in (inner.get("aois") or [])]
+    cands = [c for c in cands if c["name"]]
+    cands.sort(key=lambda c: c["distance_m"] if c["distance_m"] is not None else 1e9)
+    return _with_local_distance(cands, alat, alon)
+
+
+def search_place_candidates(
+    keyword: str, lat: float, lon: float, key: str, city: str = ""
+) -> list[dict]:
+    """关键词搜索 POI（如"观云润府"），按到 (lat, lon) 的距离升序返回候选。
+
+    用途：编辑器里"我知道这里叫什么，但候选池里没有"——搜出同名地点挑一个，
+    既拿到规范名也拿到它的坐标。请求失败返回空列表（页面提示"搜索无结果"）。
+    """
+    kw = (keyword or "").strip()
+    if not kw:
+        return []
+    params = {
+        "key": key,
+        "keywords": kw,
+        "offset": "8",
+        "page": "1",
+        "extensions": "all",
+    }
+    if city:
+        params["city"] = city
+    try:
+        with urllib.request.urlopen(
+            f"{PLACE_TEXT_URL}?{urllib.parse.urlencode(params)}", timeout=10
+        ) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:  # noqa: BLE001 - 搜索失败不抛
+        print(f"[geocode] 地名搜索失败 ({kw}): {e}")
+        return []
+    if data.get("status") != "1":
+        return []
+    cands = []
+    for p in data.get("pois") or []:
+        c = _candidate(p, "POI")
+        if not c["name"]:
+            continue
+        c["source"] = "search"
+        cands.append(c)
+    cands = _with_local_distance(cands, lat, lon)
+    cands.sort(key=lambda c: c["distance_m"] if c["distance_m"] is not None else 1e9)
+    return cands
+
+
 def refresh_behavior(db_path: Path = DB_PATH) -> int:
     """刷新已编码点的 behavior（不调 API）：基于现有 poi_type 中文大类 + 名称硬信号重算。"""
     conn = sqlite3.connect(db_path)
@@ -616,9 +812,14 @@ def refresh_name_confidence(db_path: Path = DB_PATH) -> int:
     return n
 
 
-def run(db_path: Path = DB_PATH, label: str | None = None, force_all: bool = False) -> None:
+def run(
+    db_path: Path = DB_PATH,
+    label: str | None = None,
+    force_all: bool = False,
+    refresh_names: bool = False,
+) -> None:
     key = _amap_key()  # 提前校验 key，避免走到一半才发现缺配置
-    n = incremental_encode(db_path, force_all=force_all)
+    n = incremental_encode(db_path, force_all=force_all, refresh_names=refresh_names)
     if label:
         conn = sqlite3.connect(db_path)
         cur = conn.execute(
@@ -632,7 +833,10 @@ def run(db_path: Path = DB_PATH, label: str | None = None, force_all: bool = Fal
 def main() -> None:
     parser = argparse.ArgumentParser(description="高德逆地理编码（L2 语义化增量编码）")
     parser.add_argument("--db", type=Path, default=DB_PATH)
-    parser.add_argument("--all", action="store_true", help="强制全部重编码（忽略增量缓存）")
+    parser.add_argument("--all", action="store_true", help="强制全部重编码（忽略增量缓存）")
+    parser.add_argument("--refresh-names", action="store_true",
+                        help="v3.6: re-run regeo for every place and re-judge names "
+                             "(POI/AOI distance rule); manual overrides untouched")
     parser.add_argument("--label", type=str, default=None,
                         help="给已编码常驻点强制统一标标签（如 家/公司），不传则不覆盖 label")
     parser.add_argument("--rebehavior", action="store_true",
@@ -654,7 +858,7 @@ def main() -> None:
         n = enrich_business_area(args.db)
         print(f"[geocode] 商圈补充完成: {n} 条")
         return
-    run(args.db, args.label, args.all)
+    run(args.db, args.label, args.all, refresh_names=args.refresh_names)
 
 
 if __name__ == "__main__":

@@ -54,6 +54,8 @@ def _regeo_body(n_points: int) -> dict:
         "pois": [{"name": "测试POI", "type": "餐饮服务;中餐厅;中餐馆"}],
         "businessAreas": [{"name": "测试商圈"}],
     }
+    # 说明：故意不带 aois / distance，既覆盖"无 AOI 走 POI"的老路径，
+    # 也覆盖"高德未返回 distance"的兜底（_nearest 取首个）
     rcs = [dict(rc) for _ in range(n_points)]
     return {"status": "1", "regeocode": rcs[0], "regeocodes": rcs}
 
@@ -211,6 +213,120 @@ class TestIncrementalEncode:
         with pytest.raises(CoordSystemConfigError):
             geocode.incremental_encode(places_db)
         assert fake_urlopen == []  # 配置错误时零请求
+
+
+# ---------------------------------------------------------------------------
+# 选名规则（v3.6）：点落在 AOI 院内取 AOI，否则取最近 POI
+# ---------------------------------------------------------------------------
+
+
+def _rc(pois=None, aois=None, roads=None) -> dict:
+    """按需构造 regeocode 片段（带 distance/location 的真实结构）。"""
+    return {
+        "formatted_address": "南京市某路1号",
+        "addressComponent": {"district": "测试区", "township": "测试街道"},
+        "pois": pois or [],
+        "aois": aois or [],
+        "roads": roads or [],
+        "businessAreas": [],
+    }
+
+
+class TestPickNameRule:
+    def test_aoi_inside_wins_over_nearer_poi(self):
+        """家在「观云润府」院内（AOI 0m），隔壁小区 POI 142m → 取 AOI 名。"""
+        info = geocode._parse_regeocode(_rc(
+            pois=[{"name": "彰泰·观南府", "type": "商务住宅;住宅区;住宅小区",
+                   "distance": "142", "location": "118.737433,31.955167"}],
+            aois=[{"name": "观云润府", "type": "商务住宅;住宅区;住宅小区",
+                   "distance": "0", "location": "118.736086,31.952979"}],
+        ))
+        assert info["poi"] == "观云润府"
+        assert info["matched_level"] == "AOI"
+        assert info["name_confidence"] == 0.65
+        assert info["name_evidence"] == "regeo:AOI"
+        assert info["poi_distance_m"] == 0.0
+        # AOI 类型并入 type 首段，三级语义按 AOI 大类解析（行为语义在编码时另算）
+        assert info["poi_type"].startswith("AOI;")
+        assert info["poi_l1"] == "AOI" and info["poi_l2"] == "商务住宅"
+
+    def test_nearer_poi_kept_when_aoi_far(self):
+        """POI 30m、AOI 200m → 仍取 POI（AOI 没把点包住）。"""
+        info = geocode._parse_regeocode(_rc(
+            pois=[{"name": "某大厦", "type": "商务住宅;楼宇;商务写字楼", "distance": "30"}],
+            aois=[{"name": "远处院区", "type": "商务住宅;住宅区;住宅小区", "distance": "200"}],
+        ))
+        assert info["poi"] == "某大厦" and info["matched_level"] == "POI"
+
+    def test_aoi_used_when_no_poi(self):
+        info = geocode._parse_regeocode(_rc(
+            aois=[{"name": "某院区", "type": "商务住宅;住宅区;住宅小区", "distance": "12"}],
+        ))
+        assert info["poi"] == "某院区" and info["matched_level"] == "AOI"
+
+    def test_road_and_district_levels_kept(self):
+        info = geocode._parse_regeocode(_rc(roads=[{"name": "某路"}]))
+        assert info["matched_level"] == "道路" and info["poi"] == ""
+        info2 = geocode._parse_regeocode(_rc())
+        assert info2["matched_level"] == "行政区"
+
+    def test_missing_distance_falls_back_to_first_and_keeps_poi(self):
+        """高德不返回 distance 时仍取 pois[0]（否则会丢名、退化到 around 多打一次）。"""
+        info = geocode._parse_regeocode(_rc(
+            pois=[{"name": "首个POI", "type": "餐饮服务;中餐厅;中餐馆"}],
+        ))
+        assert info["poi"] == "首个POI" and info["matched_level"] == "POI"
+        assert info["poi_distance_m"] is None
+
+    def test_candidates_recorded_for_editor(self):
+        info = geocode._parse_regeocode(_rc(
+            pois=[{"name": "P1", "distance": "10"}, {"name": "P2", "distance": "20"}],
+            aois=[{"name": "A1", "distance": "0"}],
+        ))
+        got = [(c["name"], c["kind"], c["distance_m"]) for c in info["poi_candidates"]]
+        assert got == [("P1", "POI", 10.0), ("P2", "POI", 20.0), ("A1", "AOI", 0.0)]
+        assert info["poi"] == "A1"
+
+
+class TestCandidateQueries:
+    def test_regeo_candidates_sorted_and_distances_recomputed(
+        self, fake_urlopen, monkeypatch
+    ):
+        body = {
+            "status": "1",
+            "regeocode": {
+                "formatted_address": "x",
+                "addressComponent": {},
+                "pois": [{"name": "远POI", "distance": "300",
+                          "location": "118.7900,31.9800"}],
+                "aois": [{"name": "近AOI", "distance": "5",
+                          "location": "118.7801,31.9800"}],
+            },
+        }
+        monkeypatch.setattr(
+            geocode.urllib.request, "urlopen", lambda url, timeout=None: _FakeResp(body)
+        )
+        out = geocode.regeo_candidates(31.98, 118.78, "k", coord_system="gcj02")
+        assert [c["name"] for c in out] == ["近AOI", "远POI"]
+        assert out[0]["distance_m"] < out[1]["distance_m"]
+
+    def test_search_place_candidates_sorted_by_distance(self, fake_urlopen, monkeypatch):
+        body = {
+            "status": "1",
+            "pois": [
+                {"name": "甲", "location": "118.8000,31.9800", "distance": ""},
+                {"name": "乙", "location": "118.7801,31.9800", "distance": ""},
+            ],
+        }
+        monkeypatch.setattr(
+            geocode.urllib.request, "urlopen", lambda url, timeout=None: _FakeResp(body)
+        )
+        out = geocode.search_place_candidates("小区", 31.98, 118.78, "k")
+        assert [c["name"] for c in out] == ["乙", "甲"]
+        assert all(c["source"] == "search" for c in out)
+
+    def test_search_empty_keyword_returns_empty(self, fake_urlopen):
+        assert geocode.search_place_candidates("", 31.98, 118.78, "k") == []
 
 
 class TestEnrichBusinessArea:
