@@ -499,7 +499,53 @@ flowchart LR
 
 **FactCard 位置字段（`fact_card.py:52-166`）**：`current_known`、`places`（PlaceBrief：`place_id/place_name/user_tag/name_source/point_count/visit_episodes/stay_ms`，旧字段 `visits/poi/behavior/address` 标 deprecated 仅兼容）、`stays`（StayBrief：PlaceRef 载荷 + `point_count/avg_accuracy_m` + v3.4 `region/note`）、`trips`（TripBrief：`from_place/to_place=PlaceRef|None`，保留 `from_label/to_label`）、`anomalies`（kind/poi/detail）、`daily_location_quality`（Task 7 观测）、`tag_conflict_count`、`spatial_profile`（Task 8 `places_v2` 长期空间画像，7/30/90 客观聚合，仅 full 卡携带）、`home_district`（v3.4：家标签点的区县，异地标注基准）。`label = format_place(place_name, user_tag)` 展示。
 
-#### 5.6 语义地点：自定义标签直写 DB + 编辑器（v3.5，`places_page.py` + `place_semantics.py`）
+#### 5.6 语义地点：自动选名 + 自定义标签/人工改判直写 DB + 编辑器（v3.5/v3.6，`places_page.py` + `place_semantics.py` + `geocode.py`）
+
+**自动选名规则（v3.6，`geocode._pick_best_name`）**：单点 regeo 返回的 `pois` 与 `aois` 归一成
+同构候选（name/kind/type/distance_m/location），选名唯一出口按"**点确实落在 AOI 院区内**"判定：
+
+```
+best_poi = 最近 POI（无 distance 时取 pois[0]）
+best_aoi = 最近 AOI
+best_aoi.distance_m <= AOI_CONTAINS_MAX_M(25m) → 取 AOI（matched_level=AOI，name_confidence=0.65）
+否则 → 取最近 POI（matched_level=POI，name_confidence=0.80）
+两者皆无 → 道路(0.45) → 行政区(0.30)
+```
+
+动机（2026-10-11 实测 48 个常驻点）：高德按"离请求点距离"排序 POI，院区内的小店（餐厅/驿站/
+整装馆）会排在院区本身之前——纯 POI 优先把"停在山姆会员商店"写成"山姆旁的餐厅"、把家写成
+142m 外的隔壁小区「彰泰·观南府」（而点其实落在「观云润府」AOI 内、distance=0）。
+AOI 命中时 `poi_type` 前缀 `AOI;`（如 `AOI;商务住宅;住宅区;住宅小区`），`behavior_of` 取首段仍可解析。
+
+**候选池落库**：`_parse_regeocode` 输出 `poi_candidates`（JSON 数组，编辑器改判用）与
+`poi_distance_m`；`incremental_encode` 写 `places.poi_candidates` / `places.poi_distance_m`
+（缺列库跳过该两列，其余字段照写）。存量按新规则重判走
+`python -m gacore.langTrack.geocode --refresh-names`（全量重跑、只写自动命名列）。
+
+**人工改判列（v3.6，R6 列级迁移，`location_reader.ensure_correction_columns`）**：
+
+| 列 | 含义 | 消费者 |
+|----|------|--------|
+| `poi_override` | 人工改判地名（留空=回自动），优先级高于一切自动命名 | `resolve_place_name(poi_override=…)` |
+| `address_override` | 人工改判地址（无 POI 时的地址来源） | `resolve_place_name(address_override=…)` |
+| `lat_override` / `lon_override` | 人工修正坐标（"定位点不对"的显式修正） | `location_facts.effective_coord` |
+| `poi_candidates` / `poi_distance_m` | 高德原始候选池与选中距离（自动命名证据，只读） | 编辑器候选展示 |
+
+与 note 列同一约定：幂等 `ALTER TABLE`、**不递增 `PRAGMA user_version`**；`SCHEMA_V2`（新库）
+一次到位。显示优先级：`poi_override` > 自动阶梯；地址阶梯新增"**地址含该名则收敛为该名**"
+（AOI 级命名不足 venue 门槛时不再显示整串 address）。
+
+**ETL 重建不丢改判**：`rebuild_location_v2` 的 places UPSERT 只更新 `REBUILD_PLACE_STATS`
+（grid_key/lat/lon/时间窗/三计数/is_primary/坐标制），label 与全部人工改判列不在其列，保留正式表现值。
+
+**合并同名地点（v3.6，`place_semantics.merge_preview/merge_places`）**：同名碎片（如"张垛"被
+聚类切成两簇，stay 中心相距 222m > `CLUSTER_SPREAD_MAX_M=150`）由用户在编辑器手动收口。
+`merge_preview` 纯读给"并进来之后"的统计（计数相加、时间窗取并、中心按 stay 时长加权、
+label/note/改判保留侧优先继承）；`merge_places` 单事务改写 `place_cells`(UPDATE OR IGNORE + 清理) /
+`stays.place_id` / `trips.from_place_id|to_place_id` / `anomalies.place_id`，刷新 keep 行统计后
+删除 drop 行；跨设备、不存在、同一个点三类校验拒绝且不写库。
+
+#### 5.6.1 编辑器与 API（v3.5 定稿 + v3.6 扩展）
 
 **v3.5 定稿（用户拍板"DB 即真源"）**：自定义标签与地点背景由用户在编辑器里**直写数据库**
 （`places.label` / `places.note` 列），不再走任何 JSON 叠加层。v3.4 的
@@ -525,12 +571,21 @@ ALTER ADD COLUMN（判据=列存在性），etl.run 开头与编辑器保存路�
 灰=未知），初始视野锚家点，点 marker 进编辑。页面模板与脚本在 `gacore/places_page.py`
 （JS 以模板常量 + `__DATA__` 占位内嵌，`</` 转义防 script 逃逸；node --check 为上线门禁）。
 
-**保存 API（token 保护）**：
-- `POST /api/places/labels` `{items:[{place_id,poi,label,note}]}` →
-  `place_semantics.save_place_labels`：place_id 匹配优先、poi 兜底；label≤24 字、
-  note≤500 字截断；label 留空恢复"未知"；直写 `places.label/note`。
-- `POST /api/places/districts` `{items:[{district,note}]}` → `save_district_notes`：
-  区县背景整表替换写 `data/place_semantics.json`（该文件 v3.5 起只剩区县 note）。
+**API（POST 一律 token 保护）**：
+
+| 端点 | 请求 | 落点 |
+|------|------|------|
+| `GET /api/places/data` | — | `editor_data()` 全量（保存/合并后前端就地重取） |
+| `POST /api/places/labels` | `{items:[{place_id,poi,label,note}]}` | `save_place_labels` → `places.label/note`（label≤24/note≤500 截断，留空回"未知"） |
+| `POST /api/places/correction` | `{place_id,device_id?,poi_override?,address_override?,lat?,lon?,reset_coord?}` | `save_place_correction` → 四个改判列（留空=清空回自动；`reset_coord=true` 清坐标修正；越界/非法坐标 400） |
+| `POST /api/places/merge` | `{keep_id,drop_id}` | `merge_places`（校验失败 400，成功返回 `moved{cells,stays,trips,anomalies}` 与合并统计） |
+| `POST /api/places/districts` | `{items:[{district,note}]}` | `save_district_notes` → `data/place_semantics.json` 整表替换（v3.5 起该文件只剩区县 note） |
+| `GET /api/places/name_candidates` | `?place_id&device_id?&keyword?` | `suggest_place_names`：按**有效坐标**（改判优先）问高德候选（regeo POI∪AOI + 关键词搜索并按 name 去重），缺 AMAP_KEY/未知 place_id → 400 |
+
+**编辑器交互（v3.6 追加，`places_page.py`）**：编辑面板在地点名下加「系统自动判定」对照行 +
+「人工改判地名」输入 + 「按坐标校准（问高德）」候选下拉（可关键词搜索，采用后填入覆盖框，
+搜索候选带自身坐标时一并填坐标修正）；「坐标 / 地址修正」区块可改有效坐标、一键恢复自动坐标；
+「合并同名地点」区块列出 800m 内候选（同名优先、按距离排序）并预览统计后执行。
 
 **数据层**：`place_semantics.editor_data()` 纯读收集 places 全量（访问降序）+ 近 14 天
 出现线索（stay 按 place_id/grid_key 归点）+ 区县聚合 + 家基准区县 + AMap JS key；

@@ -1183,6 +1183,70 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 
 **待办更新**：无（data/place_labels.json 文件保留未删，家/公司 2 条标签已在库内，json 仅作历史存档）。
 
+## [2026-10-11] v3.6 地点命名修正 + 人工改判（/places）+ 同名地点合并
+
+**背景**：用户报两个问题——①「家」被写成「彰泰·观南府」，实际住「观云润府」，并追问"若是定位固定偏差，
+应该有入口改偏移点"；②「张垛」出现两行（两个 place_id），预期只有一个。**诊断结论（实测，非猜测）**：
+
+1. **不是 GPS 偏移**：设备上报 WGS84，服务端 `to_amap_coord` 转换正确（张垛在转换后坐标精确落在"张垛"村，
+   原样发则落到 500m 外的"金村"）。"观南府"是**高德 regeo 的选名问题**——`pois[0]` 优先级最高，
+   而高德按"离请求点距离"返回 POI：家点落在「观云润府」AOI 内（distance=0）时，POI 首位却是
+   142m 外的「彰泰·观南府」（隔壁小区），旧代码 `POI > AOI` 直接采用，把"身处大院内"的名字判给了院外。
+2. **同名两行是聚类边界**：张垛两簇的 stay 中心相距 222m，`CLUSTER_SPREAD_MAX_M=150` 下第二簇
+   加入后扩散超限 → 合法地分成两个 canonical place（不是脏数据、不是旧网格残留）。
+
+**已完成**：
+
+- **选名规则（geocode）**：`_pick_best_name` 单一出口——POI ∪ AOI 候选按高德 distance 比较，
+  **AOI 距离 ≤25m（点确实落在该院区内）时取 AOI 名**，否则取最近 POI；AOI 类型并入 `poi_type`
+  首段（`AOI;商务住宅;…`）让行为语义仍可解析；新增 `AOI_CONTAINS_MAX_M` 常量与 8 个单测。
+  实测 48 个常驻点 A/B 对照：纯 POI 优先会把"停在山姆会员商店"写成"山姆旁的餐厅"、把小区写成
+  "小区旁的烤鸭店"——AOI 包含规则修正 9 个点（含家），其余维持原判，是"不猜、只在点确实在院内时改判"。
+- **候选池落库**：`_parse_regeocode` 输出 `poi_candidates`（name/kind/type/distance_m/location）+
+  `poi_distance_m`，编码时写 `places.poi_candidates`；编辑器无需再打高德即可看候选。
+- **人工改判（新真源层）**：`places` 增 `poi_override`/`address_override`/`lat_override`/`lon_override`
+  四列（列级幂等迁移，不递增 user_version，理由同 note 列；v2 表定义同步补齐，新库一次到位）。
+  `resolve_place_name` 加 `poi_override`/`address_override` 入参（优先级最高，留空回自动），
+  fact_card / report / dashboard / spatial_profile 四条显示路径全部接上；新增 `effective_coord`
+  纯函数统一"人工坐标优先"，编辑器展示与 regeo 重编共用。**ETL 全量重建不会丢改判**
+  （`REBUILD_PLACE_STATS` 不含这些列，UPSERT 只刷新统计）。
+- **地址含名收敛**：AOI 级命名（0.65 不足 venue 门槛）原本落整串 address，日报显示
+  "江苏省南京市雨花台区铁心桥街道机场二通道辅路观云润府"；改为**地址串含该名时收敛为该名**
+  （高德 formatted_address 以 POI 名结尾），不含则维持原阶梯。
+- **/places 编辑器三件套**：①「按坐标校准地名」`GET /api/places/name_candidates`（按有效坐标问
+  高德候选 + 可选关键词搜索，一键采用到覆盖框）；②`POST /api/places/correction` 保存地名/地址/坐标改判
+  （可清空回自动）；③`POST /api/places/merge` **同名合并**——stays/place_cells/trips/anomalies 引用
+  一次改挂、按 stay 时长加权重算中心、label/note/改判继承、单事务回滚、跨设备/不存在/同点三类校验拒绝；
+  编辑器内选点即预览合并统计。另加 `GET /api/places/data` 供保存后就地刷新。
+- **`geocode --refresh-names`**：选名规则变更后的存量重编入口（全量重跑 regeo、只写自动命名列，
+  人工覆盖列不动）。
+
+**实测验证**：
+
+- 单测：`test_langTrack_place_correction.py` 新增 22 例（列迁移/候选解析/覆盖优先级/有效坐标/
+  改判写读清空/合并引用改写与校验/假高德候选/四个新 API 含 token 与 400），geocode 补 8 例、
+  location_facts 补 3 例；全量 `pytest apps/withlanggraph/tests` **1332 passed, 1 skipped**；ruff 全绿。
+- 真实库（先整库备份 `data/backup/langTrack_pre_v36_20261011_162803.db`）：`--refresh-names` 重编
+  48 点成功 45（3 点高德失败留待重试），自动改名 21 个；**家点从「彰泰·观南府」自动修正为
+  「观云润府」**（AOI 距离 0m），无需人工覆盖；fact_card 实跑 10-08 轨迹：
+  `润东科创园〔公司〕→ 观云润府 → 润东科创园〔公司〕`，places 段为
+  `润东科创园/康盛花园/观云润府/张垛`。
+- 张垛合并：真实库执行 `merge_places(7afcc1e4576ce7fc, 611ed89c9f7da490)` →
+  `moved={cells:1, stays:1, trips:1}`，张垛只剩一行（访问 6 次、停留 48.1h）；另在真实数据副本上
+  演练"家点 + 晓村和苑残留"合并（17 段 stay 全量并入、address_override 继承）后丢弃副本。
+- API 真机：dev-console `POST /api/restart` 重启 review_server 后，`/api/places/data` 200（47 点）、
+  `/api/places/name_candidates` 200（候选按距离升序，带 kind/distance）。
+
+**偏差说明**：①`--refresh-names` 会按新规则重判**存量全部**自动名（本次 21 个），其中少数
+（如"森隆英郡"→"慈湖河体育公园"）来自高德当日候选变化，属"上游数据自身漂移"，人工改判入口即兜底；
+②自动选名仍无法区分"点落在两小区交界、POI 与 AOI 都合理"的场景（观南府/观云润府相距仅 130m）——
+这正是保留人工改判层的原因，不追求全自动；③本次未动 `CLUSTER_SPREAD_MAX_M`（改阈值会影响所有地点聚类），
+同名碎片统一走编辑器手动合并；④旧「家」标签（家点仍是 9c7165318d19cdab「康盛花园」，实际已搬离）
+未自动改判——"家"变更属用户语义，交由编辑器处理。
+
+**待办更新**：无新增。观察项：①3 个高德编码失败点下次 ETL 自动重试；②若"相邻院区选名"反复出现，
+再考虑引入"停留时长加权选名"（当前不做，避免用弱信号改用户地名）。
+
 ## [2026-10-11] /health 体检矩阵全窗口恒渲染 + 点表头补全 + ETL 一键转换
 
 **背景**：用户实际使用中发现两个交互断点——①10-07/10-08 两天日报任务没跑（笔记本当时没开机/服务未起，scheduler 错过 23:50 不补跑），矩阵里这两天的列**整个消失**，"缺了哪天"本身反而看不见，且补数据后必须靠「↻ 重算体检」逐日点；②体检数据上游是 langTrack ETL（raw events→事实表），但 ETL 按钮只在 :8000 仪表盘，体检页想刷新数据得跨两个页面。
