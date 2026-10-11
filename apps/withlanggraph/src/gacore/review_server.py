@@ -543,7 +543,13 @@ def _collect_has_report_dates(cfg: Config) -> list[str]:
                 dates.add(p.stem)
     sched = cfg.logs_dir / "scheduled"
     if sched.is_dir():
-        files = sorted(sched.glob("daily-report_*.md"), key=lambda x: x.stat().st_mtime, reverse=True)[:90]
+        def _mtime(p: Path) -> float:
+            try:
+                return p.stat().st_mtime
+            except OSError:
+                return 0.0
+
+        files = sorted(sched.glob("daily-report_*.md"), key=_mtime, reverse=True)[:90]
         for p in files:
             try:
                 content = p.read_text(encoding="utf-8", errors="replace")
@@ -554,13 +560,18 @@ def _collect_has_report_dates(cfg: Config) -> list[str]:
 
 
 def _calendar_script(has_report: list[str], date: str) -> str:
-    """迷你日历纯 JS：HAS_REPORT 打点、点格跳转、未来置灰、切月重绘（UTC 正午法）。"""
+    """迷你日历纯 JS：HAS_REPORT 打点、点格跳转、未来置灰、切月重绘（UTC 正午法）。
+
+    自带 $cal helper：本脚本经 __NAV__ 注入在模板顶部，早于模板主脚本里 $ 的定义，
+    不能依赖后者（否则有报页/未来空态页抛 ReferenceError，日历失效）。
+    """
     return f"""<script>
 const HAS_REPORT = {json.dumps(has_report, ensure_ascii=False)};
 const CAL_CUR = {json.dumps(date)};
+const $cal = (id) => document.getElementById(id);
 let calY = +CAL_CUR.slice(0,4), calM = +CAL_CUR.slice(5,7);
 function renderCal(){{
-  $("cal-title").textContent = calY + "-" + String(calM).padStart(2,"0");
+  $cal("cal-title").textContent = calY + "-" + String(calM).padStart(2,"0");
   const first = new Date(Date.UTC(calY, calM-1, 1));
   const startDow = first.getUTCDay();
   const daysInM = new Date(Date.UTC(calY, calM, 0)).getUTCDate();
@@ -575,12 +586,12 @@ function renderCal(){{
     if (ds > todayS) {{ h += '<span class="' + cls.join(" ") + ' cal-future">' + d + '</span>'; }}
     else {{ h += '<span class="' + cls.join(" ") + '" data-d="' + ds + '">' + d + '</span>'; }}
   }}
-  $("cal-grid").innerHTML = h;
-  $("cal-grid").querySelectorAll("[data-d]").forEach(el => {{ el.onclick = () => {{ location.href = "/review/" + el.dataset.d; }}; }});
+  $cal("cal-grid").innerHTML = h;
+  $cal("cal-grid").querySelectorAll("[data-d]").forEach(el => {{ el.onclick = () => {{ location.href = "/review/" + el.dataset.d; }}; }});
 }}
-$("btn-cal").onclick = () => {{ $("cal-panel").classList.toggle("hidden"); renderCal(); }};
-$("cal-prev").onclick = () => {{ calM--; if (calM < 1) {{ calM = 12; calY--; }} renderCal(); }};
-$("cal-next").onclick = () => {{ calM++; if (calM > 12) {{ calM = 1; calY++; }} renderCal(); }};
+$cal("btn-cal").onclick = () => {{ $cal("cal-panel").classList.toggle("hidden"); renderCal(); }};
+$cal("cal-prev").onclick = () => {{ calM--; if (calM < 1) {{ calM = 12; calY--; }} renderCal(); }};
+$cal("cal-next").onclick = () => {{ calM++; if (calM > 12) {{ calM = 1; calY++; }} renderCal(); }};
 </script>"""
 
 

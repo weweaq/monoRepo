@@ -695,6 +695,18 @@ class TestReviewPage:
         page2 = c2.get(f"/review/{DATE}").text
         assert 'id="cal-panel"' in page2
 
+    def test_calendar_script_self_contained_dollar(self, tmp_path: Path, monkeypatch):
+        """日历脚本经 __NAV__ 注入在模板 $ 定义之前，必须自带 $cal，不得用裸 $。"""
+        cfg = Config.for_tests(tmp_path)
+        save_delivered(cfg, DATE, REPORT)
+        c = _client(cfg, monkeypatch)
+        page = c.get(f"/review/{DATE}").text
+        start = page.index("const HAS_REPORT")
+        end = page.index("</script>", start)
+        cal_block = page[start:end]
+        assert "const $cal" in cal_block
+        assert "$(" not in cal_block
+
 
 class TestHealthRefresh:
     """POST /api/health/refresh：单日体检重放按钮（backfill_health.refresh_day）。"""
