@@ -408,6 +408,14 @@ class TestApiRerun:
         j = c.get(f"/api/rerun/{DATE}/status").json()
         assert j == {"ok": True, "date": DATE, "state": "idle"}
 
+    def test_rerun_rejects_future_date(self, tmp_path: Path, monkeypatch):
+        cfg = Config.for_tests(tmp_path)
+        c = _client(cfg, monkeypatch)
+        future = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+        r = c.post("/api/rerun", json={"date": future, "email": True}, headers=_headers())
+        assert r.status_code == 400
+        assert r.json()["error"] == "future_date"
+
 
 # --------------------------------------------------------------------------- /health pages
 

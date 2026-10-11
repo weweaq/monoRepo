@@ -1978,6 +1978,9 @@ def create_app(cfg: Config | None = None) -> FastAPI:
             return guard
         if not _DATE_RE.fullmatch(payload.date):
             return JSONResponse({"ok": False, "error": "invalid date"}, status_code=400)
+        today = datetime.now(_UTC8).date().isoformat()
+        if payload.date > today:
+            return JSONResponse({"ok": False, "error": "future_date"}, status_code=400)
         jobs = scheduler.load_jobs(config)
         job = next((j for j in jobs if j.name == "daily-report"), None)
         if job is None:
