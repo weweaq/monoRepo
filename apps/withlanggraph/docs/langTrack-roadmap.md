@@ -3244,3 +3244,36 @@ batterystats 实测 weiCheckApp 耗电 67.7 mAh，其中 GNSS 64.4 mAh（引擎�
 
 ### 待办更新
 - （无新增；本任务全部完成）
+
+## 2026-10-11（补记）：日历脚本自带 `$cal` helper（修日历失效）
+
+### 背景
+上一条记录的 4 个代码提交合并后，页面实测发现迷你日历点了没反应。根因是**注入顺序**：
+`_calendar_script` 产出的脚本经 `__NAV__` 占位注入在 `_REVIEW_TMPL` 第一行
+（`review_server.py:321`），而模板主脚本里的 `const $ = (id) => document.getElementById(id)`
+定义在它之后（`review_server.py:348`）——日历脚本执行时 `$` 尚未定义，有报页与未来空态页
+直接抛 `ReferenceError`，`#cal-panel` 永远不渲染。
+
+### 已完成（commit 78a1f0c）
+- ✅ `_calendar_script` **自带** `const $cal = (id) => document.getElementById(id)`
+  （`review_server.py:571`），内部 6 处 `$("cal-*")` 全部改走 `$cal("cal-*")`
+  （`:574` `:589` `:590` `:592` `:593` `:594`），不再依赖模板后定义的 `$`；docstring 写明
+  「本脚本经 `__NAV__` 注入在模板顶部，早于模板主脚本里 `$` 的定义，不能依赖后者」。
+- ✅ 顺带修 `_collect_has_report_dates` 的排序键：`scheduled/daily-report_*.md` 的
+  `st_mtime` 读取换成带 `OSError` 兜底的 `_mtime()`（返回 `0.0`），避免扫描窗口内有文件
+  被删/被独占时整页 500。
+
+### 实测验证
+- `uv run pytest tests/test_review_server.py -q` → **82 passed**（新增用例
+  `test_calendar_script_self_contained_dollar`：从页面截取 `const HAS_REPORT` 到 `</script>`
+  的区块，断言含 `const $cal` 且不含裸 `$(`；单跑该用例 → 1 passed, 81 deselected）。
+- `uv run ruff check src/gacore/review_server.py tests/test_review_server.py` → All checks passed。
+
+### 偏差说明
+- 上一条记录「已完成（4 个代码提交 + 1 个文档提交）」在提交时是准确的，缺陷是**提交后页面实测
+  才暴露**的，因此单独补记，不回改原条目。
+- 该缺陷属"注入早于定义"的时序问题，测试只能断言脚本自洽（含 `$cal`、无裸 `$(`），
+  真实渲染仍需页面复看。
+
+### 待办更新
+- （无新增）
