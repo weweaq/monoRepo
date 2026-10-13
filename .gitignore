@@ -44,3 +44,6 @@ Thumbs.db
 # TRAE html-share 运行时共享资源（生成产物，非源码）
 .trae-html-share-packages/
 **_shared/
+
+# agent 工具运行时状态（run-continuation 会话续跑快照等，非源码）
+.omo/
