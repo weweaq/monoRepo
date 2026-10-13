@@ -16,20 +16,21 @@ tools/scripts/check.ps1               # 一键质量门禁（R7）
 
 ### 仓内成员
 
-**apps/**（dev-console、withlanggraph、checkself 已迁入；其余计划迁入，阶段划分见指导第 7 章）
+**apps/**（dev-console、withlanggraph、checkself、mermaid-viewer 已迁入；其余计划迁入，阶段划分见指导第 7 章）
 
 | 应用 | 来源项目 | 阶段 | 说明 |
 |---|---|---|---|
 | **dev-console** | dev-console | ✅ 已迁入（2026-09-04） | 服务管理器（首个迁移试点，subtree 保留 9 条历史） |
 | **withlanggraph** | WithLangGraph | ✅ 已迁入（2026-09-05） | gacore / langTrack 数据管线（包名 `gacore`），subtree 保留完整历史，936 用例门禁全绿 |
 | **checkself** | checkSelf | ✅ 已迁入（2026-09-05） | 个人画像系统（包名 `profile`，因与标准库同名接为虚拟成员），subtree 保留历史 |
+| **mermaid-viewer** | tools/mermaid-viewer | ✅ 已迁入（2026-09-12） | `.mmd` 查看 + 评审工具（纯标准库，端口 8123），由 `tools/` 升级为标准 app |
 | generic-agent | GenericAgent | Phase 3 | Agent 框架，前端矩阵最广 |
 | claw1 | claw1 | Phase 3 | Agent 项目（ruff + mypy） |
 | claw0 | claw0 | Phase 3 | 教学 agent gateway |
 | py-wei | py-wei (WeiTracker) | Phase 3 | 桌面行为采集 |
 | my-test-crew | my_test_crew | Phase 3 | crewAI JSON 项目 |
 
-**packages/**（共享包，按 Rule of Three 晋升，清单见指导第 6 章）
+**packages/**（共享包，按 Rule of Three 晋升；**当前目录为空，下表为计划清单**，见指导第 6 章）
 
 | 包 | 批次 | 来源 |
 |---|---|---|
@@ -57,7 +58,7 @@ mono/
 ├── README.md               # 本文件：项目地图
 ├── pyproject.toml          # workspace 定义 + ruff/pytest 统一配置
 ├── uv.lock                 # 全仓唯一锁文件
-├── apps/                   # 应用（待迁入）
+├── apps/                   # 应用（已迁入 4 个，其余待迁入）
 ├── packages/               # 共享包（待晋升）
 ├── tools/scripts/          # 仓库级脚本（纯 ASCII）
 ├── docs/

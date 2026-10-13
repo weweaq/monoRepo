@@ -335,6 +335,7 @@ packages/amap-sdk/
 - [x] 迁 `WithLangGraph`（subtree add 保留完整历史——305 个测试的演进史值得保留）2026-09-05 完成
 - [ ] 迁移过程中提炼 `amap-sdk`（geocode/routes/坐标转换整体搬出，WithLangGraph 改为依赖 workspace 包，全量回归 305 用例必须全绿）——暂缓：上游 geocode.py 有未提交 WIP，先等同步
 - [x] 迁 `checkSelf` 2026-09-05 完成（提炼 `ga-logging` 待做，已记入 apps/checkself/ROADMAP.md）
+- [x] 迁 `mermaid-viewer` 2026-09-12 完成（原 `tools/mermaid-viewer/` 零依赖工具按 buildApp skill 升级为 `apps/` 标准成员：新增 pyproject.toml + AGENTS.md / ROADMAP.md / docs，`git mv` 保留历史；tests 于 09-13 起随功能补齐）
 - [x] 存量迁移注意：WithLangGraph 的 `data/`（langTrack.db、etl_config.json）保持 gitignore 状态，配置文件按 R9 出 `.example` 模板
 
 验收：全仓 `uv run pytest` 通过；WithLangGraph 用例数不少于迁前（305+）；`uv run python -m gacore.langTrack --db ...` 冒烟可用。
