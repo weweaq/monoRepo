@@ -1290,3 +1290,35 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 **偏差说明**：①10-10 23:43 的三条 backfill 记录（10-10/09/08）系当时手动重算产生，与本次改动无关；②LANGTRACK_BASE_URL 未入 `.env.example`（非密钥，默认值即本机拓扑，与 LANGTRACK_ETL_INTERVAL_SECONDS 同等对待）；③ETL 按钮只加在矩阵页（单源详情页保持原样）；④架构图 codemap skill 本环境不可用，改动节点（RVW 端点清单+RVW-.->ET 新边）已逐一对照源码核实后手改。
 
 **待办更新**：无新增。观察 ETL 按钮实际使用频率；若 10-07 这类"服务未起"频发，考虑 scheduler 补跑或开机自检提醒（未排期）。
+
+## [2026-10-18] 存量测试去日期腐化（place recent / health 矩阵 / llm-requests）
+
+**背景**：全仓 pytest 出现 3 处红（与当日改动无关）：`test_langTrack_place_semantics`（recent 期望 `2026-10-04/05`）、`TestHealthPages::test_matrix_renders_cells_dates_notes`（期望矩阵含 `2026-10-02/03`）、`TestLlmRequestsPage::test_page_renders_runs_delivery_and_nav`（默认页期望 `2026-10-03`）。三处测试用**硬编码绝对日期**，而源码窗口锚定 `today`（`place_semantics.editor_data` 的 `recent` 取近 14 天、`review_server._health_matrix` 默认末窗=今天、`/llm-requests` 默认锚今天）；2026-10-18 起这些固定日期滑出窗口，测试随系统日期腐化。
+
+**已完成**：
+- `test_langTrack_place_semantics.py`：新增 `_recent_pair()`（UTC+8 的 昨天/今天），`_make_db` 的 stays 种子行与 `test_editor_data_shapes_and_recent` 断言改为引用它。
+- `test_review_server.py`：`test_matrix_renders_cells_dates_notes` 改为 `GET /health?end={DATE}`（锚定窗口末日，走既有"回看历史窗口"能力）；`test_page_renders_runs_delivery_and_nav` 改为 `GET /llm-requests?date={DATE}`（锚定数据日）。
+
+**实测验证**：两测试文件 94 passed；全仓 `uv run --all-packages pytest` 1423 passed / 5 skipped；ruff 全绿。
+
+**偏差说明**：仅改测试数据锚点，未动任何产品逻辑（三处源码窗口语义本就以"今天"为锚，是测试假设过期）。
+
+**待办更新**：无新增。观察项：其余仍用绝对日期的测试若在将来变红，同法改为相对锚定。
+
+## [2026-10-18] langTrack KG 抽取层 S1：抽取子系统骨架 + events 通道
+
+**背景**：日报"太泛太糙"——现有 12 源信息包只给 LLM 一堆当日流水，缺可回溯的结构化事实（谁做了什么、与谁、何时、何种确定度）。据外部设计文档 v2.0 + 实测核实，落地方案见 `docs/kg-extract-plan.md`（六通道 KG 抽取层，独立 CLI、不碰现有日报链路）。本阶段交付骨架 + 第一个通道 events。
+
+**已完成**：
+- 新增 `src/gacore/langTrack/extract/`（`types`/`material`/`schema`/`runner`/`__main__` + `channels/events`），独立 CLI `python -m gacore.langTrack.extract`（`--day/--force/--only/--dry-run/--dump/--db`）；`main()` 内 `load_dotenv()`（R9）。
+- `schema.py` 建 `kg_runs/kg_nodes/kg_edges` 三表（R6：`created_at`/`updated_at` 默认 `datetime('now','+8 hours')` + 幂等 `CREATE IF NOT EXISTS`），与 `etl.py` `_SCHEMA` 完全解耦（不进 `fact_tables`、不参与位置冻结）。
+- `material.py` 零新增采集：读 `pack_detail/{date}/*.md` 的「完整取数详情」节，缺失回退 `build_info_pack_report` 各源 `detail_body`；`raw_hash` 作幂等锚。
+- `channels/events.py`：9 源路由；`edge_id=sha1(day|from|to|relation|edge_level|assertion)[:16]` 内容派生幂等；无悬空边（按 `node_id` 前缀补占位节点）；L2 边必填 `attributor`（缺失丢弃计数）；L3 边 `confidence≤0.6` 钳制。
+- `runner.py`：唯一索引幂等（`ok`→`skipped`，非 ok 复用 `run_id` 原地重跑）；通道并发 + 失败隔离（`partial`）；prompt 外置 `config/kg_prompts/events@v1.md`（`PROMPT_VER=kg@v1`）。
+- 新增封闭测试 25 例（`tests/test_langTrack_extract_{schema,material,events}.py`），不触网、不触真实库、不调真实 LLM。
+
+**实测验证**：`--day 2026-10-16` 实跑 `status=ok rows=32`（material 29875 字符，raw_hash 39b11196f4e7）；库内 kg_runs=1 / kg_nodes=14 / kg_edges=18；二次直跑 `status=skipped rows=0`（幂等命中）。ruff 全仓通过；pytest 全仓 1423 passed / 5 skipped。
+
+**偏差说明**：①CLI 初版漏调 `load_dotenv()`（`Config.default()` 不读 .env），直跑时 provider key 缺失致首次实跑挂起；已在 `__main__.py` 边界补 `load_dotenv()`，与仓内 CLI 惯例（cli/rerun/scheduler）一致。②S1 只建三表，计划中的 `kg_aliases`（实体消解）随 S2 追加（同文件同风格）。③架构图（codemap 产物）本次 codemap 未重跑，新增 `EX`（extract 层）与 `KG`（kg_* 存储）节点、两条数据流边（DT→EX 完整取数详情 / SIP→EX 回退 detail_body / EX→KG）已逐一对照真实源码符号（`extract/__main__.py`·`runner.run_extract`·`material.load_material`·`channels/events.SPEC`·`schema.migrate_extract_tables`）手改并核实。④本阶段不接入日报（`_KG` SourceSpec 属 S4），现有 12 源与日报链路零改动。
+
+**待办更新**：S2 `relations`+`todos` 通道 + 实体消解（`kg_aliases`）；S3 `emotions`/`patterns`/`worldview`（只产候选）；S4 `_KG` 接日报（priority 105 最低、默认停用）；S5 调度（23:30）+ 灰度验收。观察项：events 边质量（L2 attributor 缺失率、L3 钳制率）随实跑累积再评估 prompt。

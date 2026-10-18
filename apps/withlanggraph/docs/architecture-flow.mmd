@@ -65,6 +65,8 @@ flowchart TD
         RW["原始层 events"]
         ET["ETL 事实层"]
         OU["读方出口<br/>fact_card·report·dashboard·qq_push"]
+        EX["KG 抽取层 langTrack/extract<br/>python -m gacore.langTrack.extract<br/>material.load_material(day,cfg)<br/>channels/events.SPEC·runner.run_extract"]
+        KG[("langTrack.db kg_* 表<br/>kg_runs/kg_nodes/kg_edges<br/>schema.migrate_extract_tables")]
     end
 
     subgraph DAILY["⑥ 日报链路 v3 (daily_info_pack · feedback · review_server)"]
@@ -125,6 +127,9 @@ flowchart TD
     SIP -. "best-effort 落盘" .-> DT
     HP --> RVW
     DT --> RVW
+    DT -. "完整取数详情节 (material._read_pack_detail)" .-> EX
+    SIP -. "回退: build_info_pack_report detail_body (material._build_fresh)" .-> EX
+    EX --> KG
     FB --> RVW
     RVW -. "_deliver_revised→scheduler._deliver（与 redeliver_day 同通道）/ run_job(for_day)" .-> FB
 
@@ -168,9 +173,10 @@ flowchart TD
     class MDW side
     class TR,JD,AP,AU,TRN mem
     class T1,T2,T3,T4,T5,T6 tools
-    class IG,RW,ET,OU lang
+    class IG,RW,ET,OU,EX lang
     class LG out
     class FB bnd
+    class KG state
     %% ⑥ 日报链路 v3（2026-10-04 收敛：全部节点可回溯源码）
     class SIP,CB,FC2 main
     class COR,PRE,HP,DT state

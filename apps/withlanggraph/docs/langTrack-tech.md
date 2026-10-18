@@ -1639,3 +1639,69 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 📄 **全应用架构 / 核心对话流程图**：[`architecture-flow.mmd`](./architecture-flow.mmd)
 
 （图示视角为**全应用**：①入口/触发 → ②主图状态机 + process(create_agent) → ③记忆维护 → ④退出/投递 → ⑤langTrack 数据子系统。上一节 §1 是其中 langTrack 子系统专用链路。）
+
+---
+
+## 9.28 langTrack KG 抽取层（S1：骨架 + events 通道，2026-10-18）
+
+> 落地计划 [`kg-extract-plan.md`](./kg-extract-plan.md)。本节记录**已实现**的 S1 技术事实；S2~S5（relations/todos、emotions/patterns/worldview、`_KG` 接日报、调度灰度）尚未实现，见计划 §5。
+
+### 定位与边界（决策 D2）
+
+- **独立 CLI** `python -m gacore.langTrack.extract`，自己建表；**不挂进 `etl.py`**，保住 ETL「纯本地、确定性、可重建」属性（不把网络/LLM 引入 ETL）。
+- 存储**只用 SQLite（`langTrack.db`）新增 `kg_*` 表**，不引入 JSONL 作第二真源；`--dump` 仅导出 JSONL 供归档/对比。
+- 只增不改：不触碰 `etl.py` 的 `_SCHEMA`，不进 `_migrate_fact_tables` 的 `fact_tables` 列表，不参与位置 v1/v2 冻结逻辑。
+
+### 模块结构（`src/gacore/langTrack/extract/`）
+
+| 文件 | 职责（真实符号） |
+|---|---|
+| `__init__.py` | 对外入口 `run_extract` / `export_day` |
+| `__main__.py` | CLI：`--day`（必填）/`--force`/`--only`/`--dry-run`/`--dump`/`--db`；`main()` 内 `load_dotenv()`（R9：密钥读取顺序 环境变量→.env，CLI 边界补齐，库函数 `run_extract` 不产生副作用） |
+| `types.py` | `ChannelSpec(key/prompt/sources/handle)`、`ExtractContext(day/run_id/prompt_ver)`、`ChannelOutcome`、`infer_node_type(node_id 前缀→类型)` |
+| `material.py` | `load_material(day,cfg) → Material(by_source/text/raw_hash)`；`Material.select(keys)` 按路由取源 |
+| `schema.py` | `EXTRACT_SCHEMA`（kg_runs/kg_nodes/kg_edges）+ `migrate_extract_tables(conn)` 幂等建表 |
+| `channels/__init__.py` | `CHANNELS` 注册表（S1 仅注册 events） |
+| `channels/events.py` | events 通道 `SPEC`：sources 9 源 + `handle` 落库 |
+| `runner.py` | `run_extract`（编排/幂等/失败隔离）、`export_day`（`--dump`） |
+
+### 素材装配（`material.py`，决策 D1）
+
+- **零新增采集**：优先读已落盘的 `data/logs/pack_detail/{day}/{key}.md` 的「完整取数详情」节（与 `daily_info_pack.write_pack_detail` 同一份契约）；缺失时回退 `build_info_pack_report(day,cfg)` 各源 `detail_body`（当日抽取 23:30 早于日报 23:50，回退属常态路径）。
+- `raw_hash = sha256(按源名排序后的拼装文本)`，同素材恒等 → 作为幂等锚。
+
+### 数据表（R6 合规）
+
+- `kg_runs`（血缘/幂等锚）：`run_id` PK，唯一索引 `ux_kg_runs_day_hash_ver(day, raw_hash, prompt_ver)`；`status ∈ running|ok|partial|failed`；`channel_stats` JSON。
+- `kg_nodes`（实体节点）：`node_id` PK（`person_*`/`event_*`/`project_*`/`theme_*`…），`node_type`、`label`、`aliases` JSON、`first_day`/`last_day`、`src`、`run_id`。
+- `kg_edges`（append-only 边）：`edge_id` PK，`from_node`/`to_node`/`relation`/`edge_level`、`attributor`、`assertion_text`、`event_time`/`ingest_time`、`valid_from`/`valid_to`、`supersedes`/`superseded_at`/`invalidated`、`confidence`、`day`/`src`/`run_id`。
+- 三表均含 `created_at`/`updated_at`，默认 `datetime('now','+8 hours')`；索引：`idx_kg_nodes_type`、`idx_kg_nodes_label`、`idx_kg_edges_from`、`idx_kg_edges_to`、`idx_kg_edges_day`。
+- **S2 追加**（同文件同风格）：`kg_aliases`（实体消解，追加式可撤销带 `superseded_by`）、`kg_relations`；**S3**：`kg_emotions`/`kg_patterns`/`kg_worldview`。
+
+### events 通道（`channels/events.py`）
+
+- **素材路由**（计划 §3.2）：`_CHAT/_MEDIA/_BILI/_PHONE_NOTIF/_PHONE_PLACE/_EDGE/_FILES/_GIT/_LONG_TERM`（事件散布在所有素材里）。
+- **落库不变量（计划 §9）**：
+  - `edge_id = sha1(day|from|to|relation|edge_level|assertion)[:16]`——内容派生确定性主键，同素材重跑撞 PK 即静默忽略（`INSERT OR IGNORE`）。
+  - **无悬空边**：边的 from/to 若不在 `payload.nodes`，按 `node_id` 前缀 `infer_node_type` 补占位节点。
+  - **L2 边必须有 `attributor`**，缺失即丢弃并计数 `dropped_l2_no_attributor`。
+  - **L3 边 confidence 上限 0.6**，超出即钳制并计数 `clamped_l3`。
+  - 节点 `first_day`/`last_day` 双向收敛（`_WIDEN_NODE`/`_EXTEND_NODE`）——补跑历史日会带来比现有 `first_day` 更早、比 `last_day` 更晚的记录。
+- **prompt 外置**：`config/kg_prompts/events@v1.md`（改 prompt 不动代码）；`PROMPT_VER=kg@v1`。
+
+### 编排与幂等（`runner.py`）
+
+- **幂等**：`ux_kg_runs_day_hash_ver` 命中且 `status='ok'` → 整次 `skipped`（rows=0）；非 ok 的历史运行复用同一 `run_id` 原地重跑。
+- **失败隔离**：通道 `asyncio.gather(..., return_exceptions=True)` 并发执行，任一通道异常只记 `failed`，整次 status=`partial`（全失败=`failed`）。
+- **prompt 缺失即报错**（`load_prompt`，不做静默降级）；LLM 回复 JSON 解析失败重试 1 次（`parse_json_payload` 剥 ``` 围栏 + 取首尾花括号区间）。
+- LLM 走 `gacore.llm.get_llm([], os.environ, bind_tools=False)`（零工具单轮，与 feedback/memory_maintenance 同法）。
+
+### 实跑验证（2026-10-18）
+
+- `uv run --package gacore python -m gacore.langTrack.extract --day 2026-10-16` → `status=ok rows=32`（`material_chars=29875`，`raw_hash=39b11196f4e7`）；库内 `kg_runs=1`、`kg_nodes=14`、`kg_edges=18`。
+- 二次直跑（不带 `--force`）→ `status=skipped rows=0`（幂等命中）。
+- 封闭测试 25 例（`tests/test_langTrack_extract_{schema,material,events}.py`），不触网、不触真实库、不调真实 LLM。
+
+### 未纳入 S1（见计划 §5/§12）
+
+- S2 `relations`+`todos` 通道 + 实体消解；S3 `emotions`/`patterns`/`worldview`（只产候选，升格机制上游空白、显式不做）；S4 `_KG` SourceSpec 接日报（priority 105 最低、默认停用）；S5 调度 + 灰度验收。
