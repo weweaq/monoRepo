@@ -1642,9 +1642,9 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 
 ---
 
-## 9.28 langTrack KG 抽取层（S1：骨架 + events 通道，2026-10-18）
+## 9.28 langTrack KG 抽取层（S1 骨架 + S2 relations/todos/消解/闭合，2026-10-18）
 
-> 落地计划 [`kg-extract-plan.md`](./kg-extract-plan.md)。本节记录**已实现**的 S1 技术事实；S2~S5（relations/todos、emotions/patterns/worldview、`_KG` 接日报、调度灰度）尚未实现，见计划 §5。
+> 落地计划 [`kg-extract-plan.md`](./kg-extract-plan.md)。本节记录**已实现**的技术事实：S1（骨架 + events 通道）与 S2（relations/todos 通道 + 实体消解 + 区间闭合）。S3~S5（emotions/patterns/worldview、`_KG` 接日报、调度灰度）尚未实现，见计划 §5。
 
 ### 定位与边界（决策 D2）
 
@@ -1660,10 +1660,14 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 | `__main__.py` | CLI：`--day`（必填）/`--force`/`--only`/`--dry-run`/`--dump`/`--db`；`main()` 内 `load_dotenv()`（R9：密钥读取顺序 环境变量→.env，CLI 边界补齐，库函数 `run_extract` 不产生副作用） |
 | `types.py` | `ChannelSpec(key/prompt/sources/handle)`、`ExtractContext(day/run_id/prompt_ver)`、`ChannelOutcome`、`infer_node_type(node_id 前缀→类型)` |
 | `material.py` | `load_material(day,cfg) → Material(by_source/text/raw_hash)`；`Material.select(keys)` 按路由取源 |
-| `schema.py` | `EXTRACT_SCHEMA`（kg_runs/kg_nodes/kg_edges）+ `migrate_extract_tables(conn)` 幂等建表 |
-| `channels/__init__.py` | `CHANNELS` 注册表（S1 仅注册 events） |
+| `schema.py` | `EXTRACT_SCHEMA`（kg_runs/kg_nodes/kg_edges/kg_relations/kg_aliases）+ `migrate_extract_tables(conn)` 幂等建表 |
+| `channels/__init__.py` | `CHANNELS` 注册表（注册 events / relations / todos；新增通道只需追加一行） |
 | `channels/events.py` | events 通道 `SPEC`：sources 9 源 + `handle` 落库 |
-| `runner.py` | `run_extract`（编排/幂等/失败隔离）、`export_day`（`--dump`） |
+| `channels/relations.py` | relations 通道 `SPEC`：3 源路由 + `handle` 落 `kg_relations`（稳定关系，不参与区间闭合） |
+| `channels/todos.py` | todos 通道 `SPEC`：4 源路由 + `handle` 落 `kg_edges`（待办/承诺/计划，参与区间闭合） |
+| `resolve.py` | 三级实体消解 `resolve_entities(conn,day,run_id)`；`resolve_alias`/`revoke_alias`；纯本地 `jaro_winkler` |
+| `intervals.py` | `reclose_intervals(conn,from,to,relation)` / `reclose_day(conn,day)`——按 `valid_from` 重排重算 `valid_to` |
+| `runner.py` | `run_extract`（编排/幂等/失败隔离/后处理）、`export_day`（`--dump`） |
 
 ### 素材装配（`material.py`，决策 D1）
 
@@ -1675,8 +1679,10 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 - `kg_runs`（血缘/幂等锚）：`run_id` PK，唯一索引 `ux_kg_runs_day_hash_ver(day, raw_hash, prompt_ver)`；`status ∈ running|ok|partial|failed`；`channel_stats` JSON。
 - `kg_nodes`（实体节点）：`node_id` PK（`person_*`/`event_*`/`project_*`/`theme_*`…），`node_type`、`label`、`aliases` JSON、`first_day`/`last_day`、`src`、`run_id`。
 - `kg_edges`（append-only 边）：`edge_id` PK，`from_node`/`to_node`/`relation`/`edge_level`、`attributor`、`assertion_text`、`event_time`/`ingest_time`、`valid_from`/`valid_to`、`supersedes`/`superseded_at`/`invalidated`、`confidence`、`day`/`src`/`run_id`。
-- 三表均含 `created_at`/`updated_at`，默认 `datetime('now','+8 hours')`；索引：`idx_kg_nodes_type`、`idx_kg_nodes_label`、`idx_kg_edges_from`、`idx_kg_edges_to`、`idx_kg_edges_day`。
-- **S2 追加**（同文件同风格）：`kg_aliases`（实体消解，追加式可撤销带 `superseded_by`）、`kg_relations`；**S3**：`kg_emotions`/`kg_patterns`/`kg_worldview`。
+- `kg_relations`（稳定关系，S2）：`relation_id` PK（`sha1(day|from|to|relation)[:16]`），`from_node`/`to_node`/`relation`（`colleague_of`/`family_of`/`follows`…）、`edge_level`、`attributor`、`assertion_text`、`evidence`、`strength`、`valid_from`/`valid_to`、`day`/`src`/`run_id`。与 `kg_edges` 的「当日事件边」区分，**不参与区间闭合**。
+- `kg_aliases`（实体消解映射，S2，追加式可撤销）：PK `(alias, day, run_id)`，`canonical`、`method ∈ exact|fuzzy|manual`、`score`、`src`、`superseded_by`。`superseded_by` 取**反向指针**语义（本行撤销的旧记录 key `alias|day|run_id`），撤销即追加新行、旧行永不改（修正设计债②）。
+- 五表均含 `created_at`/`updated_at`，默认 `datetime('now','+8 hours')`；索引：`idx_kg_nodes_type`、`idx_kg_nodes_label`、`idx_kg_edges_from`、`idx_kg_edges_to`、`idx_kg_edges_day`、`idx_kg_relations_from`、`idx_kg_relations_to`、`idx_kg_relations_day`、`idx_kg_aliases_alias`。
+- **S3 追加**（同文件同风格）：`kg_emotions`/`kg_patterns`/`kg_worldview`。
 
 ### events 通道（`channels/events.py`）
 
@@ -1689,19 +1695,48 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
   - 节点 `first_day`/`last_day` 双向收敛（`_WIDEN_NODE`/`_EXTEND_NODE`）——补跑历史日会带来比现有 `first_day` 更早、比 `last_day` 更晚的记录。
 - **prompt 外置**：`config/kg_prompts/events@v1.md`（改 prompt 不动代码）；`PROMPT_VER=kg@v1`。
 
+### relations 通道（`channels/relations.py`，S2）
+
+- **素材路由**（计划 §3.2）：`_CHAT/_PHONE_NOTIF/_LONG_TERM`——稳定关系来自对话、通知署名与长期记忆。
+- **落点** `kg_relations`：实体间长期关联（`colleague_of`/`works_with`/`follows`…），与 events 的「当日事件边」分工——稳定关系 vs 当日事件。
+- **落库不变量（计划 §9，与 events 同档）**：无悬空边（前缀补占位节点）；L2 必带 `attributor`（缺失丢弃计数 `dropped_l2_no_attributor`）；L3 `strength ≤ 0.6` 钳制（计数 `clamped_l3`）；`relation_id = sha1(day|from|to|relation)[:16]` 内容派生幂等。
+- **prompt 外置**：`config/kg_prompts/relations@v1.md`。
+
+### todos 通道（`channels/todos.py`，S2）
+
+- **素材路由**（计划 §3.2）：`_CHAT/_GIT/_FILES/_LONG_TERM`——待办/承诺/计划来自对话与工作痕迹。
+- **落点** `kg_edges`（计划 §5 S2 只新增 `kg_relations`/`kg_aliases` 两表）：待办是「主体→事项」的时间性关联，天然带 `valid_from`/`valid_to`，交给 `intervals.reclose_intervals` 闭合生命周期。`relation` 用待办语汇（`has_todo`/`promised`/`plans`/`blocked_by`…）。
+- **落库不变量**：与 events 同档，且 `edge_id` 公式与 events **一致**（`sha1(day|from|to|relation|edge_level|assertion)[:16]`），故两通道对同一 payload 的同名边撞 PK 去重。
+- **prompt 外置**：`config/kg_prompts/todos@v1.md`。
+
+### 实体消解（`resolve.py`，S2）
+
+- **三级**（计划 §5 S2）：① `exact`——名称精确相同 → 合并到字典序最小 `node_id`（`method='exact'`）；② `fuzzy`——`weighted_score = 0.4*jaro_winkler + 0.3*context_overlap + 0.2*temporal_cooccurrence + 0.1*same_surname`，`≥0.85` 自动合并（生效）、`0.6~0.85` 写候选（不生效）；③ `manual`——人工确认（始终生效）。
+- **只针对 Person 节点**；`jaro_winkler` 纯本地实现（不引第三方依赖，R2）。邻接表取自当日 `kg_edges`（`_neighbors`）。
+- **追加式可撤销（修正设计债②）**：`kg_aliases` 只 `INSERT OR IGNORE`，旧行永不改。某行**生效** ⟺ 没有其它行通过 `superseded_by` 引用它；`revoke_alias` 追加一条 `canonical=alias`、`superseded_by=旧行key` 的新记录，撤销后该 alias 生效映射指向自身（即"未合并"）。`resolve_alias` 返回当前生效 canonical（fuzzy 候选因 `score<0.85` 被跳过 → 返回 `None`）。
+- **不改写** `kg_nodes`/`kg_edges`——消解结果由查询侧按需消费。
+
+### 区间闭合（`intervals.py`，S2）
+
+- **修正设计债①**：上游把「新边 `valid_from` 早于旧边」当错误**拒绝写入**，但手机批量迟到是常态（实测一次补发上万条）。本实现改为取该 `(from_node, to_node, relation)` 全部边（`invalidated=0`）**按 `valid_from` 排序**后重算 `valid_to`（旧边 `valid_to` = 下一条 `valid_from`，末条为 `NULL`），**接受乱序、不拒绝**。`ORDER BY (valid_from IS NULL), valid_from, edge_id`——`NULL` 排末位。
+- `reclose_intervals` 单组、`reclose_day` 当日全组；**只改派生列 `valid_to`**（顺带刷新 `updated_at`），不动边其它字段。
+
 ### 编排与幂等（`runner.py`）
 
 - **幂等**：`ux_kg_runs_day_hash_ver` 命中且 `status='ok'` → 整次 `skipped`（rows=0）；非 ok 的历史运行复用同一 `run_id` 原地重跑。
 - **失败隔离**：通道 `asyncio.gather(..., return_exceptions=True)` 并发执行，任一通道异常只记 `failed`，整次 status=`partial`（全失败=`failed`）。
 - **prompt 缺失即报错**（`load_prompt`，不做静默降级）；LLM 回复 JSON 解析失败重试 1 次（`parse_json_payload` 剥 ``` 围栏 + 取首尾花括号区间）。
 - LLM 走 `gacore.llm.get_llm([], os.environ, bind_tools=False)`（零工具单轮，与 feedback/memory_maintenance 同法）。
+- **后处理（S2）**：通道全部落库后、且有新写入行时，`_postprocess(conn, day, run_id)` 依次跑 `resolve_entities` + `reclose_day`（确定性收尾，不依赖 LLM）；失败只记 `_postprocess.status='failed'`（整次降 `partial`），**不拖垮已落库的通道产物**。
+- `export_day` 的 `_DAY_SCOPED_SQL` 覆盖五张表：`kg_runs`/`kg_nodes`/`kg_edges`/`kg_relations`/`kg_aliases`。
 
 ### 实跑验证（2026-10-18）
 
-- `uv run --package gacore python -m gacore.langTrack.extract --day 2026-10-16` → `status=ok rows=32`（`material_chars=29875`，`raw_hash=39b11196f4e7`）；库内 `kg_runs=1`、`kg_nodes=14`、`kg_edges=18`。
-- 二次直跑（不带 `--force`）→ `status=skipped rows=0`（幂等命中）。
-- 封闭测试 25 例（`tests/test_langTrack_extract_{schema,material,events}.py`），不触网、不触真实库、不调真实 LLM。
+- S1：`--day 2026-10-16` → `status=ok rows=32`（`material_chars=29875`，`raw_hash=39b11196f4e7`）；库内 `kg_runs=1`、`kg_nodes=14`、`kg_edges=18`。二次直跑（不带 `--force`）→ `status=skipped rows=0`（幂等命中）。
+- S2：`--day 2026-10-16 --force` → `status=ok rows=43`；通道 `events=21`/`relations=16`/`todos=6`，`_postprocess=ok`。库内当日 `kg_relations=10`、`kg_edges` 已闭合 `valid_to` 3 条；无悬空边/悬空关系，`kg_relations` 无 L2 缺 attributor、无 L3 `strength>0.6`。
+- 封闭测试（S1 25 例 + S2 新增 3 文件）不触网、不触真实库、不调真实 LLM。
 
-### 未纳入 S1（见计划 §5/§12）
+### 未纳入（见计划 §5/§12）
 
-- S2 `relations`+`todos` 通道 + 实体消解；S3 `emotions`/`patterns`/`worldview`（只产候选，升格机制上游空白、显式不做）；S4 `_KG` SourceSpec 接日报（priority 105 最低、默认停用）；S5 调度 + 灰度验收。
+- S3 `emotions`/`patterns`/`worldview`（只产候选，升格机制上游空白、显式不做）；S4 `_KG` SourceSpec 接日报（priority 105 最低、默认停用）；S5 调度 + 灰度验收。
+- 消解阈值观察项：实跑中 `我（用户）`/`用户（本人）`（同一人的两种写法）fuzzy 得分 0.55，恰低于 `0.6` 候选线，故当日无别名行——机制正常（能算分、够线才落行），阈值/权重是否调优留待 S3 的候选复核阶段评估。

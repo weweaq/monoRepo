@@ -1322,3 +1322,24 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 **偏差说明**：①CLI 初版漏调 `load_dotenv()`（`Config.default()` 不读 .env），直跑时 provider key 缺失致首次实跑挂起；已在 `__main__.py` 边界补 `load_dotenv()`，与仓内 CLI 惯例（cli/rerun/scheduler）一致。②S1 只建三表，计划中的 `kg_aliases`（实体消解）随 S2 追加（同文件同风格）。③架构图（codemap 产物）本次 codemap 未重跑，新增 `EX`（extract 层）与 `KG`（kg_* 存储）节点、两条数据流边（DT→EX 完整取数详情 / SIP→EX 回退 detail_body / EX→KG）已逐一对照真实源码符号（`extract/__main__.py`·`runner.run_extract`·`material.load_material`·`channels/events.SPEC`·`schema.migrate_extract_tables`）手改并核实。④本阶段不接入日报（`_KG` SourceSpec 属 S4），现有 12 源与日报链路零改动。
 
 **待办更新**：S2 `relations`+`todos` 通道 + 实体消解（`kg_aliases`）；S3 `emotions`/`patterns`/`worldview`（只产候选）；S4 `_KG` 接日报（priority 105 最低、默认停用）；S5 调度（23:30）+ 灰度验收。观察项：events 边质量（L2 attributor 缺失率、L3 钳制率）随实跑累积再评估 prompt。
+
+## [2026-10-18] langTrack KG 抽取层 S2：relations/todos 通道 + 实体消解 + 区间闭合
+
+**背景**：续 S1（骨架 + events 通道），按 `docs/kg-extract-plan.md` §5 落地 S2：新增 relations（稳定关系）与 todos（待办/承诺/计划）两通道，并把上游设计两处核心缺陷就地修正——实体消解改为**追加式可撤销**、区间闭合改为**按 `valid_from` 重排后重算**（接受乱序迟到数据）。全程遵守 S1 约束：R6 只增不改、R9 密钥顺序、R4 小步提交、不破坏现有功能、封闭测试不触网。
+
+**已完成**：
+- `schema.py` 追加 `kg_relations`（稳定关系，`relation_id` 内容派生 PK）与 `kg_aliases`（消解映射，PK `(alias,day,run_id)`，`superseded_by` 反向指针）两表（R6：`CREATE IF NOT EXISTS` + `created_at`/`updated_at` + 索引）。
+- `channels/relations.py`：3 源路由（`_CHAT/_PHONE_NOTIF/_LONG_TERM`）落 `kg_relations`；与 events 分工「稳定关系 vs 当日事件」，不参与区间闭合。落库不变量同档（无悬空边 / L2 必带 attributor / L3 `strength≤0.6`）。
+- `channels/todos.py`：4 源路由（`_CHAT/_GIT/_FILES/_LONG_TERM`）落 `kg_edges`（待办带 `valid_from`/`valid_to`，交 `intervals` 闭合生命周期）；`edge_id` 公式与 events 一致，同 payload 同名边撞 PK 去重。
+- `channels/__init__.py`：注册表追加 `_RELATIONS_SPEC`/`_TODOS_SPEC`（新增通道只需一行）。
+- `resolve.py`：三级实体消解（`exact`/`fuzzy`/`manual`），只针对 Person；`jaro_winkler` 纯本地实现（不引第三方依赖，R2）；`resolve_alias`/`revoke_alias` 追加式可撤销（旧行永不改，撤销用反向指针 `superseded_by`）。
+- `intervals.py`：`reclose_intervals`/`reclose_day` 按 `valid_from` 全量重排后重算 `valid_to`（`NULL` 排末位），只改派生列。
+- `runner.py`：新增 `_postprocess`（消解 + 闭合，失败只记账不拖垮通道产物，整次降 `partial`）；`export_day` 的 `_DAY_SCOPED_SQL` 补 `kg_relations`/`kg_aliases`。
+- 两个外置 prompt `config/kg_prompts/relations@v1.md`、`todos@v1.md`。
+- 新增封闭测试三文件：`test_langTrack_extract_relations.py`、`test_langTrack_resolve.py`、`test_langTrack_interval_closure.py`（精确/模糊/候选/低于阈值/撤销/幂等/非 Person；顺序/乱序/撤销后重算/只改派生列/当日全组）。
+
+**实测验证**：`--day 2026-10-16 --force` 实跑 `status=ok rows=43`；通道 `events=21`/`relations=16`/`todos=6`，`_postprocess=ok`。库内当日 `kg_relations=10`、`kg_edges` 已闭合 `valid_to` 3 条；无悬空边/悬空关系，`kg_relations` 无 L2 缺 attributor、无 L3 `strength>0.6`。全仓 ruff 全绿；`uv run --all-packages pytest` 1444 passed / 5 skipped（S1 为 1423，净增 21 例）。
+
+**偏差说明**：①`kg_aliases` 的撤销语义取**反向指针**（本行指向被撤销旧行 key）——上游「旧行指向新行」必须 UPDATE 旧行，与「只追加、旧行永不改」铁律冲突，故反转指针方向（计划 §6 ② 已记录）。②区间闭合放弃上游的「乱序拒绝」，改为全量重排重算（手机批量迟到是常态）。③S1 的 events 测试因通道由 1 条增至 3 条，`_setup` 需写齐三通道 prompt 桩；对 LLM 调用计数敏感的用例已用 `only=["events"]` 隔离。④本阶段仍不接入日报（`_KG` SourceSpec 属 S4），现有 12 源与日报链路零改动。⑤消解阈值观察项：实跑中 `我（用户）`/`用户（本人）`（同一人两种写法）fuzzy 得分 0.55，恰低于 `0.6` 候选线，当日无别名行——机制正常（够线才落行），阈值/权重调优留待 S3 候选复核阶段评估。
+
+**待办更新**：S3 `emotions`/`patterns`/`worldview`（只产候选，升格机制上游空白、显式不做）；S4 `_KG` 接日报（priority 105 最低、默认停用）；S5 调度（23:30）+ 灰度验收。观察项：relations/todos 边质量与消解候选命中率随实跑累积再评估 prompt 与阈值。
