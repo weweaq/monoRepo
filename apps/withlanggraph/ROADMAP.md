@@ -1343,3 +1343,22 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 **偏差说明**：①`kg_aliases` 的撤销语义取**反向指针**（本行指向被撤销旧行 key）——上游「旧行指向新行」必须 UPDATE 旧行，与「只追加、旧行永不改」铁律冲突，故反转指针方向（计划 §6 ② 已记录）。②区间闭合放弃上游的「乱序拒绝」，改为全量重排重算（手机批量迟到是常态）。③S1 的 events 测试因通道由 1 条增至 3 条，`_setup` 需写齐三通道 prompt 桩；对 LLM 调用计数敏感的用例已用 `only=["events"]` 隔离。④本阶段仍不接入日报（`_KG` SourceSpec 属 S4），现有 12 源与日报链路零改动。⑤消解阈值观察项：实跑中 `我（用户）`/`用户（本人）`（同一人两种写法）fuzzy 得分 0.55，恰低于 `0.6` 候选线，当日无别名行——机制正常（够线才落行），阈值/权重调优留待 S3 候选复核阶段评估。
 
 **待办更新**：S3 `emotions`/`patterns`/`worldview`（只产候选，升格机制上游空白、显式不做）；S4 `_KG` 接日报（priority 105 最低、默认停用）；S5 调度（23:30）+ 灰度验收。观察项：relations/todos 边质量与消解候选命中率随实跑累积再评估 prompt 与阈值。
+
+## [2026-10-18] langTrack KG 抽取层 S3：emotions/patterns/worldview 候选通道
+
+**背景**：续 S2，按 `docs/kg-extract-plan.md` §5 S3 落地三通道（emotions 情绪信号、patterns 模式候选、worldview 信念候选）+ 三张表。核心约束：patterns/worldview **只产候选**（confidence 上限 0.7/0.6、status 恒 `candidate`），候选→规律升格机制上游文档空白、本阶段显式不做（计划 §12）。
+
+**已完成**：
+- `schema.py` 追加三表（R6 只增不改 + `created_at`/`updated_at` + 索引）：`kg_emotions`（`valence` -1..1、`arousal`/`intensity` 0..1）、`kg_patterns`（`confidence ≤0.7`、`status` 恒 `candidate`）、`kg_worldview`（`confidence ≤0.6`、`status` 恒 `candidate`）。
+- `channels/common.py`：候选类通道共享落库原语（`collect_nodes`/`ensure_node`/`insert_nodes`/`derived_id`/`clamp_score`/`clamp_range`）——**不改动存量 events/relations/todos 三通道**（本步零回归）。
+- `channels/emotions.py`（3 源）/`patterns.py`（4 源）/`worldview.py`（2 源）：`handle` 落各自表；`subject` 必填（缺失丢弃并计数 `dropped_malformed`），不在 `nodes` 时补占位（无悬空引用）；confidence 超上限钳制并计数 `clamped_confidence`；内容派生主键 + `INSERT OR IGNORE` → 重跑幂等。
+- `channels/__init__.py` 注册表追加三 `SPEC`（共 6 通道）。
+- `runner.py` 的 `_DAY_SCOPED_SQL` 补三表（`export_day` 覆盖八表）。
+- 三个外置 prompt `config/kg_prompts/{emotions,patterns,worldview}@v1.md`（写明候选上限与抽取边界）。
+- 新增封闭测试 `tests/test_langTrack_extract_candidates.py`（值域/上限钳制、缺 subject 丢弃、占位无悬空、`status` 恒 candidate、重跑幂等、export 覆盖）；events 测试 `_setup` 改为按 `CHANNELS` 注册表生成 prompt 桩（后续加通道不再改测试）。
+
+**实测验证**：`--day 2026-10-16 --force` → `status=ok rows=88`；六通道 `events=17`/`relations=16`/`todos=10`/`emotions=2`/`patterns=33`/`worldview=10`，`_postprocess=ok`。库内当日 `kg_emotions=1`/`kg_patterns=16`/`kg_worldview=5`；`patterns` 无 `confidence>0.7`、`worldview` 无 `confidence>0.6`、两表 `status` 全 `candidate`、三表无悬空 `subject`。全仓 ruff 全绿；`uv run --all-packages pytest` 1453 passed / 5 skipped（S2 为 1444，净增 9）。
+
+**偏差说明**：①三通道共用 `channels/common.py` 原语而非各自复制——避免 6 通道下膨胀成 6 份重复；存量三通道保留原实现不重构（本步零回归）。②"候选"以 confidence 上限 + `status='candidate'` 双落点表达，升格逻辑显式不做（计划 §12）。③本阶段仍不接日报（`_KG` 属 S4），现有 12 源与日报链路零改动。④S3 实跑中 events/relations/todos 行数与 S2 略有差异（LLM 非确定性），属正常抖动，不影响任何不变量。
+
+**待办更新**：S4 `_KG` 接日报（priority 105 最低、默认停用）；S5 调度（23:30）+ 灰度验收。观察项：三候选通道产出量与质量随实跑累积再评估 prompt 与上限阈值；候选升格机制待独立设计。

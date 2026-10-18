@@ -65,8 +65,8 @@ flowchart TD
         RW["原始层 events"]
         ET["ETL 事实层"]
         OU["读方出口<br/>fact_card·report·dashboard·qq_push"]
-        EX["KG 抽取层 langTrack/extract<br/>python -m gacore.langTrack.extract<br/>material.load_material(day,cfg)<br/>channels/{events,relations,todos}.SPEC<br/>runner.run_extract → resolve.resolve_entities<br/>+ intervals.reclose_day (后处理)"]
-        KG[("langTrack.db kg_* 表<br/>kg_runs/kg_nodes/kg_edges<br/>kg_relations/kg_aliases<br/>schema.migrate_extract_tables")]
+        EX["KG 抽取层 langTrack/extract<br/>python -m gacore.langTrack.extract<br/>material.load_material(day,cfg)<br/>channels/{events,relations,todos,emotions,patterns,worldview}.SPEC<br/>runner.run_extract → resolve.resolve_entities<br/>+ intervals.reclose_day (后处理)"]
+        KG[("langTrack.db kg_* 表<br/>kg_runs/kg_nodes/kg_edges<br/>kg_relations/kg_aliases<br/>kg_emotions/kg_patterns/kg_worldview<br/>schema.migrate_extract_tables")]
     end
 
     subgraph DAILY["⑥ 日报链路 v3 (daily_info_pack · feedback · review_server)"]
