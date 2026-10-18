@@ -1362,3 +1362,27 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 **偏差说明**：①三通道共用 `channels/common.py` 原语而非各自复制——避免 6 通道下膨胀成 6 份重复；存量三通道保留原实现不重构（本步零回归）。②"候选"以 confidence 上限 + `status='candidate'` 双落点表达，升格逻辑显式不做（计划 §12）。③本阶段仍不接日报（`_KG` 属 S4），现有 12 源与日报链路零改动。④S3 实跑中 events/relations/todos 行数与 S2 略有差异（LLM 非确定性），属正常抖动，不影响任何不变量。
 
 **待办更新**：S4 `_KG` 接日报（priority 105 最低、默认停用）；S5 调度（23:30）+ 灰度验收。观察项：三候选通道产出量与质量随实跑累积再评估 prompt 与上限阈值；候选升格机制待独立设计。
+
+## [2026-10-18] langTrack KG 抽取层 S4：抽取产物接入日报信息包（`_KG` 源）
+
+**背景**：续 S3，按 `docs/kg-extract-plan.md` §5 S4 落地：把抽取层产物接入日报信息包（`daily_info_pack.py` 的 `SOURCES` 注册表），使日报 LLM 能读到"谁做了什么、与谁、何种确定度"的结构化当日图摘要。核心约束：只**追加**一条 `SourceSpec`，不动现有 12 源与既有 builder；只读、不触发抽取、不建表、不写文件（建表是 extract CLI 职责）；priority 105 最低（预算紧张时先被熔断丢弃）；默认停用，出问题改 JSON 秒关、无需回滚代码。
+
+**已完成**：
+- `daily_info_pack.py` 新增 `_KG` 源：
+  - 模块级常量组 `_KG_CAP=1200` / `_KG_PERSON_TOP=6` / `_KG_EDGE_TOP=6` / `_KG_EMOTION_TOP=4` / `_KG_TODO_TOP=6` / `_KG_CLIP=40`（单条证据截断，唯一截断点军规②）。
+  - 只读读层 `_kg_day_graph(date, cfg)`：`sqlite3.connect("file:…?mode=ro", uri=True)` 读 `langTrack.db` 的 `kg_*` 表；detail 全量复用 `extract.runner._DAY_SCOPED_SQL`（惰性 import，与 `--dump` 表清单单一真源）；`kg_*` 表未建吞 `sqlite3.OperationalError` → `None`（不判失败）。
+  - builder `_build_kg`：人物 top-N（按当日关联边数 degree）+ 未完成待办 top-N（`src='todos' AND valid_to IS NULL`）+ 关系变化 top-N（`edge_level` 升序、`confidence` 降序）+ 情绪基调 top-N（按 intensity）；pack=各节行级渲染、detail=当日 `kg_*` 全量逐条（不挑选不压缩，供 /health 单源页归因）。
+  - 测试注入点 `_KG_FN = _kg_day_graph`（风格同 `_BILLI_FN`）。
+  - `SOURCES` 追加 `SourceSpec("_KG", _KG_CAP, 105, _build_kg)`（priority 105 >100 且 %5==0，满足 `test_registry_priority_strictly_increasing_in_pack_order`）。
+- 空态契约：库缺失 / `kg_*` 表未建 / 当日无 `kg_runs` 行 / 有运行但各表零行 → 统一 `- 当日无 KG 抽取结果（抽取未运行或无产出）`（命中 `_MISSING_DATA_RE` → `missing_data`），绝不冒充 ok；失败走外层兜底 `- 该源失败：` sentinel。
+- 修复既有 bug：`build_info_pack_report` 对 `status=disabled` 的源仍误标 `note="未进包:预算熔断"` → 条件改为 `st["status"] not in ("empty", "disabled")`（停用源本就不参与装配，保留 config 停用注记）。
+- `config/info_pack.json` 追加 `"_KG": {"enabled": false, "cap": 1200, "priority": 105}`（本地运行时配置，`apps/withlanggraph/.gitignore:43` 已忽略，不入库）。
+- `tests/test_source_registry.py`：`_inject_failure` 登记 `_KG` 分支（打桩 `dip._KG_FN`，因 `_kg_day_graph` 自身吞表缺失降级为 None 不抛，须打桩读图入口才能触发 builder 内层 try/except）；`test_classify_missing_data_variants` 补入 `- 当日无 KG 抽取结果（抽取未运行或无产出）`。
+- `data_catalog.py`：模块 docstring 注明 `kg_*` 派生表与 `data/logs/pack_detail` 目录分别由 `_KG` 源与 `extract/material.py` 消费（走"库外文件"清单登记，不进 events 事件类型映射）；`_collect_files` 追加 `data/logs/pack_detail/*/` 清单条目。
+- 新增封闭测试 `tests/test_info_pack_kg.py`（9 例）：库缺失 / 表未建 / 当日无运行 / 零产出 → `missing_data`；满数据进 pack 且 detail=全量表；各节 TOP 收敛；config 停用 → `status=disabled` 且不进包；cap 收紧触发框架行截断。合成库落盘 tmp（DDL 取自 `extract.schema.EXTRACT_SCHEMA`），外部源（B站/Edge/NCM/git）一律 monkeypatch 打桩，不触真实库/网络/子进程。
+
+**实测验证**：`_build_kg('2026-10-16', Config.default())` 只读实跑（真实 `data/langTrack.db`）→ title `〔KG·当日图摘要〕`、`status=ok`、pack 1071 字符、detail 57003 字符；运行头 `节点 57 · 当日边 63（失效 0）· 稳定关系 21 · 情绪 1 · 模式候选 16 · 世界观候选 5`；人物 Top/未完成待办/关系变化/情绪基调四节均正常渲染。全仓 `uv run ruff check apps packages tests` 全绿；`uv run --all-packages pytest` 1462 passed / 5 skipped（S3 为 1453，净增 9）。
+
+**偏差说明**：①计划书原定 `cap=600` → 实测 2026-10-16 日摘要 1071 字符，600 会截掉情绪段并触发指向 `langTrack_stats` 的补查提示（而 `_KG` 真源是 `kg_*` 表而非 `langTrack_stats`），故按实测抬到 1200 并在常量注释记口径；各节 TOP 已先收敛，超限仍由框架行截断兜底。②"默认停用"落在本地 `config/info_pack.json`（gitignore，非入库配置），代码默认仍 enabled——灰度须显式开 `enabled=true`（计划 §5 S5 已列）。③`_kg_day_graph` 直读 `langTrack.db`，`extract` 与 `daily_info_pack` 同属 `gacore` 包内（非跨包），R2 合规。④唯一存量行为改动是停用源误报 bug 修复（缺陷修复，非行为变更）；现有 12 源 builder 与 SourceSpec 一字未动。⑤`_KG` 不进 system prompt 注入面（`fact_card` compact 仍是 chat 唯一注入出口），只进当日信息包落盘 + 本人邮箱。
+
+**待办更新**：S5 调度——`config/schedule.json` 新增 `kg-extract` job（23:30）；灰度开启 `_KG`（`config/info_pack.json` `"_KG".enabled=true`）；按军规⑥观测一周 `info_pack_health.jsonl`，确认 `_KG` status 与 `chars` 稳定。观察项：`_KG` 上线后 `full_chars` 恒大于 cap 或 status 长期非 ok = 采样设计有问题；抽取产物质量（人物消解命中率、待办闭合率）随实跑累积再评估。

@@ -1642,9 +1642,9 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 
 ---
 
-## 9.28 langTrack KG 抽取层（S1 骨架 + S2 relations/todos/消解/闭合 + S3 候选通道，2026-10-18）
+## 9.28 langTrack KG 抽取层（S1 骨架 + S2 relations/todos/消解/闭合 + S3 候选通道 + S4 `_KG` 接日报，2026-10-18）
 
-> 落地计划 [`kg-extract-plan.md`](./kg-extract-plan.md)。本节记录**已实现**的技术事实：S1（骨架 + events 通道）、S2（relations/todos 通道 + 实体消解 + 区间闭合）、S3（emotions/patterns/worldview 候选通道）。S4~S5（`_KG` 接日报、调度灰度）尚未实现，见计划 §5。
+> 落地计划 [`kg-extract-plan.md`](./kg-extract-plan.md)。本节记录**已实现**的技术事实：S1（骨架 + events 通道）、S2（relations/todos 通道 + 实体消解 + 区间闭合）、S3（emotions/patterns/worldview 候选通道）、S4（`_KG` 源接入日报信息包）。S5（调度 + 灰度开启）尚未实施，见计划 §5。
 
 ### 定位与边界（决策 D2）
 
@@ -1751,15 +1751,28 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 - **后处理（S2）**：通道全部落库后、且有新写入行时，`_postprocess(conn, day, run_id)` 依次跑 `resolve_entities` + `reclose_day`（确定性收尾，不依赖 LLM）；失败只记 `_postprocess.status='failed'`（整次降 `partial`），**不拖垮已落库的通道产物**。
 - `export_day` 的 `_DAY_SCOPED_SQL` 覆盖八张表：`kg_runs`/`kg_nodes`/`kg_edges`/`kg_relations`/`kg_aliases`/`kg_emotions`/`kg_patterns`/`kg_worldview`。
 
+### 日报接入（`_KG` 源，S4）
+
+- **接入方式**：`src/gacore/daily_info_pack.py` 的 `SOURCES` **追加**一条 `SourceSpec("_KG", _KG_CAP, 105, _build_kg)`——priority 105（>100 且 `%5==0`）排最后，预算紧张时最先被 `_assemble_blocks` 熔断丢弃。现有 12 源 builder 与 SourceSpec 一字未动。
+- **只读边界**：builder 读 `cfg.root/data/langTrack.db` 的 `kg_*` 表（`sqlite3.connect(f"file:{db}?mode=ro", uri=True)`），**不触发抽取、不建表、不写文件**（建表是 `extract` CLI 职责）；库缺失 / `kg_*` 表未建（吞 `sqlite3.OperationalError`）→ 返回 `None`。
+- **读层与常量**：`_kg_day_graph(date, cfg)` 读当日图摘要（惰性 import `extract.runner._DAY_SCOPED_SQL` 作 detail 单一真源）；测试注入点 `_KG_FN = _kg_day_graph`（风格同 `_BILLI_FN`，`monkeypatch` 此名即隔离真实库）。常量 `_KG_CAP=1200`、`_KG_PERSON_TOP=6`、`_KG_EDGE_TOP=6`、`_KG_EMOTION_TOP=4`、`_KG_TODO_TOP=6`、`_KG_CLIP=40`（单条证据/陈述字符截断，唯一截断点军规②）。
+- **builder `_build_kg(date, cfg)`**：title `〔KG·当日图摘要〕`；pack=四节行级渲染——①运行头（各表当日计数 `_KG_COUNT_SQL`）②人物 Top-N（`_KG_PERSON_SQL`，按当日 `invalidated=0` 边数 degree 降序）③未完成待办 Top-N（`_KG_TODO_SQL`，`src='todos' AND valid_to IS NULL`）④关系变化 Top-N（`_KG_EDGE_SQL`，`edge_level` 升序 + `confidence` 降序）⑤情绪基调 Top-N（`_KG_EMOTION_SQL`，按 intensity）；detail=当日 `kg_*` 八表**全量逐条**（不挑选不压缩，供 /health 单源页逐层归因）。
+- **空态契约**：库缺失 / 表未建 / 当日无 `kg_runs` 行 / 有运行但各表零行 → 统一 `_KG_MISSING = "- 当日无 KG 抽取结果（抽取未运行或无产出）"`（命中 `_MISSING_DATA_RE` → `classify_body` 判 `missing_data`），**绝不冒充 ok**；builder 抛异常走外层兜底 `- 该源失败：` sentinel。
+- **默认停用**：本地 `config/info_pack.json` 追加 `"_KG": {"enabled": false, "cap": 1200, "priority": 105}`（该文件 `apps/withlanggraph/.gitignore` 已忽略，非入库配置；代码默认仍 enabled，灰度须显式开）。停用态 `status=disabled`、`note="已停用(config)"`，不进包。
+- **注入面**：`_KG` **不进** chat system prompt 注入面（`fact_card` compact 仍是 chat 唯一注入出口），只进当日信息包落盘 + 本人邮箱。
+- **关联既有缺陷修复**：`build_info_pack_report` 对 `status=disabled` 的源原会误标 `note="未进包:预算熔断"`，条件改为 `st["status"] not in ("empty", "disabled")`。
+- **测试**：新增封闭测试 `tests/test_info_pack_kg.py`（9 例，合成库落盘 tmp、外部源全 stub）；`tests/test_source_registry.py::_inject_failure` 登记 `_KG` 分支（打桩 `dip._KG_FN`）。
+
 ### 实跑验证（2026-10-18）
 
 - S1：`--day 2026-10-16` → `status=ok rows=32`（`material_chars=29875`，`raw_hash=39b11196f4e7`）；库内 `kg_runs=1`、`kg_nodes=14`、`kg_edges=18`。二次直跑（不带 `--force`）→ `status=skipped rows=0`（幂等命中）。
 - S2：`--day 2026-10-16 --force` → `status=ok rows=43`；通道 `events=21`/`relations=16`/`todos=6`，`_postprocess=ok`。库内当日 `kg_relations=10`、`kg_edges` 已闭合 `valid_to` 3 条；无悬空边/悬空关系，`kg_relations` 无 L2 缺 attributor、无 L3 `strength>0.6`。
 - S3：`--day 2026-10-16 --force` → `status=ok rows=88`；六通道 `events=17`/`relations=16`/`todos=10`/`emotions=2`/`patterns=33`/`worldview=10`，`_postprocess=ok`。库内当日 `kg_emotions=1`、`kg_patterns=16`、`kg_worldview=5`；`kg_patterns` 无 `confidence>0.7`、`kg_worldview` 无 `confidence>0.6`，两表 `status` 全为 `candidate`，三表均无悬空 `subject`。
-- 封闭测试（S1 25 例 + S2 3 文件 + S3 1 文件）不触网、不触真实库、不调真实 LLM。
+- S4：`_build_kg("2026-10-16", Config.default())` 只读实跑真实 `data/langTrack.db` → title `〔KG·当日图摘要〕`、`status=ok`、`pack=1071` 字符、`detail=57003` 字符；运行头 `节点 57 · 当日边 63（失效 0）· 稳定关系 21 · 情绪 1 · 模式候选 16 · 世界观候选 5`；人物 Top / 未完成待办 / 关系变化 / 情绪基调四节正常渲染（cap 1200 未触发截断）。
+- 封闭测试（S1 25 例 + S2 3 文件 + S3 1 文件 + S4 1 文件）不触网、不触真实库、不调真实 LLM。
 
 ### 未纳入（见计划 §5/§12）
 
-- S4 `_KG` SourceSpec 接日报（priority 105 最低、默认停用）；S5 调度 + 灰度验收。
+- S5 调度 + 灰度验收：`config/schedule.json` 新增 `kg-extract` job（23:30）、灰度开启 `_KG`（`config/info_pack.json` `"_KG".enabled=true`）、按军规⑥观测一周 `info_pack_health.jsonl`。
 - 候选→规律升格机制、图查询层、周期聚合：上游文档空白/依赖前项，属后续独立阶段（计划 §12），本阶段 `patterns`/`worldview` 只落 `status='candidate'` 的候选。
 - 消解阈值观察项：实跑中 `我（用户）`/`用户（本人）`（同一人的两种写法）fuzzy 得分 0.55，恰低于 `0.6` 候选线，故当日无别名行——机制正常（能算分、够线才落行），阈值/权重是否调优留待候选复核阶段评估。

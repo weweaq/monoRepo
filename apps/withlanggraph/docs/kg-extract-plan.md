@@ -1,6 +1,6 @@
 # langTrack 结构化知识图谱（KG）抽取层 · 落地实现计划
 
-> 状态：S1（骨架 + events 通道）、S2（relations/todos 通道 + 实体消解 + 区间闭合）、S3（emotions/patterns/worldview 候选通道）已落地（2026-10-18）；S4~S5 未实施 · 编写日期：2026-10-17
+> 状态：S1（骨架 + events 通道）、S2（relations/todos 通道 + 实体消解 + 区间闭合）、S3（emotions/patterns/worldview 候选通道）、S4（`_KG` 源接入日报信息包）已落地（2026-10-18）；S5 未实施 · 编写日期：2026-10-17
 > 目标：把现有"笼统"的日报，升级为**按日结构化抽取 + 可溯源**的素材，且**不破坏现有日报功能**
 > 依据：外部设计文档《日报知识库系统 · 实现技术文档 v2.0》+ 对 mono 现有代码的实测核实
 > 上游设计缺口已在本方案中修正（见 §6 两个设计债）
@@ -111,7 +111,7 @@
                                     langTrack.db 新增 kg_* 表（R6 合规）
                                                         │
 【新增·接日报】                                          ▼
-                          _build_kg（新 SourceSpec `_KG`，priority 105=最低，cap 600）
+                          _build_kg（新 SourceSpec `_KG`，priority 105=最低，cap 1200）
                                                         │
                                               pack_body ──► 日报 LLM（背景素材）
                                               detail_body ──► health 归因
@@ -312,28 +312,35 @@ tests/test_langTrack_interval_closure.py   # 顺序 5 场景 + 乱序补录场�
 **要点**：`patterns`/`worldview` 只产出**候选**（confidence 上限 0.7 / 0.6），不宣布规律；候选升格留给后续独立阶段（设计文档此处空白，本方案显式标注为**未完成设计**，不在本阶段实现）
 **提交**：`feat(langTrack): 新增 emotions/patterns/worldview 通道`
 
-### S4 接入日报信息包（1 天）
+### S4 接入日报信息包（1 天）✅ 已落地（2026-10-18）
 
 **改动现有文件（最小化，逐条列明）**
 1. `src/gacore/daily_info_pack.py`
-   - 加常量 `_KG_CAP = 600`
+   - 加常量 `_KG_CAP = 1200`（原计划 600，实测后上调，见下方"落地偏差"）
    - 加模块级 seam `_KG_FN`（供测试 monkeypatch，风格同 `_BILLI_FN`）
    - 加 builder `_build_kg(date, cfg) -> tuple[str, str, str]`：
      - 读 `kg_*` 汇总当日图摘要（人物 top-N + 关系变化 + 情绪基调 + 未完成待办）
-     - **DB/表缺失时返回 `("- 当日无 KG 抽取结果（抽取未运行）", "", "")`** —— 命中现有 `_MISSING_DATA_RE` 的 `当日无`，**无需改 `classify_body`**
+     - **DB/表缺失时返回 `("- 当日无 KG 抽取结果（抽取未运行或无产出）", "", "")`** —— 命中现有 `_MISSING_DATA_RE` 的 `当日无`，**无需改 `classify_body`**
    - `SOURCES` **追加一条**：`SourceSpec("_KG", _KG_CAP, 105, _build_kg)`
      - priority=105：>100（排最后）、且满足 `% 5 == 0`（`test_registry_priority_strictly_increasing_in_pack_order` 的约束）
-2. `config/info_pack.json`：加 `"_KG": {"enabled": false, "cap": 600, "priority": 105}`（**默认停用**，灰度时再开）
+2. `config/info_pack.json`：加 `"_KG": {"enabled": false, "cap": 1200, "priority": 105}`（**默认停用**，灰度时再开）
 3. `tests/test_source_registry.py`：**必须**在 `_inject_failure` 的 `else` 前加分支
    ```python
    elif key == "_KG":
        monkeypatch.setattr(dip, "_KG_FN", _raise)
    ```
    （不加则 `test_every_builder_failure_follows_failed_sentinel` 会 `pytest.fail` 提醒补齐——这是设计好的强制同步点）
-4. 可选：`tests/test_source_registry.py::test_classify_missing_data_variants` 补一行断言 `"- 当日无 KG 抽取结果（抽取未运行）"`
+4. 可选：`tests/test_source_registry.py::test_classify_missing_data_variants` 补一行断言 `"- 当日无 KG 抽取结果（抽取未运行或无产出）"`
 
 **新增测试**：`tests/test_info_pack_kg.py`（满数据/空数据/config 停用/cap 生效/失败 sentinel）
 **可选新增**：`src/gacore/tools/kg_tools.py`（图查询工具：2 跳查询、关系演化链），供 agent 按需下钻
+
+**落地偏差（2026-10-18）**：
+- **cap 600 → 1200**：实测 2026-10-16 当日图摘要为 1071 字符，600 会截掉情绪段并触发指向 `langTrack_stats` 的补查提示（而 `_KG` 真源是 `kg_*` 表而非 `langTrack_stats`），故按实测上调；各节 TOP（人物 6 / 待办 6 / 关系变化 6 / 情绪 4）已先收敛，超限仍由框架行截断兜底。
+- **空态文案**：定为 `- 当日无 KG 抽取结果（抽取未运行或无产出）`（比计划多"或无产出"，覆盖"运行了但零产出"形态）。
+- **只读读层**：新增 `_kg_day_graph` 直读 `langTrack.db` 的 `kg_*`（`mode=ro`），detail 全量复用 `extract.runner._DAY_SCOPED_SQL`；`kg_*` 表未建吞 `sqlite3.OperationalError` → `None`，不判失败。
+- **既有缺陷修复**：`build_info_pack_report` 对 `status=disabled` 源原会误标 `note="未进包:预算熔断"`，条件改为 `st["status"] not in ("empty", "disabled")`。
+- **未做**：`kg_tools.py`（图查询工具）未新增——依赖"图查询层"，属后续独立阶段（§12）。
 
 **验证（证明"不影响现有功能"）**
 ```powershell
@@ -427,7 +434,7 @@ uv run --package gacore python -m gacore.backfill_health --day 2026-10-16   # re
 
 ## §11 文档同步清单（R5 三处，逐阶段）
 
-| 阶段 | `langTrack-roadmap.md` | `langTrack-tech.md` | `architecture-flow.mmd` |
+| 阶段 | `ROADMAP.md` | `langTrack-tech.md` | `architecture-flow.mmd` |
 |---|---|---|---|
 | S1 | 追加执行记录 | 加"KG 抽取层"节（新表/CLI/数据流） | 加 `extract/` 节点（codemap 复审） |
 | S2 | 追加 | 补消解与 interval closure 说明 | 补 resolve/intervals 节点 |
