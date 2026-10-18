@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from gacore.config import Config  # noqa: E402
 from gacore.daily_info_pack import write_pack_detail  # noqa: E402
 from gacore.langTrack.extract import runner  # noqa: E402
+from gacore.langTrack.extract.channels import CHANNELS  # noqa: E402
 from gacore.langTrack.extract.runner import export_day, run_extract  # noqa: E402
 from gacore.langTrack.extract.types import ChannelSpec  # noqa: E402
 
@@ -92,9 +93,9 @@ def _setup(tmp_path: Path) -> tuple[Config, Path]:
     )
     prompt_dir = cfg.root / "config" / "kg_prompts"
     prompt_dir.mkdir(parents=True, exist_ok=True)
-    # 全部已注册通道的 prompt 桩都写齐，全通道运行才不会因缺 prompt 报错
-    for name in ("events@v1.md", "relations@v1.md", "todos@v1.md"):
-        (prompt_dir / name).write_text("抽取 prompt（测试桩）", encoding="utf-8")
+    # 按注册表写齐全部通道的 prompt 桩，全通道运行才不会因缺 prompt 报错
+    for spec in CHANNELS:
+        (prompt_dir / spec.prompt).write_text("抽取 prompt（测试桩）", encoding="utf-8")
     return cfg, tmp_path / "kg.db"
 
 

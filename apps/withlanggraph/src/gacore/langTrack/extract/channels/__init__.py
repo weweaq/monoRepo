@@ -8,9 +8,19 @@ from __future__ import annotations
 
 from typing import Final
 
+from gacore.langTrack.extract.channels.emotions import SPEC as _EMOTIONS_SPEC
 from gacore.langTrack.extract.channels.events import SPEC as _EVENTS_SPEC
+from gacore.langTrack.extract.channels.patterns import SPEC as _PATTERNS_SPEC
 from gacore.langTrack.extract.channels.relations import SPEC as _RELATIONS_SPEC
 from gacore.langTrack.extract.channels.todos import SPEC as _TODOS_SPEC
+from gacore.langTrack.extract.channels.worldview import SPEC as _WORLDVIEW_SPEC
 from gacore.langTrack.extract.types import ChannelSpec
 
-CHANNELS: Final[tuple[ChannelSpec, ...]] = (_EVENTS_SPEC, _RELATIONS_SPEC, _TODOS_SPEC)
+CHANNELS: Final[tuple[ChannelSpec, ...]] = (
+    _EVENTS_SPEC,
+    _RELATIONS_SPEC,
+    _TODOS_SPEC,
+    _EMOTIONS_SPEC,
+    _PATTERNS_SPEC,
+    _WORLDVIEW_SPEC,
+)

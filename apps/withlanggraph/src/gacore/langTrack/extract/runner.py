@@ -50,7 +50,7 @@ class RunResult:
     status: str  # ok | partial | failed | skipped | dry-run
     raw_hash: str
     material_chars: int
-    rows: int = 0  # 本次新写入的 kg_nodes + kg_edges 行数（skipped / dry-run 恒为 0）
+    rows: int = 0  # 本次新写入的 kg_nodes + 各通道记录表行数（skipped / dry-run 恒为 0）
     channels: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
@@ -313,6 +313,9 @@ _DAY_SCOPED_SQL: Final[dict[str, str]] = {
     "kg_edges": "SELECT * FROM kg_edges WHERE day = ?",
     "kg_relations": "SELECT * FROM kg_relations WHERE day = ?",
     "kg_aliases": "SELECT * FROM kg_aliases WHERE day = ?",
+    "kg_emotions": "SELECT * FROM kg_emotions WHERE day = ?",
+    "kg_patterns": "SELECT * FROM kg_patterns WHERE day = ?",
+    "kg_worldview": "SELECT * FROM kg_worldview WHERE day = ?",
 }
 
 

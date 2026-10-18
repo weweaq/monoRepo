@@ -113,6 +113,63 @@ CREATE TABLE IF NOT EXISTS kg_aliases (
   PRIMARY KEY (alias, day, run_id)
 );
 CREATE INDEX IF NOT EXISTS idx_kg_aliases_alias ON kg_aliases(alias);
+
+-- 情绪信号（S3）：谁表现出什么情绪；日粒度事实，不参与 interval closure
+CREATE TABLE IF NOT EXISTS kg_emotions (
+  emotion_id   TEXT PRIMARY KEY,              -- sha1(day|subject|emotion|evidence)[:16]
+  subject      TEXT NOT NULL,                 -- 情绪主体 node_id
+  emotion      TEXT NOT NULL,                 -- 焦虑/愉悦/疲惫/平静/愤怒 ...
+  valence      REAL,                          -- 效价 -1..1
+  arousal      REAL,                          -- 唤醒 0..1
+  intensity    REAL,                          -- 强度 0..1
+  trigger_text TEXT,                          -- 触发事件描述
+  evidence     TEXT,                          -- 素材内证据片段（<=40 字）
+  confidence   REAL,                          -- 0..1
+  day          TEXT NOT NULL,
+  src          TEXT NOT NULL,
+  run_id       TEXT NOT NULL,
+  created_at   TEXT DEFAULT (datetime('now', '+8 hours')),
+  updated_at   TEXT DEFAULT (datetime('now', '+8 hours'))
+);
+CREATE INDEX IF NOT EXISTS idx_kg_emotions_subject ON kg_emotions(subject, day);
+CREATE INDEX IF NOT EXISTS idx_kg_emotions_day     ON kg_emotions(day);
+
+-- 行为/偏好模式候选（S3）：只产候选，confidence 上限 0.7；status 恒 candidate
+-- （候选→规律升格机制属后续独立阶段，见 docs/kg-extract-plan.md §12）
+CREATE TABLE IF NOT EXISTS kg_patterns (
+  pattern_id    TEXT PRIMARY KEY,             -- sha1(day|subject|pattern)[:16]
+  subject       TEXT NOT NULL,
+  pattern       TEXT NOT NULL,                -- 模式描述
+  evidence      TEXT,
+  support_count INTEGER,                      -- 支撑证据条数
+  confidence    REAL NOT NULL,                -- 上限 0.7
+  status        TEXT NOT NULL DEFAULT 'candidate',
+  day           TEXT NOT NULL,
+  src           TEXT NOT NULL,
+  run_id        TEXT NOT NULL,
+  created_at    TEXT DEFAULT (datetime('now', '+8 hours')),
+  updated_at    TEXT DEFAULT (datetime('now', '+8 hours'))
+);
+CREATE INDEX IF NOT EXISTS idx_kg_patterns_subject ON kg_patterns(subject, day);
+CREATE INDEX IF NOT EXISTS idx_kg_patterns_day     ON kg_patterns(day);
+
+-- 世界观/信念候选（S3）：只产候选，confidence 上限 0.6；status 恒 candidate
+CREATE TABLE IF NOT EXISTS kg_worldview (
+  view_id       TEXT PRIMARY KEY,             -- sha1(day|subject|statement)[:16]
+  subject       TEXT NOT NULL,
+  statement     TEXT NOT NULL,                -- 世界观/信念陈述
+  domain        TEXT,                         -- 领域：工作/技术/人际/价值 ...
+  evidence      TEXT,
+  confidence    REAL NOT NULL,                -- 上限 0.6
+  status        TEXT NOT NULL DEFAULT 'candidate',
+  day           TEXT NOT NULL,
+  src           TEXT NOT NULL,
+  run_id        TEXT NOT NULL,
+  created_at    TEXT DEFAULT (datetime('now', '+8 hours')),
+  updated_at    TEXT DEFAULT (datetime('now', '+8 hours'))
+);
+CREATE INDEX IF NOT EXISTS idx_kg_worldview_subject ON kg_worldview(subject, day);
+CREATE INDEX IF NOT EXISTS idx_kg_worldview_day     ON kg_worldview(day);
 """
 
 
