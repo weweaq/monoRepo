@@ -29,6 +29,7 @@ import sqlite3
 import time
 import uuid
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -37,6 +38,7 @@ from typing import Final
 from gacore.config import Config, load_dotenv
 from gacore.feedback import save_delivered, stamp_report_bullets
 from gacore.jsonl_logger import get_logger
+from gacore.langTrack.extract import RunResult, run_extract
 from gacore.proactive import PROACTIVE_POOL, proactive_due, run_proactive_job
 
 logger = get_logger("scheduler")
@@ -47,6 +49,10 @@ _OUTPUT_SUBDIR: Final = "scheduled"
 _TIME_RE: Final = re.compile(r"^(\d{1,2}):(\d{2})$")
 _INTERVAL_RE: Final = re.compile(r"^every\s+(\d+)\s*([dhm])$", re.IGNORECASE)
 _POLL_INTERVAL_SECONDS: Final = 30
+
+# KG 抽取 job（type="extract"）投递到独立单 worker 池：抽取内部自带 LLM 调用（六通道），
+# 耗时不确定，绝不能阻塞轮询循环；与 PROACTIVE_POOL 隔离，避免两类重任务互相排队。
+EXTRACT_POOL: Final = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kg-extract")
 
 # ---- 调度回复清洗与完成性校验（修复 2026-09-03 日报正文被 <summary>/DSML 标签污染）----
 # <summary>...</summary> 完整块（GA 协议思考块）：qq.py 流式路径已在发送前剥离，调度/邮件路径补齐。
@@ -129,6 +135,10 @@ class Job:
     ("HH:MM-HH:MM", optional) restricts firing to that time-of-day window; an empty
     window means no restriction. cooldown_minutes (optional, 0 = off) enforces a
     minimum gap between consecutive triggers.
+
+    type == "extract" marks a KG-extraction job: run_loop dispatches it to EXTRACT_POOL
+    (its own single worker) where run_extract_job runs the deterministic extract CLI —
+    no LLM graph, no prompt required, no delivery/daily-note writes.
     """
 
     name: str
@@ -183,6 +193,60 @@ def _log_proactive_failure(fut: object) -> None:
         )
 
 
+def _log_extract_failure(fut: object) -> None:
+    """Log a top-level exception from an extract worker (L1: never swallow)."""
+    exc = fut.exception() if hasattr(fut, "exception") else None  # type: ignore[attr-defined]
+    if exc is not None:
+        logger.error(
+            "kg-extract job raised top-level exception",
+            error_type=type(exc).__name__,
+            stack_trace=str(exc),
+        )
+
+
+def run_extract_job(job: Job, cfg: Config, for_day: str | None = None) -> RunResult | None:
+    """Run one KG extraction (deterministic subsystem; no LLM graph, no delivery).
+
+    Dispatched by run_loop for ``type == "extract"`` jobs into EXTRACT_POOL. Unlike
+    run_job this never builds a prompt, never runs the agent graph, never delivers, and
+    never writes a daily note — the extract CLI already persists everything into the
+    ``kg_*`` tables, which the daily info pack reads read-only.
+
+    Target-day semantics mirror ``_build_job_prompt``'s today convention: default is
+    ``for_day`` when set (historical re-run), else today. The 23:30 slot therefore
+    covers the day up to that minute only — the last ~20 minutes before the 23:50
+    daily-report do not enter the same day's graph (accepted trade-off, S5).
+
+    Failures are logged here and swallowed so a worker exception never dies silently in
+    the pool thread. run_extract returns a RunResult for channel-level failures but can
+    still raise on setup errors (material load / missing prompt / DB write); the
+    surrounding try/except captures those.
+    """
+    day = for_day or datetime.now(UTC).astimezone().date().isoformat()
+    start = time.monotonic()
+    try:
+        result = run_extract(day, cfg)
+        logger.info(
+            "kg-extract finished",
+            job=job.name,
+            day=day,
+            status=result.status,
+            rows=result.rows,
+            material_chars=result.material_chars,
+            duration_seconds=round(time.monotonic() - start, 2),
+        )
+        return result
+    except Exception as e:  # noqa: BLE001 — worker must not leak the exception to the pool
+        logger.error(
+            "kg-extract failed",
+            job=job.name,
+            day=day,
+            error_type=type(e).__name__,
+            stack_trace=str(e),
+        )
+        return None
+
+
 def load_jobs(cfg: Config) -> list[Job]:
     """Load enabled jobs from config/schedule.json; return empty list when missing or invalid."""
     path = cfg.asset_dir.parent / _SCHEDULE_FILE
@@ -200,9 +264,11 @@ def load_jobs(cfg: Config) -> list[Job]:
             continue
         try:
             kind = item.get("type", "job")
-            if kind == "proactive":
+            if kind in ("proactive", "extract"):
                 # M2: proactive jobs are scene-driven, so a missing prompt is allowed and
                 # falls back to the scene-derived default inside build_proactive_prompt.
+                # extract jobs carry no LLM prompt at all (they run the deterministic
+                # extract CLI), so a missing prompt must not trip the KeyError skip below.
                 prompt = item.get("prompt", "")
             else:
                 # Non-proactive jobs keep the required-prompt contract: a malformed entry
@@ -1128,6 +1194,25 @@ def run_loop(
                 save_state(resolved_cfg, states)
                 jobs_run += 1
                 continue
+            if job.type == "extract":
+                # KG extraction: deterministic, LLM-bearing but graph-free. Dispatch to its
+                # own single worker so a long extraction never blocks the poll loop, then
+                # persist last_run immediately so it does not refire on the next tick.
+                future = EXTRACT_POOL.submit(run_extract_job, job, resolved_cfg)
+                future.add_done_callback(_log_extract_failure)
+                logger.info(
+                    "kg-extract job dispatched",
+                    job=job.name,
+                    schedule=job.schedule,
+                    now=now.isoformat(timespec="seconds"),
+                )
+                states[job.name] = JobState(
+                    last_run=now.isoformat(timespec="seconds"),
+                    run_count=state.run_count + 1,
+                )
+                save_state(resolved_cfg, states)
+                jobs_run += 1
+                continue
             logger.info("Job due, firing", job=job.name, schedule=job.schedule, now=now.isoformat(timespec="seconds"))
             run_job(job, resolved_cfg, graph_runner=graph_runner)
             states[job.name] = JobState(
@@ -1154,6 +1239,7 @@ def main() -> None:
 
 
 __all__ = (
+    "EXTRACT_POOL",
     "Job",
     "JobState",
     "ScheduleResult",
@@ -1162,6 +1248,7 @@ __all__ = (
     "load_state",
     "main",
     "next_run_time",
+    "run_extract_job",
     "run_job",
     "run_loop",
     "save_state",

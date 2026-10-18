@@ -1,6 +1,12 @@
 {
   "jobs": [
     {
+      "name": "kg-extract",
+      "schedule": "23:30",
+      "type": "extract",
+      "enabled": true
+    },
+    {
       "name": "daily-report",
       "schedule": "23:50",
       "deliver_to": "email",
