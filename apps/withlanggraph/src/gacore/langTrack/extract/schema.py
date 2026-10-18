@@ -72,6 +72,47 @@ CREATE TABLE IF NOT EXISTS kg_edges (
 CREATE INDEX IF NOT EXISTS idx_kg_edges_from ON kg_edges(from_node, relation, valid_from);
 CREATE INDEX IF NOT EXISTS idx_kg_edges_to   ON kg_edges(to_node,   relation, valid_from);
 CREATE INDEX IF NOT EXISTS idx_kg_edges_day  ON kg_edges(day);
+
+-- 稳定关系（人际/实体间长期关联；与 kg_edges 的"当日事件边"区分，不参与 interval closure）
+CREATE TABLE IF NOT EXISTS kg_relations (
+  relation_id    TEXT PRIMARY KEY,            -- sha1(day|from|to|relation)[:16]
+  from_node      TEXT NOT NULL,
+  to_node        TEXT NOT NULL,
+  relation       TEXT NOT NULL,               -- colleague_of / family_of / friend_of / follows ...
+  edge_level     TEXT NOT NULL,               -- L1 事实 | L2 观点 | L3 推断
+  attributor     TEXT,                        -- L2 必填
+  assertion_text TEXT,
+  evidence       TEXT,                        -- 素材内证据片段（<=40 字）
+  strength       REAL,                        -- 关系强度/置信 0..1（L3 上限 0.6）
+  valid_from     TEXT,
+  valid_to       TEXT,
+  day            TEXT NOT NULL,
+  src            TEXT NOT NULL,
+  run_id         TEXT NOT NULL,
+  created_at     TEXT DEFAULT (datetime('now', '+8 hours')),
+  updated_at     TEXT DEFAULT (datetime('now', '+8 hours'))
+);
+CREATE INDEX IF NOT EXISTS idx_kg_relations_from ON kg_relations(from_node, relation);
+CREATE INDEX IF NOT EXISTS idx_kg_relations_to   ON kg_relations(to_node,   relation);
+CREATE INDEX IF NOT EXISTS idx_kg_relations_day  ON kg_relations(day);
+
+-- 别名（追加式，可撤销 —— 修正设计债②）
+-- superseded_by 取**反向指针**语义：本行撤销的旧记录 key（alias|day|run_id），NULL=未撤销任何记录。
+-- 之所以反向，是因为"旧行指向新行"必须 UPDATE 旧行，与"只追加、旧记录永不改"铁律冲突（见 docs/kg-extract-plan.md §6 ②）。
+CREATE TABLE IF NOT EXISTS kg_aliases (
+  alias         TEXT NOT NULL,
+  canonical     TEXT NOT NULL,
+  method        TEXT NOT NULL,                -- exact|fuzzy|manual
+  score         REAL,
+  day           TEXT NOT NULL,
+  src           TEXT,
+  superseded_by TEXT,
+  run_id        TEXT NOT NULL,
+  created_at    TEXT DEFAULT (datetime('now', '+8 hours')),
+  updated_at    TEXT DEFAULT (datetime('now', '+8 hours')),
+  PRIMARY KEY (alias, day, run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_kg_aliases_alias ON kg_aliases(alias);
 """
 
 

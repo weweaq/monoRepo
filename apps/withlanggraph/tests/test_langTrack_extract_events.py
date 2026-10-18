@@ -92,7 +92,9 @@ def _setup(tmp_path: Path) -> tuple[Config, Path]:
     )
     prompt_dir = cfg.root / "config" / "kg_prompts"
     prompt_dir.mkdir(parents=True, exist_ok=True)
-    (prompt_dir / PROMPT_NAME).write_text("抽取 prompt（测试桩）", encoding="utf-8")
+    # 全部已注册通道的 prompt 桩都写齐，全通道运行才不会因缺 prompt 报错
+    for name in ("events@v1.md", "relations@v1.md", "todos@v1.md"):
+        (prompt_dir / name).write_text("抽取 prompt（测试桩）", encoding="utf-8")
     return cfg, tmp_path / "kg.db"
 
 
@@ -176,7 +178,7 @@ def test_invalid_json_is_retried_once(tmp_path):
     cfg, db = _setup(tmp_path)
     llm = FakeLLM(["这不是 JSON", json.dumps(PAYLOAD, ensure_ascii=False)])
 
-    result = run_extract(DAY, cfg, db_path=db, llm=llm)
+    result = run_extract(DAY, cfg, db_path=db, llm=llm, only=["events"])
 
     assert result.status == "ok"
     assert llm.calls == 2
@@ -212,7 +214,7 @@ def test_partial_status_when_one_channel_fails(tmp_path, monkeypatch):
     def _boom(conn, ctx, payload):
         raise RuntimeError("通道内部炸了")
 
-    failing = ChannelSpec(key="relations", prompt=PROMPT_NAME, sources=("_CHAT",), handle=_boom)
+    failing = ChannelSpec(key="zzz_probe", prompt=PROMPT_NAME, sources=("_CHAT",), handle=_boom)
     monkeypatch.setattr(runner, "CHANNELS", (*runner.CHANNELS, failing))
     llm = FakeLLM([json.dumps(PAYLOAD, ensure_ascii=False)])
 
@@ -220,7 +222,7 @@ def test_partial_status_when_one_channel_fails(tmp_path, monkeypatch):
 
     assert result.status == "partial"
     assert result.channels["events"]["status"] == "ok"
-    assert result.channels["relations"]["status"] == "failed"
+    assert result.channels["zzz_probe"]["status"] == "failed"
 
 
 def test_unknown_channel_key_is_rejected(tmp_path):

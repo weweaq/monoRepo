@@ -27,7 +27,9 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from gacore.config import Config
 from gacore.langTrack.extract.channels import CHANNELS
+from gacore.langTrack.extract.intervals import reclose_day
 from gacore.langTrack.extract.material import load_material, material_stats
+from gacore.langTrack.extract.resolve import resolve_entities
 from gacore.langTrack.extract.schema import migrate_extract_tables
 from gacore.langTrack.extract.types import ChannelOutcome, ChannelSpec, ExtractContext
 
@@ -189,6 +191,19 @@ def _overall_status(outcomes: Sequence[ChannelOutcome]) -> str:
     return _OK_STATUS
 
 
+def _postprocess(conn: sqlite3.Connection, day: str, run_id: str) -> dict[str, Any]:
+    """通道落库后的确定性收尾：实体消解 + 区间闭合。
+
+    两者都只读通道产物、只写映射表/派生列，不依赖 LLM；失败不拖垮整次运行（记账在 channel_stats）。
+    """
+    try:
+        resolve_entities(conn, day, run_id)
+        reclosed = reclose_day(conn, day)
+        return {"status": "ok", "reclosed": reclosed}
+    except Exception as exc:  # noqa: BLE001 - 收尾失败只记账，不改变已落库的通道产物
+        return {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+
+
 def run_extract(
     day: str,
     cfg: Config | None = None,
@@ -256,6 +271,11 @@ def run_extract(
         status = _overall_status(outcomes)
         channel_stats: dict[str, Any] = {"_material": material_stats(material)}
         channel_stats.update({o.key: o.as_dict() for o in outcomes})
+        if sum(o.rows for o in outcomes) > 0:
+            post = _postprocess(conn, day, run_id)
+            channel_stats["_postprocess"] = post
+            if post["status"] == "failed" and status == _OK_STATUS:
+                status = "partial"
         with conn:
             conn.execute(
                 "UPDATE kg_runs SET status=?, channel_stats=?, finished_at=?, "
@@ -291,6 +311,8 @@ _DAY_SCOPED_SQL: Final[dict[str, str]] = {
     "kg_runs": "SELECT * FROM kg_runs WHERE day = ?",
     "kg_nodes": "SELECT * FROM kg_nodes WHERE run_id IN (SELECT run_id FROM kg_runs WHERE day = ?)",
     "kg_edges": "SELECT * FROM kg_edges WHERE day = ?",
+    "kg_relations": "SELECT * FROM kg_relations WHERE day = ?",
+    "kg_aliases": "SELECT * FROM kg_aliases WHERE day = ?",
 }
 
 
