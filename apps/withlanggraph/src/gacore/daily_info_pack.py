@@ -19,6 +19,9 @@
 - langTrack 手机事实源（v3.3，C2 A′ 局部修订）：_PHONE_PLACE/_PHONE_USAGE/_PHONE_NOTIF
   进包（当日全天视角）；fact_card compact（"当前时刻"卡）仍是 chat system prompt 的唯一
   注入出口，睡眠/时段×应用语义字段仍下沉在 fact_card section。
+- KG 抽取源（S4）：_KG 读 langTrack.db 的 kg_* 表当日图摘要（人物/关系变化/情绪基调/
+  未完成待办），priority 105 最低、默认停用（config/info_pack.json 的 `_KG.enabled`）；
+  只读不触发抽取，抽取未运行 → "当日无 KG 抽取结果"空态。不进 system prompt 注入面。
 
 模块级 ``_*_FN`` 名字是对外接入点：测试通过 monkeypatch 这些名字注入 fake 取数（空/满双向），
 不触碰真实 CLI / 数据库。
@@ -871,6 +874,223 @@ def _build_phone_notif(date: str, cfg: Config) -> tuple[str, str, str]:
 
 
 # --------------------------------------------------------------------------- #
+# KG 抽取源（S4）：langTrack.db 的 kg_* 表当日图摘要（人物/关系/情绪/待办）。     #
+# 与手机事实源的分工：_PHONE_* 是原始事件视角（events/stays/daily_stats），本源是 #
+# 抽取层结构化视角（kg_nodes/kg_edges/kg_*）。只读、不触发抽取、不建表、不写文件 #
+# （建表是 extract CLI 的职责）；抽取未运行（库/表缺失或当日无 kg_runs 行）→     #
+# 空态行，绝不冒充 ok。默认停用（config/info_pack.json 灰开）。                 #
+# --------------------------------------------------------------------------- #
+_KG_CAP: int = 1200      # 当日图摘要进包上限：实测 2026-10-16 为 1071 字符（计划书原定 600
+#                          会截掉情绪段与尾段，且触发指向 langTrack_stats 的补查提示——KG 真源
+#                          是 kg_* 表，故按实测抬到 1200；各节 TOP 已先收敛，超限仍由框架行截断）
+_KG_PERSON_TOP: int = 6   # 人物节点 top N（按当日关联边数 degree 排序）
+_KG_EDGE_TOP: int = 6     # 当日边（关系变化）top N（L1 事实优先）
+_KG_EMOTION_TOP: int = 4  # 情绪信号 top N（按强度）
+_KG_TODO_TOP: int = 6     # 未完成待办 top N（src=todos 且 valid_to 未闭合）
+_KG_CLIP: int = 40        # 单条证据/陈述截断长度（唯一截断点，军规②）
+
+_KG_MISSING: Final = "- 当日无 KG 抽取结果（抽取未运行或无产出）"
+
+_KG_PERSON_SQL: Final = """
+SELECT d.node_id AS node_id,
+       COALESCE(n.label, d.node_id) AS label,
+       COALESCE(n.node_type, '') AS node_type,
+       COUNT(*) AS degree
+FROM (
+  SELECT from_node AS node_id FROM kg_edges WHERE day = ? AND invalidated = 0
+  UNION ALL
+  SELECT to_node AS node_id FROM kg_edges WHERE day = ? AND invalidated = 0
+) d
+LEFT JOIN kg_nodes n ON n.node_id = d.node_id
+GROUP BY d.node_id
+ORDER BY degree DESC, label
+LIMIT ?
+"""
+
+_KG_EDGE_SQL: Final = """
+SELECT e.from_node AS from_node, e.to_node AS to_node, e.relation AS relation,
+       e.edge_level AS edge_level, e.attributor AS attributor,
+       e.assertion_text AS assertion_text, e.valid_from AS valid_from,
+       COALESCE(nf.label, e.from_node) AS from_label,
+       COALESCE(nt.label, e.to_node) AS to_label
+FROM kg_edges e
+LEFT JOIN kg_nodes nf ON nf.node_id = e.from_node
+LEFT JOIN kg_nodes nt ON nt.node_id = e.to_node
+WHERE e.day = ? AND e.invalidated = 0
+ORDER BY e.edge_level, e.confidence DESC, e.edge_id
+LIMIT ?
+"""
+
+_KG_TODO_SQL: Final = """
+SELECT e.from_node AS from_node, e.to_node AS to_node, e.relation AS relation,
+       e.edge_level AS edge_level, e.assertion_text AS assertion_text,
+       e.valid_from AS valid_from,
+       COALESCE(nf.label, e.from_node) AS from_label,
+       COALESCE(nt.label, e.to_node) AS to_label
+FROM kg_edges e
+LEFT JOIN kg_nodes nf ON nf.node_id = e.from_node
+LEFT JOIN kg_nodes nt ON nt.node_id = e.to_node
+WHERE e.day = ? AND e.invalidated = 0 AND e.src = 'todos' AND e.valid_to IS NULL
+ORDER BY (e.valid_from IS NULL), e.valid_from DESC, e.edge_id
+LIMIT ?
+"""
+
+_KG_EMOTION_SQL: Final = """
+SELECT subject, emotion, valence, arousal, intensity, trigger_text, evidence
+FROM kg_emotions
+WHERE day = ?
+ORDER BY (intensity IS NULL), intensity DESC, emotion_id
+LIMIT ?
+"""
+
+_KG_RELATION_SQL: Final = """
+SELECT relation_id, from_node, to_node, relation, edge_level, attributor,
+       assertion_text, evidence, strength, valid_from, valid_to
+FROM kg_relations
+WHERE day = ?
+ORDER BY relation, relation_id
+"""
+
+_KG_COUNT_SQL: Final = """
+SELECT
+  (SELECT COUNT(*) FROM kg_nodes WHERE run_id IN (SELECT run_id FROM kg_runs WHERE day = ?)) AS nodes,
+  (SELECT COUNT(*) FROM kg_edges WHERE day = ?) AS edges,
+  (SELECT COUNT(*) FROM kg_edges WHERE day = ? AND invalidated = 1) AS edges_invalidated,
+  (SELECT COUNT(*) FROM kg_relations WHERE day = ?) AS relations,
+  (SELECT COUNT(*) FROM kg_emotions WHERE day = ?) AS emotions,
+  (SELECT COUNT(*) FROM kg_patterns WHERE day = ?) AS patterns,
+  (SELECT COUNT(*) FROM kg_worldview WHERE day = ?) AS worldview
+"""
+
+
+def _kg_rows(conn: Any, sql: str, args: tuple[Any, ...]) -> list[dict[str, Any]]:
+    """执行只读查询并返回 dict 列表（列名取自 cursor.description）。"""
+    cur = conn.execute(sql, args)
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, row, strict=True)) for row in cur.fetchall()]
+
+
+def _kg_clip(value: Any) -> str:
+    """单条证据/陈述的字符截断（唯一截断点，军规②）；None → 空串。"""
+    text = "" if value is None else str(value)
+    return text if len(text) <= _KG_CLIP else text[:_KG_CLIP] + "…"
+
+
+def _kg_day_graph(date: str, cfg: Config) -> dict[str, Any] | None:
+    """读 langTrack.db 的 kg_* 当日图摘要；库/表缺失或当日无抽取运行 → None。
+
+    纯读（ro URI）：不触发抽取、不建表、不写文件。detail 全量取用
+    ``extract.runner._DAY_SCOPED_SQL``（惰性 import，与 --dump 的表清单单一真源）。
+    """
+    import sqlite3
+
+    db = cfg.root / "data" / "langTrack.db"
+    if not db.exists():
+        return None
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        try:
+            run = conn.execute(
+                "SELECT run_id, status FROM kg_runs WHERE day = ?"
+                " ORDER BY started_at DESC, run_id DESC LIMIT 1",
+                (date,),
+            ).fetchone()
+            if run is None:
+                return None
+            from gacore.langTrack.extract.runner import _DAY_SCOPED_SQL
+
+            return {
+                "run_id": str(run[0]),
+                "status": str(run[1]),
+                "persons": _kg_rows(conn, _KG_PERSON_SQL, (date, date, _KG_PERSON_TOP)),
+                "edges": _kg_rows(conn, _KG_EDGE_SQL, (date, _KG_EDGE_TOP)),
+                "todos": _kg_rows(conn, _KG_TODO_SQL, (date, _KG_TODO_TOP)),
+                "emotions": _kg_rows(conn, _KG_EMOTION_SQL, (date, _KG_EMOTION_TOP)),
+                "relations": _kg_rows(conn, _KG_RELATION_SQL, (date,)),
+                "counts": _kg_rows(conn, _KG_COUNT_SQL, (date,) * 7)[0],
+                "detail": {
+                    table: _kg_rows(conn, sql, (date,)) for table, sql in _DAY_SCOPED_SQL.items()
+                },
+            }
+        except sqlite3.OperationalError:
+            # kg_* 表未建（抽取层从未在本库跑过）→ 视为"抽取未运行"，不判失败
+            return None
+    finally:
+        conn.close()
+
+
+# 测试注入点：monkeypatch 本名即可让 _build_kg 不触碰真实库（风格同 _BILLI_FN）。
+_KG_FN = _kg_day_graph
+
+
+def _kg_detail_lines(detail: Mapping[str, list[dict[str, Any]]]) -> list[str]:
+    """detail 全量渲染：逐表逐行 key=value（不挑选不压缩），供 /health 单源页归因。"""
+    out: list[str] = []
+    for table, rows in detail.items():
+        out.append(f"- {table} 全量（{len(rows)} 条）：")
+        for row in rows:
+            cells = [f"{k}={_kg_clip(v)}" for k, v in row.items() if v not in (None, "")]
+            out.append("  - " + " · ".join(cells))
+    return out
+
+
+def _build_kg(date: str, cfg: Config) -> tuple[str, str, str]:
+    """当日 KG 图摘要（S4 新增）：人物 top-N + 未完成待办 + 关系变化 + 情绪基调。
+
+    pack=各节 top-N 行级渲染（超 cap 由框架行截断）；detail=当日 kg_* 全量逐条（不挑选不压缩）。
+    空态文案命中 _MISSING_DATA_RE 的"当日无"→ 自动分类 missing_data，无需改 classify_body。
+    """
+    title = "〔KG·当日图摘要〕"
+    try:
+        graph = _KG_FN(date, cfg)
+        if graph is None:
+            return title, _KG_MISSING, ""
+        counts = graph["counts"]
+        if not any(int(counts.get(k) or 0) for k in ("nodes", "edges", "relations", "emotions")):
+            return title, _KG_MISSING, ""
+        lines = [
+            f"- 抽取运行 {graph['status']}：节点 {counts['nodes']} · 当日边 {counts['edges']}"
+            f"（失效 {counts['edges_invalidated']}）· 稳定关系 {counts['relations']}"
+            f" · 情绪 {counts['emotions']} · 模式候选 {counts['patterns']}"
+            f" · 世界观候选 {counts['worldview']}"
+        ]
+        persons = graph["persons"]
+        if persons:
+            lines.append("- 人物 Top：" + "、".join(f"{p['label']}({p['degree']})" for p in persons))
+        todos = graph["todos"]
+        if todos:
+            lines.append(f"- 未完成待办（{len(todos)} 条）：")
+            for t in todos:
+                body = f"  - {t['from_label']} {t['relation']} {t['to_label']}"
+                if t["assertion_text"]:
+                    body += f"：{_kg_clip(t['assertion_text'])}"
+                lines.append(body)
+        edges = graph["edges"]
+        if edges:
+            lines.append(f"- 关系变化（{len(edges)} 条）：")
+            for e in edges:
+                body = f"  - {e['from_label']} —{e['relation']}→ {e['to_label']}［{e['edge_level']}］"
+                if e["assertion_text"]:
+                    body += f"：{_kg_clip(e['assertion_text'])}"
+                lines.append(body)
+        emotions = graph["emotions"]
+        if emotions:
+            parts: list[str] = []
+            for em in emotions:
+                seg = str(em["emotion"])
+                if isinstance(em["intensity"], (int, float)):
+                    seg += f" {float(em['intensity']):.1f}"
+                if em["trigger_text"]:
+                    seg += f"（{_kg_clip(em['trigger_text'])}）"
+                parts.append(seg)
+            lines.append("- 情绪基调：" + "、".join(parts))
+        return title, "\n".join(lines), "\n".join(_kg_detail_lines(graph["detail"]))
+    except Exception as exc:  # noqa: BLE001 - 最后防线：源失败不中断整包
+        logger.warning("daily_info_pack: kg failed", error_type=type(exc).__name__, error=str(exc))
+        return title, f"- 该源失败：{exc}", ""
+
+
+# --------------------------------------------------------------------------- #
 # 状态分类（C1）：builder 文案约定 → 机器可读状态的唯一执行点                  #
 # --------------------------------------------------------------------------- #
 _MISSING_DATA_RE = re.compile(
@@ -1020,6 +1240,8 @@ SOURCES: Final[tuple[SourceSpec, ...]] = (
     SourceSpec("_FILES", _FILES_CAP, 80, _build_files),
     SourceSpec("_NCM", _NCM_CAP, 90, _build_ncm),
     SourceSpec("_MEMORY", _MEMORY_CAP, 100, _build_memory),
+    # S4：KG 抽取产物（最低优先级，预算紧张时先被熔断丢弃；默认停用见 config/info_pack.json）
+    SourceSpec("_KG", _KG_CAP, 105, _build_kg),
 )
 
 # 最近一次装配的逐源统计（含 title 与三节正文，供 scheduler 落盘钩子取用）。
@@ -1104,7 +1326,8 @@ def build_info_pack_report(date: str, cfg: Config | None = None) -> tuple[str, l
     pack, packed_bodies = _assemble_blocks(blocks, budget)
     for st in stats:
         packed_body = packed_bodies[st["block_pos"]] if st["block_pos"] >= 0 else ""
-        if st["status"] != "empty" and not packed_body:
+        # 停用源本就不参与装配：保留 config 停用注记，不误报"未进包:预算熔断"
+        if st["status"] not in ("empty", "disabled") and not packed_body:
             st["chars"] = 0
             st["note"] = "未进包:预算熔断"
         else:

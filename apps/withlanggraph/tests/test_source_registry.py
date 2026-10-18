@@ -127,6 +127,9 @@ def _inject_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cfg: Config
         # 三个手机源共用 _lang_track_card（fact_card.build 内部吞异常降级，不抛），
         # 打桩到读卡入口才能触发 builder 的内层 try/except 产出 sentinel
         monkeypatch.setattr(dip, "_lang_track_card", _raise)
+    elif key == "_KG":
+        # KG 源打桩到读图入口（_kg_day_graph 自身吞表缺失降级为 None，不抛）
+        monkeypatch.setattr(dip, "_KG_FN", _raise)
     else:
         pytest.fail(f"新增源 {key} 未在 test_source_registry 登记失败注入方式——"
                     "请补齐后确认其失败输出遵循 '- 该源失败：' sentinel 约定")
@@ -170,6 +173,7 @@ def test_classify_missing_data_variants():
         "- 今日无 B 站观看记录",
         "- 当日无 Edge 浏览记录",
         "- 该日无 langTrack 手机数据（可能未采集/未同步）",
+        "- 当日无 KG 抽取结果（抽取未运行或无产出）",
         "- 网易云未登录",
         "- 历史库不可用",
     ):

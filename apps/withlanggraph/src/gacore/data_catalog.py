@@ -5,6 +5,10 @@
 是 /data 页"未接数据自动浮出"的依据——新增信息包源、工具或旁路后必须同步更新，
 否则页面会把已接数据误报为"未接"。
 
+映射只覆盖 events 事件类型；langTrack.db 的 kg_* 派生表（抽取产物）与
+data/logs/pack_detail 落盘目录分别由 `_KG` 源与 extract/material.py 消费，
+走"库外文件"清单登记，不进事件类型映射。
+
 时间口径：东八区显式时区；近 7 日窗口从"今天"回推。
 """
 
@@ -226,6 +230,15 @@ def _collect_files(cfg: Config) -> list[dict[str, Any]]:
             "lines": len(notes),
             "mtime": notes[-1] if notes else "-",
             "consumer": "近2日摘要 → system prompt 旁路",
+        })
+    detail_dir = cfg.root / "data" / "logs" / "pack_detail"
+    if detail_dir.is_dir():
+        days = sorted(x.name for x in detail_dir.iterdir() if x.is_dir())
+        files.append({
+            "name": "data/logs/pack_detail/*/",
+            "lines": len(days),
+            "mtime": days[-1] if days else "-",
+            "consumer": "KG 抽取素材（extract/material.py 优先读此目录）",
         })
     return files
 
