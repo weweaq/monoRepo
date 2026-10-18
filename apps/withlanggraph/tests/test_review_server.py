@@ -449,7 +449,7 @@ class TestHealthPages:
         cfg = Config.for_tests(tmp_path)
         _write_health_jsonl(cfg, [_sample_line("2026-10-02"), _sample_line("2026-10-03", note="truncated=3")])
         c = _client(cfg, monkeypatch)
-        html_page = c.get("/health").text
+        html_page = c.get(f"/health?end={DATE}").text  # 锚定窗口末日，避免随系统日期腐化
         assert "2026-10-03" in html_page and "2026-10-02" in html_page
         assert "_CHAT" in html_page and "_BILI" in html_page
         assert "st-ok" in html_page and "st-failed" in html_page  # 状态色块
@@ -957,7 +957,7 @@ class TestLlmRequestsPage:
         cfg = Config.for_tests(tmp_path)
         self._seed(cfg)
         c = _client(cfg, monkeypatch)
-        r = c.get("/llm-requests")
+        r = c.get(f"/llm-requests?date={DATE}")  # 锚定数据日，默认页锚定今天会随系统日期腐化
         assert r.status_code == 200
         assert "日报任务 · 数据日 2026-10-03" in r.text
         assert "📬 已投递" in r.text or "已投递" in r.text

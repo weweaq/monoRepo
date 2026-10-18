@@ -6,6 +6,7 @@ v3.5 起本模块只管区县 note（地点标签/note 由编辑器直写 places
 
 from __future__ import annotations
 
+import datetime
 import json
 import sqlite3
 import sys
@@ -18,6 +19,12 @@ from gacore.langTrack import place_semantics as ps
 from gacore.langTrack.location_reader import ensure_note_column
 
 _EMPTY = {"districts": []}
+
+
+def _recent_pair() -> tuple[str, str]:
+    """(昨天, 今天) 的 UTC+8 日期串——与 editor_data 的 recent 窗口锚点一致，避免测试随日期腐化。"""
+    today = datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).date()
+    return ((today - datetime.timedelta(days=1)).isoformat(), today.isoformat())
 
 
 def _write(tmp_path, doc, name="sem.json") -> Path:
@@ -115,12 +122,13 @@ def _make_db(tmp_path: Path) -> Path:
              "安徽省马鞍山市当涂县乌溪镇张垛", "张垛", "当涂县", "乌溪镇", "p_zd"),
         ],
     )
+    d_prev, d_today = _recent_pair()
     conn.executemany(
         "INSERT INTO stays(device_id, place_id, grid_key, start_ts, end_ts, day) VALUES (?,?,?,?,?,?)",
         [
-            ("dev1", "p_home", "g1", 100, 200, "2026-10-05"),
-            ("dev1", "p_zd", "g2", 300, 400, "2026-10-04"),
-            ("dev1", "p_zd", "g2", 500, 600, "2026-10-05"),
+            ("dev1", "p_home", "g1", 100, 200, d_today),
+            ("dev1", "p_zd", "g2", 300, 400, d_prev),
+            ("dev1", "p_zd", "g2", 500, 600, d_today),
         ],
     )
     conn.commit()
@@ -130,12 +138,13 @@ def _make_db(tmp_path: Path) -> Path:
 
 def test_editor_data_shapes_and_recent(tmp_path):
     db = _make_db(tmp_path)
+    d_prev, d_today = _recent_pair()
     d = ps.editor_data(db_path=db, config_path=tmp_path / "sem.json")
     assert [p["poi"] for p in d["places"]] == ["家小区", "张垛"]  # 访问降序
     assert d["home_district"] == "雨花台区"
     zd = d["places"][1]
-    assert zd["last_day"] == "2026-10-05"
-    assert [x["day"] for x in zd["recent"]] == ["2026-10-04", "2026-10-05"]
+    assert zd["last_day"] == d_today
+    assert [x["day"] for x in zd["recent"]] == [d_prev, d_today]
     assert [x["district"] for x in d["districts"]] == ["雨花台区", "当涂县"]
     assert len(d["recent_days"]) == 14
 
