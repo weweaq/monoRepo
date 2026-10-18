@@ -91,7 +91,7 @@
 
 
 
-1. 提交前 `codegraph sync` 同步索引
+1. 提交前 `codegraph sync` 同步索引（codegraph 已全局安装，完整用法见全局 AGENTS.md）
 
 2. `git add` 只 stage 本次相关文件
 
