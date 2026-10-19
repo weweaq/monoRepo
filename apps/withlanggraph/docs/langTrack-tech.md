@@ -1671,7 +1671,7 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 | `channels/worldview.py` | worldview 通道 `SPEC`：2 源路由 + `handle` 落 `kg_worldview`（信念候选，confidence 上限 0.6） |
 | `resolve.py` | 三级实体消解 `resolve_entities(conn,day,run_id)`；`resolve_alias`/`revoke_alias`；纯本地 `jaro_winkler` |
 | `intervals.py` | `reclose_intervals(conn,from,to,relation)` / `reclose_day(conn,day)`——按 `valid_from` 重排重算 `valid_to` |
-| `runner.py` | `run_extract`（编排/幂等/失败隔离/后处理）、`export_day`（`--dump`） |
+| `runner.py` | `run_extract`（编排/幂等/失败隔离/单通道超时兜底/后处理）、`export_day`（`--dump`） |
 
 ### 素材装配（`material.py`，决策 D1）
 
@@ -1746,8 +1746,9 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 
 - **幂等**：`ux_kg_runs_day_hash_ver` 命中且 `status='ok'` → 整次 `skipped`（rows=0）；非 ok 的历史运行复用同一 `run_id` 原地重跑。
 - **失败隔离**：通道 `asyncio.gather(..., return_exceptions=True)` 并发执行，任一通道异常只记 `failed`，整次 status=`partial`（全失败=`failed`）。
+- **单通道超时兜底**：每个通道外层套 `asyncio.wait_for(_extract_channel(...), timeout)`（`_extract_channel_guarded`），超时即记 `failed`、`error="通道超时：{t}s 内未返回"`，**不让一个挂死通道把 `gather` 无限拖住**。阈值取 `KG_EXTRACT_CHANNEL_TIMEOUT`，缺省 `_DEFAULT_CHANNEL_TIMEOUT = 900.0`s（正常一整天素材单通道约 4 分钟，留 ~4x 余量）。`wait_for` 以取消内层协程生效；`_extract_channel` 只吞 `Exception`，`CancelledError`（属 `BaseException`）正常穿透，不会被误记 `ok`。
 - **prompt 缺失即报错**（`load_prompt`，不做静默降级）；LLM 回复 JSON 解析失败重试 1 次（`parse_json_payload` 剥 ``` 围栏 + 取首尾花括号区间）。
-- LLM 走 `gacore.llm.get_llm([], os.environ, bind_tools=False)`（零工具单轮，与 feedback/memory_maintenance 同法）。
+- LLM 走 `gacore.llm.get_llm([], os.environ, bind_tools=False)`（零工具单轮，与 feedback/memory_maintenance 同法）；客户端由 `get_llm` 统一带**显式单请求超时与重试**（`LLM_TIMEOUT`/`LLM_MAX_RETRIES`，缺省 300s / 1 次，见 `llm.py`），兜住网络层停滞。
 - **后处理（S2）**：通道全部落库后、且有新写入行时，`_postprocess(conn, day, run_id)` 依次跑 `resolve_entities` + `reclose_day`（确定性收尾，不依赖 LLM）；失败只记 `_postprocess.status='failed'`（整次降 `partial`），**不拖垮已落库的通道产物**。
 - `export_day` 的 `_DAY_SCOPED_SQL` 覆盖八张表：`kg_runs`/`kg_nodes`/`kg_edges`/`kg_relations`/`kg_aliases`/`kg_emotions`/`kg_patterns`/`kg_worldview`。
 
@@ -1774,6 +1775,18 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 - **job 定义**：`config/schedule.json` 新增 `{"name": "kg-extract", "schedule": "23:30", "type": "extract", "enabled": true}`（入库；排在 `daily-report` 23:50 前）。
 - **灰度开启**：本地 `config/info_pack.json` 的 `"_KG".enabled` 改 `true`（该文件 gitignore，非入库）。`load_source_config` 现读现用，`/config` 页可热开关、下次构建即生效，无需重启 8010。
 - **测试**：新增封闭测试 `tests/test_scheduler_extract_job.py`（7 例）：`load_jobs` 装载无 prompt 的 extract job（且默认 job 无 prompt 仍跳过，回归）；`run_extract_job` 取 today/`for_day`、不投递不写盘、失败吞掉只记账；`run_loop` 分派到 `EXTRACT_POOL`（FakePool）且永不落 `run_job` 图路径；同一 tick 内 extract 与普通 job 混合时分派互不串道。全部打桩 `run_extract`，不触真实库/网络/LLM。
+
+### 挂死修复（LLM 超时 + 单通道兜底，2026-10-19）
+
+- **现象**：2026-10-18 实跑 `--day 2026-10-18` 时，`todos@v1` 通道 25+ 分钟无返回，整轮抽取阻塞；`kg_runs` 遗留 `status='running'`、`finished_at=NULL` 的行。历史同类事故（`2026-09-08`）两次尝试均在不同通道挂死，说明是通用缺陷而非特定通道问题。
+- **定位**：LLM 日志无新行、TCP 连接停在空闲态、进程 CPU 时间 1h45m 仅 6.77s —— 即**阻塞在等待 LLM 响应**，不是计算或死锁。根因两条：
+  1. `gacore/llm.py` 的 `ChatOpenAI`/`ChatAnthropic` 构造未传 `timeout`/`max_retries`，落回 SDK 默认的长超时；连接"活着但不返回"时单次调用可远超预期。
+  2. `runner._run_channels` 的 `asyncio.gather(..., return_exceptions=True)` **没有单通道超时兜底**，任一通道不返回即整轮无限等待。
+- **修复**：
+  - `gacore/llm.py`：新增 `_parse_timeout`/`_parse_max_retries`，四个 provider 分支统一传 `timeout=`（`ChatOpenAI` 落 `request_timeout`，`ChatAnthropic` 落 `default_request_timeout`）+ `max_retries=`；env 键 `LLM_TIMEOUT`（默认 300s）/`LLM_MAX_RETRIES`（默认 1），非法值回落默认、负重试钳 0。
+  - `runner.py`：新增 `_channel_timeout()` + `_extract_channel_guarded()`，把每个通道包进 `asyncio.wait_for`，超时记 `failed` 而非挂死；env 键 `KG_EXTRACT_CHANNEL_TIMEOUT`（默认 900s）。
+- **僵尸行不阻塞重跑（核实结论）**：`_lookup_run` 仅 `status='ok'` 才走 skip 分支；`status='running'`/`partial`/`failed` 的历史行走 `UPDATE ... SET status='running'` **复用同一 `run_id` 原地重跑**，故遗留的 `running` 行不会挡住重跑，也无需人工清理。
+- **测试**：`tests/test_llm.py` 新增 4 例（默认值 / env 覆盖 / anthropic 字段名 / 非法值回落）；`tests/test_langTrack_extract_events.py` 新增 1 例 `test_hanging_channel_times_out_without_blocking_others`（假 LLM 按 prompt 分派，一个通道 `asyncio.sleep(3600)` → 该通道记 `failed` 超时，其余通道 `ok`，整次 `partial`）。全部封闭：不触网、不触真实库、不调真实 LLM。
 
 ### 实跑验证（2026-10-18）
 
