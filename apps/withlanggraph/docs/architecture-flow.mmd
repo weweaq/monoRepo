@@ -65,7 +65,7 @@ flowchart TD
         RW["原始层 events"]
         ET["ETL 事实层"]
         OU["读方出口<br/>fact_card·report·dashboard·qq_push"]
-        EX["KG 抽取层 langTrack/extract<br/>python -m gacore.langTrack.extract<br/>material.load_material(day,cfg)<br/>channels/{events,relations,todos,emotions,patterns,worldview}.SPEC<br/>runner.run_extract：六通道并发 gather<br/>+ 单通道超时兜底(KG_EXTRACT_CHANNEL_TIMEOUT,默认900s)<br/>LLM 客户端统一超时(gacore.llm·LLM_TIMEOUT/LLM_MAX_RETRIES)<br/>→ resolve.resolve_entities + intervals.reclose_day (后处理)"]
+        EX["KG 抽取层 langTrack/extract<br/>python -m gacore.langTrack.extract<br/>material.load_material(day,cfg)<br/>channels/{events,relations,todos,emotions,patterns,worldview}.SPEC<br/>runner.run_extract：六通道并发 gather<br/>+ 逐通道素材路由 Material.select(spec.sources)<br/>+ 单通道超时兜底(KG_EXTRACT_CHANNEL_TIMEOUT,默认900s)<br/>抽取 LLM 预算(gacore.llm·KG_EXTRACT_LLM_TIMEOUT默认600s·max_retries=0)<br/>通道运维日志 _log_channel→logs/&lt;day&gt;/app.jsonl + kg_runs.channel_stats<br/>→ resolve.resolve_entities + intervals.reclose_day (后处理)"]
         KG[("langTrack.db kg_* 表<br/>kg_runs/kg_nodes/kg_edges<br/>kg_relations/kg_aliases<br/>kg_emotions/kg_patterns/kg_worldview<br/>schema.migrate_extract_tables")]
     end
 

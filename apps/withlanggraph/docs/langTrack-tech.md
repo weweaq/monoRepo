@@ -1659,7 +1659,7 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 | `__init__.py` | 对外入口 `run_extract` / `export_day` |
 | `__main__.py` | CLI：`--day`（必填）/`--force`/`--only`/`--dry-run`/`--dump`/`--db`；`main()` 内 `load_dotenv()`（R9：密钥读取顺序 环境变量→.env，CLI 边界补齐，库函数 `run_extract` 不产生副作用） |
 | `types.py` | `ChannelSpec(key/prompt/sources/handle)`、`ExtractContext(day/run_id/prompt_ver)`、`ChannelOutcome`、`infer_node_type(node_id 前缀→类型)` |
-| `material.py` | `load_material(day,cfg) → Material(by_source/text/raw_hash)`；`Material.select(keys)` 按路由取源 |
+| `material.py` | `load_material(day,cfg) → Material(by_source/text/raw_hash)`；`Material.select(keys)` 按路由取源；`material_stats` 报 `chars`/`sources`/`by_source_chars` |
 | `schema.py` | `EXTRACT_SCHEMA`（kg_runs/kg_nodes/kg_edges/kg_relations/kg_aliases/kg_emotions/kg_patterns/kg_worldview）+ `migrate_extract_tables(conn)` 幂等建表 |
 | `channels/__init__.py` | `CHANNELS` 注册表（注册 events / relations / todos / emotions / patterns / worldview；新增通道只需追加一行） |
 | `channels/common.py` | 候选类通道（S3 三通道）共享落库原语：`collect_nodes`/`ensure_node`/`insert_nodes`/`derived_id`/`clamp_score`/`clamp_range`（不改动存量三通道） |
@@ -1671,7 +1671,7 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 | `channels/worldview.py` | worldview 通道 `SPEC`：2 源路由 + `handle` 落 `kg_worldview`（信念候选，confidence 上限 0.6） |
 | `resolve.py` | 三级实体消解 `resolve_entities(conn,day,run_id)`；`resolve_alias`/`revoke_alias`；纯本地 `jaro_winkler` |
 | `intervals.py` | `reclose_intervals(conn,from,to,relation)` / `reclose_day(conn,day)`——按 `valid_from` 重排重算 `valid_to` |
-| `runner.py` | `run_extract`（编排/幂等/失败隔离/单通道超时兜底/后处理）、`export_day`（`--dump`） |
+| `runner.py` | `run_extract`（编排/幂等/素材路由/失败隔离/单通道超时兜底/通道运维日志/后处理）、`export_day`（`--dump`） |
 
 ### 素材装配（`material.py`，决策 D1）
 
@@ -1746,9 +1746,11 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 
 - **幂等**：`ux_kg_runs_day_hash_ver` 命中且 `status='ok'` → 整次 `skipped`（rows=0）；非 ok 的历史运行复用同一 `run_id` 原地重跑。
 - **失败隔离**：通道 `asyncio.gather(..., return_exceptions=True)` 并发执行，任一通道异常只记 `failed`，整次 status=`partial`（全失败=`failed`）。
+- **素材路由（2026-10-19 接线）**：`_run_channels` 逐通道取 `material.select(spec.sources)`，**不再把当日全量素材喂给所有通道**。此前 `ChannelSpec.sources` 只声明未接线，六通道同吃全量文本；接线后 2026-10-18 实测：events 55154/56027（98%，它声明了 9 源）、relations/todos/patterns 各 30445（54%）、worldview 28674（51%）、emotions 2257（4%）。素材越小，推理模型的合法生成越短。
 - **单通道超时兜底**：每个通道外层套 `asyncio.wait_for(_extract_channel(...), timeout)`（`_extract_channel_guarded`），超时即记 `failed`、`error="通道超时：{t}s 内未返回"`，**不让一个挂死通道把 `gather` 无限拖住**。阈值取 `KG_EXTRACT_CHANNEL_TIMEOUT`，缺省 `_DEFAULT_CHANNEL_TIMEOUT = 900.0`s（正常一整天素材单通道约 4 分钟，留 ~4x 余量）。`wait_for` 以取消内层协程生效；`_extract_channel` 只吞 `Exception`，`CancelledError`（属 `BaseException`）正常穿透，不会被误记 `ok`。
+- **通道运维日志（2026-10-19）**：`_probe` 把每次通道调用的体检指标写进 `outcome.extra`，`_log_channel` 再落一行 `kg_extract_channel` 到 `logs/<day>/app.jsonl`（ok 走 `info`、其余走 `warning`）。指标 = `prompt_chars`（该通道实际吃的素材字符数）+ `routed_sources` + `elapsed_ms` + `attempts` + `response_chars` + `usage`（provider 的 token 用量）+ `finish_reason`。同一份 `extra` 经 `ChannelOutcome.as_dict` 进 `kg_runs.channel_stats`，重启后仍可回溯。判读口径：素材侧问题看 `prompt_chars`，provider 侧长尾看 `usage.output_tokens` 与 `finish_reason=length`。CLI 同步逐通道打印这些字段。
 - **prompt 缺失即报错**（`load_prompt`，不做静默降级）；LLM 回复 JSON 解析失败重试 1 次（`parse_json_payload` 剥 ``` 围栏 + 取首尾花括号区间）。
-- LLM 走 `gacore.llm.get_llm([], os.environ, bind_tools=False)`（零工具单轮，与 feedback/memory_maintenance 同法）；客户端由 `get_llm` 统一带**显式单请求超时与重试**（`LLM_TIMEOUT`/`LLM_MAX_RETRIES`，缺省 300s / 1 次，见 `llm.py`），兜住网络层停滞。
+- LLM 走 `gacore.llm.get_llm([], os.environ, bind_tools=False, timeout=..., max_retries=0)`（零工具单轮，与 feedback/memory_maintenance 同法）。客户端由 `get_llm` 统一带**显式单请求超时与重试**；抽取路径**显式覆盖**全局默认：`timeout=_extract_llm_timeout()`（env 键 `KG_EXTRACT_LLM_TIMEOUT`，缺省 `_DEFAULT_EXTRACT_LLM_TIMEOUT = 600.0`s）、`max_retries=0`。`get_llm` 的 `timeout`/`max_retries` 形参为 `None` 时仍读 `LLM_TIMEOUT`/`LLM_MAX_RETRIES`（缺省 300s / 1 次），故交互路径行为不变。
 - **后处理（S2）**：通道全部落库后、且有新写入行时，`_postprocess(conn, day, run_id)` 依次跑 `resolve_entities` + `reclose_day`（确定性收尾，不依赖 LLM）；失败只记 `_postprocess.status='failed'`（整次降 `partial`），**不拖垮已落库的通道产物**。
 - `export_day` 的 `_DAY_SCOPED_SQL` 覆盖八张表：`kg_runs`/`kg_nodes`/`kg_edges`/`kg_relations`/`kg_aliases`/`kg_emotions`/`kg_patterns`/`kg_worldview`。
 
@@ -1787,6 +1789,20 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
   - `runner.py`：新增 `_channel_timeout()` + `_extract_channel_guarded()`，把每个通道包进 `asyncio.wait_for`，超时记 `failed` 而非挂死；env 键 `KG_EXTRACT_CHANNEL_TIMEOUT`（默认 900s）。
 - **僵尸行不阻塞重跑（核实结论）**：`_lookup_run` 仅 `status='ok'` 才走 skip 分支；`status='running'`/`partial`/`failed` 的历史行走 `UPDATE ... SET status='running'` **复用同一 `run_id` 原地重跑**，故遗留的 `running` 行不会挡住重跑，也无需人工清理。
 - **测试**：`tests/test_llm.py` 新增 4 例（默认值 / env 覆盖 / anthropic 字段名 / 非法值回落）；`tests/test_langTrack_extract_events.py` 新增 1 例 `test_hanging_channel_times_out_without_blocking_others`（假 LLM 按 prompt 分派，一个通道 `asyncio.sleep(3600)` → 该通道记 `failed` 超时，其余通道 `ok`，整次 `partial`）。全部封闭：不触网、不触真实库、不调真实 LLM。
+
+### todos 通道耗时排查与优化（2026-10-19）
+
+- **现象**：2026-10-18 实跑六通道墙钟 ~11 分钟，其中 `todos` 通道无产物、`error=OpenAITimeoutError: Request timed out.`，其余 5 通道 `ok`，整次 `status=partial`。用户质疑"todos 怎么这么久、是不是没并行"。
+- **先证伪"没并行"**：从 `logs/<day>/llm_requests.jsonl` 反推六次抽取调用的 start/end，六通道 start 落在同一秒，墙钟 ≈ `max(duration)` 而非 `sum(duration)` —— `asyncio.gather` 并发确实生效，阶梯感是各通道输出体量不同造成的假象。
+- **耗时构成（哪边的原因）**：
+  1. **provider 侧为主**：`LLM_PROVIDER=zhipu` 的 `GLM-5.3-Flash` 是推理模型，耗时几乎全花在**隐藏推理 token** 上，与可见 JSON 体量不成比例。实测 `todos` 输出 token 12K–25.7K，按 ~60 tok/s 中位吞吐需 **156–411s**；可见 JSON 本身很小。
+  2. **超时是"空闲无数据"语义，不是总时长上限**：客户端超时落在 httpx 的单次读写等待上。同一轮 `relations` 单次调用耗时 592s 仍成功（token 持续流动），而 `todos` 在 300s 内**一个字节都没回来**被判超时 —— 即 provider 侧长静默（排队/推理未流式吐字），而非"总耗时超预算"。
+  3. **我方放大项**：`ChannelSpec.sources` 只声明未接线，六通道同吃当日全量 56027 字符素材；`todos` 声明只要 4 源（30445 字符）却吃了 56027，输入侧白付 46%。叠加 `LLM_MAX_RETRIES=1`，一次超时要再等一个完整预算（最坏 2×300s 空等）。
+- **优化（本次落地）**：
+  - **接线素材路由**：`_run_channels` 逐通道 `material.select(spec.sources)`，`todos` 的输入从 56027 → 30445 字符。
+  - **抽取路径放宽超时 + 不重试**：`_resolve_llm` 显式传 `timeout=_extract_llm_timeout()`（env `KG_EXTRACT_LLM_TIMEOUT`，默认 600s）+ `max_retries=0`；`get_llm` 为此新增 `timeout`/`max_retries` 形参（`None` 时仍走 env/默认，交互路径不变）。600s 覆盖 411s 的正常上界，0 重试消除"超时后原样再等一轮"的空耗。单通道兜底仍 900s > 600s，层次不变。
+  - **加运维日志**：见上文「通道运维日志」——下次再有通道慢，先看 `kg_runs.channel_stats` 的 `prompt_chars` 与 `usage.output_tokens`/`finish_reason`，即可判定是素材侧还是 provider 侧，不必再反推日志时间线。
+- **测试**：`tests/test_llm.py` 新增 3 例（显式覆盖 env / 负重试钳 0 / anthropic 字段名）；`tests/test_langTrack_extract_events.py` 新增 3 例（`test_channel_receives_only_its_routed_sources`、`test_channel_stats_carry_ops_telemetry`、`test_extract_llm_budget_is_wider_and_never_retries`）。`test_channel_stats_carry_ops_telemetry` 同时断言 `kg_runs.channel_stats` 里的 `_material.by_source_chars`。
 
 ### 实跑验证（2026-10-18）
 

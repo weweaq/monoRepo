@@ -1,6 +1,6 @@
 # langTrack 结构化知识图谱（KG）抽取层 · 落地实现计划
 
-> 状态：S1（骨架 + events 通道）、S2（relations/todos 通道 + 实体消解 + 区间闭合）、S3（emotions/patterns/worldview 候选通道）、S4（`_KG` 源接入日报信息包）、S5（`scheduler` 调度入口 + 灰度开启 `_KG`）已落地（2026-10-18）；2026-10-19 修复实跑暴露的**通道挂死**（`gacore.llm` 客户端超时/重试 + `runner` 单通道超时兜底，见 `langTrack-tech.md` §9.28「挂死修复」）；S5 观测一周待跨日实跑 · 编写日期：2026-10-17
+> 状态：S1（骨架 + events 通道）、S2（relations/todos 通道 + 实体消解 + 区间闭合）、S3（emotions/patterns/worldview 候选通道）、S4（`_KG` 源接入日报信息包）、S5（`scheduler` 调度入口 + 灰度开启 `_KG`）已落地（2026-10-18）；2026-10-19 修复实跑暴露的**通道挂死**（`gacore.llm` 客户端超时/重试 + `runner` 单通道超时兜底，见 `langTrack-tech.md` §9.28「挂死修复」），同日修复 **todos 通道耗时/超时**：接线逐通道素材路由 `Material.select(spec.sources)`、抽取路径超时放宽到 `KG_EXTRACT_LLM_TIMEOUT`（默认 600s）且不重试、新增通道级运维日志（见 §9.28「todos 通道耗时排查与优化」）；S5 观测一周待跨日实跑 · 编写日期：2026-10-17
 > 目标：把现有"笼统"的日报，升级为**按日结构化抽取 + 可溯源**的素材，且**不破坏现有日报功能**
 > 依据：外部设计文档《日报知识库系统 · 实现技术文档 v2.0》+ 对 mono 现有代码的实测核实
 > 上游设计缺口已在本方案中修正（见 §6 两个设计债）

@@ -1424,3 +1424,21 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 **偏差说明**：①「僵尸 `running` 行阻塞重跑」的担忧**不成立**（已读码核实）：`_lookup_run` 仅 `status='ok'` 才走 skip 分支，`running`/`partial`/`failed` 的历史行走 `UPDATE ... SET status='running'` **复用同一 `run_id` 原地重跑**，遗留行既不需人工清理也不挡重跑。②`LLM_TIMEOUT`/`LLM_MAX_RETRIES` 在 `get_llm` 单一咽喉点生效，**全局影响**主 agent 图、调度 job、QQ 分支等所有调用方（不止抽取层）；默认 300s/1 次对交互式调用足够宽松，且可 env 覆盖，故按"通用缺陷通用修"处理，未做抽取层专属分支。③全仓 pytest 首两轮出现 `test_proactive_p2.py::test_answered_topics_lru_trimmed` 的 Windows `PermissionError`（`os.replace` 目标被占用），清空 `tmp_pytest` 残留后复跑全绿 —— 属**测试临时目录跨会话残留**的既有基础设施问题，与本次改动无关（该用例单独跑、清理后跑均通过）。
 
 **待办更新**：①今晚 23:30 `kg-extract` 首次定时触发（`config/schedule.json` 已启用），次日核 `kg_runs` 当日行 `status` 与 `channel_stats`，确认无通道超时。②按军规⑥继续观测一周 `info_pack_health.jsonl` 的 `_KG`。③若后续仍有通道超时，按 `channel_stats` 的 `error` 定位是素材过大（调 `KG_EXTRACT_CHANNEL_TIMEOUT`）还是 provider 侧长尾（调 `LLM_TIMEOUT`）。
+
+## [2026-10-19] langTrack KG 抽取层：todos 通道耗时排查 + 逐通道素材路由 + 通道运维日志
+
+**背景**：接上一条「通道挂死修复」后，2026-10-18 实跑中 `todos` 通道仍无产物（`error=OpenAITimeoutError`）。用户质疑「为什么 todos 这么长、是不是根本没并行」，要求加运维日志排查「到底哪边的原因」并给出优化方向。
+
+**已完成**：
+- `src/gacore/llm.py`：`get_llm` 新增 `timeout` / `max_retries` 形参（`None` 时仍读 `LLM_TIMEOUT`/`LLM_MAX_RETRIES`，交互路径行为不变）；非 `None` 时显式覆盖，负重试钳 0。抽取路径据此与交互路径分离预算。
+- `src/gacore/langTrack/extract/runner.py`：①**接线素材路由**——`_run_channels` 逐通道取 `material.select(spec.sources)`，不再六通道同吃当日全量素材；②**抽取路径放宽超时 + 不重试**——`_resolve_llm` 显式传 `timeout=_extract_llm_timeout()`（env `KG_EXTRACT_LLM_TIMEOUT`，缺省 `_DEFAULT_EXTRACT_LLM_TIMEOUT = 600.0`s）+ `max_retries=0`；③**通道运维日志**——新增 `_usage_of`/`_finish_reason_of`/`_probe`/`_log_channel`，每通道把 `prompt_chars`/`routed_sources`/`elapsed_ms`/`attempts`/`response_chars`/`usage`/`finish_reason` 写进 `outcome.extra`，经 `ChannelOutcome.as_dict` 落 `kg_runs.channel_stats`，并落一行 `kg_extract_channel` 到 `logs/<day>/app.jsonl`（ok→info、其余→warning）；`attempts` 计数修正为请求前递增。
+- `src/gacore/langTrack/extract/material.py`：`material_stats` 补 `by_source_chars`，运维日志一眼看出当日哪个源把素材撑大。
+- `src/gacore/langTrack/extract/__main__.py`：新增 `_channel_line`，CLI 逐通道打印上述运维字段。
+- 封闭测试：`tests/test_llm.py` 新增 3 例（显式覆盖 env / 负重试钳 0 / anthropic 字段名）；`tests/test_langTrack_extract_events.py` 新增 3 例（`test_channel_receives_only_its_routed_sources`、`test_channel_stats_carry_ops_telemetry`、`test_extract_llm_budget_is_wider_and_never_retries`）。
+- 文档三处同步：`docs/langTrack-tech.md` §9.28 新增「todos 通道耗时排查与优化」小节 + 素材路由/通道运维日志/`material_stats`/`runner.py` 模块表行；`docs/architecture-flow.mmd` 的 `EX` 节点补素材路由、抽取 LLM 预算、通道运维日志标注；`docs/kg-extract-plan.md` 状态行补同日修复；根 `.env.example` 与 `apps/withlanggraph/.env.example` 补 `KG_EXTRACT_LLM_TIMEOUT`（R9）。
+
+**实测验证**：全仓 `uv run ruff check apps packages tests` 全绿；`uv run pytest` **1480 passed / 5 skipped**（上一条基线 1474 passed，净增 6）。**2026-10-18 真实数据实跑**：`todos` 通道**首次成功产出 `rows=18`**，`prompt_chars=30445`（路由后，全量为 56027）、`elapsed_ms=156662`、`output_tokens=18361`（`reasoning=16904`）、`finish_reason=stop`；`relations` ok 12（235559ms）、`patterns` ok 35、`worldview` ok 16、`emotions` ok 7；`events` 因 `prompt_chars=55154`（含 `_EDGE` 21585 字符）在 600s 超时点被截断记 `failed`，整次 `status=partial`。运维日志字段完整落 `kg_runs.channel_stats` 与 `logs/2026-10-18/app.jsonl`。
+
+**偏差说明**：①用户「没并行」的直觉**不成立**（已反推 `logs/<day>/llm_requests.jsonl` 时间线核实）：六通道 start 落在同一秒，墙钟 ≈ `max(duration)` 而非 `sum(duration)`，阶梯感是各通道输出体量不同造成的假象。②`todos` 耗时的**主因在 provider 侧**：`GLM-5.3-Flash` 是推理模型，耗时几乎全花在隐藏推理 token 上（`output_tokens` 12K–25.7K，按 ~60 tok/s 需 156–411s），与可见 JSON 体量不成比例；此前 `LLM_TIMEOUT=300s` 卡在正常区间中段，把合法长生成误杀成超时。③我方放大项是「`ChannelSpec.sources` 只声明未接线」（输入白付 46%）与「`LLM_MAX_RETRIES=1`」（超时后再空等一个完整预算），本次一并消除。④客户端超时语义是「空闲无数据」而非「总时长上限」：同轮 `relations` 单次 592s 仍成功（token 持续流动），`todos` 在 300s 内一个字节都没回来才被判超时。
+
+**待办更新**：①评估 `events` 通道是否裁剪 `_EDGE` 源（当前 55154 字符，600s 超时点被截断）。②今晚 23:30 `kg-extract` 首次定时触发，次日核 `kg_runs` 当日行 `status` 与 `channel_stats`，确认无通道超时。③按军规⑥继续观测一周 `info_pack_health.jsonl` 的 `_KG`。④重跑语义改为「只补上次失败/未跑的通道，已 ok 的跳过」，并新增显式 `--rebuild` 用于清理已有改述污染。
