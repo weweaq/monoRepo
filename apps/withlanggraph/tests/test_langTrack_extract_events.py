@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import sys
@@ -224,6 +225,33 @@ def test_partial_status_when_one_channel_fails(tmp_path, monkeypatch):
     assert result.status == "partial"
     assert result.channels["events"]["status"] == "ok"
     assert result.channels["zzz_probe"]["status"] == "failed"
+
+
+def test_hanging_channel_times_out_without_blocking_others(tmp_path, monkeypatch):
+    """单通道 LLM 永不返回 → 该通道记 failed 超时，其余通道照常落库（整次 partial）。
+
+    这是挂死事故的回归护栏：没有超时兜底时 asyncio.gather 会无限等待，整轮抽取卡死。
+    """
+    cfg, db = _setup(tmp_path)
+    monkeypatch.setenv("KG_EXTRACT_CHANNEL_TIMEOUT", "0.05")
+    prompt_dir = cfg.root / "config" / "kg_prompts"
+    (prompt_dir / "zzz@v1.md").write_text("HANG", encoding="utf-8")
+
+    class _SelectiveLLM:
+        async def ainvoke(self, messages: list[Any]) -> _Resp:
+            if "HANG" in messages[0].content:
+                await asyncio.sleep(3600)
+            return _Resp(json.dumps(PAYLOAD, ensure_ascii=False))
+
+    probe = ChannelSpec(key="zzz_probe", prompt="zzz@v1.md", sources=("_CHAT",), handle=lambda c, x, p: (0, {}))
+    monkeypatch.setattr(runner, "CHANNELS", (*runner.CHANNELS, probe))
+
+    result = run_extract(DAY, cfg, db_path=db, llm=_SelectiveLLM(), only=["events", "zzz_probe"])
+
+    assert result.channels["zzz_probe"]["status"] == "failed"
+    assert "超时" in result.channels["zzz_probe"]["error"]
+    assert result.channels["events"]["status"] == "ok"
+    assert result.status == "partial"
 
 
 def test_unknown_channel_key_is_rejected(tmp_path):

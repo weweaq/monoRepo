@@ -164,3 +164,32 @@ def test_get_llm_empty_tool_list_still_binds() -> None:
     bound = get_llm([], _OPENAI_ENV)
     assert isinstance(bound, RunnableBinding)
     assert bound.kwargs.get("tools") == []
+
+
+def test_get_llm_applies_default_timeout_and_retries() -> None:
+    """未配 LLM_TIMEOUT/LLM_MAX_RETRIES 时落到默认值，避免客户端无限期等待。"""
+    bound = get_llm([], _OPENAI_ENV)
+    assert bound.bound.request_timeout == 300.0
+    assert bound.bound.max_retries == 1
+
+
+def test_get_llm_reads_timeout_and_retries_from_env() -> None:
+    env = {**_OPENAI_ENV, "LLM_TIMEOUT": "45", "LLM_MAX_RETRIES": "4"}
+    bound = get_llm([], env)
+    assert bound.bound.request_timeout == 45.0
+    assert bound.bound.max_retries == 4
+
+
+def test_get_llm_anthropic_reads_timeout_and_retries_from_env() -> None:
+    env = {**_ANTHROPIC_ENV, "LLM_TIMEOUT": "45", "LLM_MAX_RETRIES": "0"}
+    bound = get_llm([], env)
+    assert bound.bound.default_request_timeout == 45.0
+    assert bound.bound.max_retries == 0
+
+
+def test_get_llm_falls_back_on_invalid_timeout_env() -> None:
+    """非法值不抛异常：timeout 回落默认，max_retries 负值钳到 0。"""
+    env = {**_OPENAI_ENV, "LLM_TIMEOUT": "abc", "LLM_MAX_RETRIES": "-3"}
+    bound = get_llm([], env)
+    assert bound.bound.request_timeout == 300.0
+    assert bound.bound.max_retries == 0

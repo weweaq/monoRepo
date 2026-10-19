@@ -6,6 +6,8 @@
 - 幂等：唯一索引 ``ux_kg_runs_day_hash_ver(day, raw_hash, prompt_ver)`` 命中且
   ``status='ok'`` → 整次跳过；非 ok 的历史运行复用同一 ``run_id`` 原地重跑。
 - 失败隔离：通道并发执行，任一通道异常只记 ``failed``，不影响其他通道（整次 status=partial）。
+- 超时兜底：单通道超过 ``KG_EXTRACT_CHANNEL_TIMEOUT``（默认 900s）未返回即记 failed，
+  避免"LLM 客户端挂死在空闲连接"的通道把 ``asyncio.gather`` 无限拖住。
 - 落库幂等：``edge_id`` 由内容派生，重跑撞 PK 即静默忽略。
 """
 
@@ -39,6 +41,11 @@ _CN_TZ: Final = _dt.timezone(_dt.timedelta(hours=8))
 _FENCE_RE: Final = re.compile(r"^```[a-zA-Z]*\s*|\s*```$")
 
 _OK_STATUS: Final = "ok"
+
+# 单通道超时兜底（秒）。正常一整天素材的单通道 LLM 调用约 4 分钟，此处留 ~4x 余量；
+# 它兜的是"LLM 客户端挂死在空闲连接上、永不返回"这条路径——没有它，一个通道挂死会
+# 让 asyncio.gather 无限等待，整轮抽取卡住（LLM_TIMEOUT 只能兜单次请求，兜不住重试叠加）。
+_DEFAULT_CHANNEL_TIMEOUT: Final = 900.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,6 +166,41 @@ async def _extract_channel(
     return outcome
 
 
+def _channel_timeout() -> float:
+    """单通道超时（秒）：``KG_EXTRACT_CHANNEL_TIMEOUT`` 覆盖，缺失/非法回落到默认值。"""
+    raw = os.environ.get("KG_EXTRACT_CHANNEL_TIMEOUT")
+    if raw is None:
+        return _DEFAULT_CHANNEL_TIMEOUT
+    try:
+        seconds = float(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_CHANNEL_TIMEOUT
+    return seconds if seconds > 0 else _DEFAULT_CHANNEL_TIMEOUT
+
+
+async def _extract_channel_guarded(
+    spec: ChannelSpec,
+    llm: Any,
+    prompt: str,
+    material_text: str,
+    conn: sqlite3.Connection,
+    ctx: ExtractContext,
+    timeout: float,
+) -> ChannelOutcome:
+    """给单通道套超时兜底：挂死的通道记 failed，不让 gather 无限等待。
+
+    ``wait_for`` 超时以取消内层协程的方式生效；``_extract_channel`` 只吞 ``Exception``，
+    取消（``CancelledError`` 属 ``BaseException``）会正常穿透，故不会被误记成 ok。
+    """
+    try:
+        return await asyncio.wait_for(
+            _extract_channel(spec, llm, prompt, material_text, conn, ctx),
+            timeout=timeout,
+        )
+    except TimeoutError:
+        return ChannelOutcome(key=spec.key, status="failed", error=f"通道超时：{timeout:g}s 内未返回")
+
+
 async def _run_channels(
     specs: Sequence[ChannelSpec],
     llm: Any,
@@ -167,8 +209,10 @@ async def _run_channels(
     conn: sqlite3.Connection,
     ctx: ExtractContext,
 ) -> list[ChannelOutcome]:
+    timeout = _channel_timeout()
     tasks = [
-        _extract_channel(spec, llm, prompts[spec.key], material_text, conn, ctx) for spec in specs
+        _extract_channel_guarded(spec, llm, prompts[spec.key], material_text, conn, ctx, timeout)
+        for spec in specs
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
     outcomes: list[ChannelOutcome] = []
