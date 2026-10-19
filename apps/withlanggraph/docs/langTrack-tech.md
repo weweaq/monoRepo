@@ -1642,9 +1642,9 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 
 ---
 
-## 9.28 langTrack KG 抽取层（S1 骨架 + S2 relations/todos/消解/闭合 + S3 候选通道 + S4 `_KG` 接日报，2026-10-18）
+## 9.28 langTrack KG 抽取层（S1 骨架 + S2 relations/todos/消解/闭合 + S3 候选通道 + S4 `_KG` 接日报 + S5 调度与灰度，2026-10-18）
 
-> 落地计划 [`kg-extract-plan.md`](./kg-extract-plan.md)。本节记录**已实现**的技术事实：S1（骨架 + events 通道）、S2（relations/todos 通道 + 实体消解 + 区间闭合）、S3（emotions/patterns/worldview 候选通道）、S4（`_KG` 源接入日报信息包）。S5（调度 + 灰度开启）尚未实施，见计划 §5。
+> 落地计划 [`kg-extract-plan.md`](./kg-extract-plan.md)。本节记录**已实现**的技术事实：S1（骨架 + events 通道）、S2（relations/todos 通道 + 实体消解 + 区间闭合）、S3（emotions/patterns/worldview 候选通道）、S4（`_KG` 源接入日报信息包）、S5（`scheduler` 调度入口 + 灰度开启 + 观测）。
 
 ### 定位与边界（决策 D2）
 
@@ -1763,16 +1763,30 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 - **关联既有缺陷修复**：`build_info_pack_report` 对 `status=disabled` 的源原会误标 `note="未进包:预算熔断"`，条件改为 `st["status"] not in ("empty", "disabled")`。
 - **测试**：新增封闭测试 `tests/test_info_pack_kg.py`（9 例，合成库落盘 tmp、外部源全 stub）；`tests/test_source_registry.py::_inject_failure` 登记 `_KG` 分支（打桩 `dip._KG_FN`）。
 
+### 调度接入（S5，`scheduler.py`）
+
+- **触发方式（计划书偏差修正）**：计划原假设「新增任务只改 `config/schedule.json`，不动 `scheduler.run_job`」经实测**不成立**——`load_jobs` 对非 `proactive` job 强制要求 `prompt`（缺失即 `KeyError` 静默跳过），且 `run_loop` 只有 `proactive` 与默认 `job`（跑 LLM 图）两条分支，全仓无 CLI/shell 型 job 通道。故 S5 改动 `scheduler.py`，新增 `type="extract"` 通道。
+- **装载**：`load_jobs` 把 `type ∈ {proactive, extract}` 与默认 `job` 并列，允许**无 `prompt`**（抽取不喂 LLM prompt，避免 `KeyError` 误跳过）；默认类型仍保留「有 prompt」契约。
+- **分派**：`run_loop` 新增 `type == "extract"` 分支——提交 `run_extract_job` 到**独立单 worker 池** `EXTRACT_POOL`（`ThreadPoolExecutor(max_workers=1)`，与 `PROACTIVE_POOL` 隔离，避免两类重任务互相排队），不阻塞轮询；提交后立即 `save_state` 记 `last_run`，同 tick 不重发。
+- **执行体 `run_extract_job(job, cfg, for_day=None)`**：算目标日 → 调 `gacore.langTrack.extract.run_extract(day, cfg)` → 把 `RunResult.status/rows/material_chars` 写日志。**不走 `_deliver`、不写 output、不写 daily note**（抽取已是确定性收尾，产物落 `kg_*` 表供 `_KG` 源只读消费）；异常自身吞掉并记 `error`（worker 顶层再有 `_log_extract_failure` 兜底），绝不炸轮询。
+- **目标日口径**：默认 `datetime.now(UTC).astimezone().date()`（与 `_build_job_prompt` 的 today 一致）。23:30 抽当天 → 当日图能进 23:50 日报；**代价是当天 23:30–23:50 数据不进当日图**（计划书已接受的取舍）。`for_day` 供历史/测试覆盖。
+- **env（R9）**：`scheduler.main()` 已 `load_dotenv()`，worker 线程继承进程环境，`run_extract` 内 `get_llm` 能取到 provider key，无需在 `run_extract_job` 重复调用。
+- **job 定义**：`config/schedule.json` 新增 `{"name": "kg-extract", "schedule": "23:30", "type": "extract", "enabled": true}`（入库；排在 `daily-report` 23:50 前）。
+- **灰度开启**：本地 `config/info_pack.json` 的 `"_KG".enabled` 改 `true`（该文件 gitignore，非入库）。`load_source_config` 现读现用，`/config` 页可热开关、下次构建即生效，无需重启 8010。
+- **测试**：新增封闭测试 `tests/test_scheduler_extract_job.py`（7 例）：`load_jobs` 装载无 prompt 的 extract job（且默认 job 无 prompt 仍跳过，回归）；`run_extract_job` 取 today/`for_day`、不投递不写盘、失败吞掉只记账；`run_loop` 分派到 `EXTRACT_POOL`（FakePool）且永不落 `run_job` 图路径；同一 tick 内 extract 与普通 job 混合时分派互不串道。全部打桩 `run_extract`，不触真实库/网络/LLM。
+
 ### 实跑验证（2026-10-18）
 
 - S1：`--day 2026-10-16` → `status=ok rows=32`（`material_chars=29875`，`raw_hash=39b11196f4e7`）；库内 `kg_runs=1`、`kg_nodes=14`、`kg_edges=18`。二次直跑（不带 `--force`）→ `status=skipped rows=0`（幂等命中）。
 - S2：`--day 2026-10-16 --force` → `status=ok rows=43`；通道 `events=21`/`relations=16`/`todos=6`，`_postprocess=ok`。库内当日 `kg_relations=10`、`kg_edges` 已闭合 `valid_to` 3 条；无悬空边/悬空关系，`kg_relations` 无 L2 缺 attributor、无 L3 `strength>0.6`。
 - S3：`--day 2026-10-16 --force` → `status=ok rows=88`；六通道 `events=17`/`relations=16`/`todos=10`/`emotions=2`/`patterns=33`/`worldview=10`，`_postprocess=ok`。库内当日 `kg_emotions=1`、`kg_patterns=16`、`kg_worldview=5`；`kg_patterns` 无 `confidence>0.7`、`kg_worldview` 无 `confidence>0.6`，两表 `status` 全为 `candidate`，三表均无悬空 `subject`。
 - S4：`_build_kg("2026-10-16", Config.default())` 只读实跑真实 `data/langTrack.db` → title `〔KG·当日图摘要〕`、`status=ok`、`pack=1071` 字符、`detail=57003` 字符；运行头 `节点 57 · 当日边 63（失效 0）· 稳定关系 21 · 情绪 1 · 模式候选 16 · 世界观候选 5`；人物 Top / 未完成待办 / 关系变化 / 情绪基调四节正常渲染（cap 1200 未触发截断）。
-- 封闭测试（S1 25 例 + S2 3 文件 + S3 1 文件 + S4 1 文件）不触网、不触真实库、不调真实 LLM。
+- S5：`run_extract_job` 分派路径封闭测试 7 例通过；`load_jobs(Config.default())` 实跑返回 `[('kg-extract', 'extract', '23:30', True), ('daily-report', 'job', '23:50', True), ('weekly-summary', 'job', 'every 7d', True)]`；`_build_kg('2026-10-16', Config.default())` 仍 `status=ok`、`pack=1071`（灰度开启 `_KG` 后 builder 只读行为不变）。
+- 封闭测试（S1 25 例 + S2 3 文件 + S3 1 文件 + S4 1 文件 + S5 1 文件）不触网、不触真实库、不调真实 LLM。
 
 ### 未纳入（见计划 §5/§12）
 
-- S5 调度 + 灰度验收：`config/schedule.json` 新增 `kg-extract` job（23:30）、灰度开启 `_KG`（`config/info_pack.json` `"_KG".enabled=true`）、按军规⑥观测一周 `info_pack_health.jsonl`。
+- **观测一周**（军规⑥）：S5 代码与灰度已落地，`info_pack_health.jsonl` 的 `_KG`（`status`/`chars`/`full_chars`）需跨日实跑累积一周后人工判读，属运行期动作、不在本阶段代码范围。
+- **「默认停用」仓库层可复现**：`config/info_pack.json` gitignore，代码默认 `enabled`，新克隆环境 `_KG` 默认开启。让「默认停用」在仓库层可复现（`SourceSpec.default_enabled` 或 `info_pack.example.json`）需独立决策，属后续阶段（见交接文档 §7 风险①）。
 - 候选→规律升格机制、图查询层、周期聚合：上游文档空白/依赖前项，属后续独立阶段（计划 §12），本阶段 `patterns`/`worldview` 只落 `status='candidate'` 的候选。
 - 消解阈值观察项：实跑中 `我（用户）`/`用户（本人）`（同一人的两种写法）fuzzy 得分 0.55，恰低于 `0.6` 候选线，故当日无别名行——机制正常（能算分、够线才落行），阈值/权重是否调优留待候选复核阶段评估。

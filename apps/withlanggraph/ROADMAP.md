@@ -1386,3 +1386,25 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 **偏差说明**：①计划书原定 `cap=600` → 实测 2026-10-16 日摘要 1071 字符，600 会截掉情绪段并触发指向 `langTrack_stats` 的补查提示（而 `_KG` 真源是 `kg_*` 表而非 `langTrack_stats`），故按实测抬到 1200 并在常量注释记口径；各节 TOP 已先收敛，超限仍由框架行截断兜底。②"默认停用"落在本地 `config/info_pack.json`（gitignore，非入库配置），代码默认仍 enabled——灰度须显式开 `enabled=true`（计划 §5 S5 已列）。③`_kg_day_graph` 直读 `langTrack.db`，`extract` 与 `daily_info_pack` 同属 `gacore` 包内（非跨包），R2 合规。④唯一存量行为改动是停用源误报 bug 修复（缺陷修复，非行为变更）；现有 12 源 builder 与 SourceSpec 一字未动。⑤`_KG` 不进 system prompt 注入面（`fact_card` compact 仍是 chat 唯一注入出口），只进当日信息包落盘 + 本人邮箱。
 
 **待办更新**：S5 调度——`config/schedule.json` 新增 `kg-extract` job（23:30）；灰度开启 `_KG`（`config/info_pack.json` `"_KG".enabled=true`）；按军规⑥观测一周 `info_pack_health.jsonl`，确认 `_KG` status 与 `chars` 稳定。观察项：`_KG` 上线后 `full_chars` 恒大于 cap 或 status 长期非 ok = 采样设计有问题；抽取产物质量（人物消解命中率、待办闭合率）随实跑累积再评估。
+
+## [2026-10-18] langTrack KG 抽取层 S5：调度入口（`type="extract"`）+ 灰度开启 `_KG`
+
+**背景**：续 S4，按 `docs/kg-extract-plan.md` §5 S5 收尾——让抽取按日自动运行（23:30，排在 `daily-report` 23:50 之前，保证当日图能进当日日报），灰度开启 `_KG`，并按军规⑥观测一周。核心约束：抽取是**确定性收尾**（内部自带 LLM 六通道，但不走 agent 图、不需要 prompt），必须有独立调度通道且绝不阻塞轮询；不投递、不写日报文件。
+
+**已完成**：
+- `scheduler.py` 新增 `type="extract"` job 通道（计划书「只改 JSON、零代码」假设经实测**不成立**，见偏差①）：
+  - `load_jobs`：`type ∈ {proactive, extract}` 允许**无 `prompt`**（抽取不喂 LLM prompt），避免 `KeyError` 静默跳过；默认 `job` 类型仍保留「有 prompt」契约（回归测试守住）。
+  - `EXTRACT_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kg-extract")`：独立单 worker 池，与 `PROACTIVE_POOL` 隔离（两类重任务不互相排队），不阻塞 30s 轮询。
+  - `run_loop`：新增 `type == "extract"` 分支 → `EXTRACT_POOL.submit(run_extract_job, job, cfg)` + done-callback `_log_extract_failure`（worker 顶层异常兜底不吞）→ 立即 `save_state` 记 `last_run`（同 tick 不重发）。
+  - 执行体 `run_extract_job(job, cfg, for_day=None)`：算目标日 → `run_extract(day, cfg)` → 记 `status/rows/material_chars/duration` 日志；**不走 `_deliver`、不写 output、不写 daily note**（产物落 `kg_*` 表供 `_KG` 源只读消费）；异常自身吞掉记账，绝不炸轮询。
+  - `Job` docstring 补 `type="extract"` 说明；`__all__` 导出 `EXTRACT_POOL` / `run_extract_job`。
+- `config/schedule.json`（入库）新增 `{"name": "kg-extract", "schedule": "23:30", "type": "extract", "enabled": true}`，排在 `daily-report` 23:50 之前。
+- 灰度开启 `_KG`：本地 `config/info_pack.json` 的 `"_KG".enabled` 由 `false` 改 `true`（该文件 gitignore，不入库）；`load_source_config` 现读现用，`/config` 页可热开关、下次构建即生效，无需重启 8010。
+- 新增封闭测试 `tests/test_scheduler_extract_job.py`（7 例）：①`load_jobs` 装载无 prompt 的 extract job；②默认 job 无 prompt 仍跳过（回归）；③`run_extract_job` 默认取 today；④`for_day` 覆盖；⑤失败吞掉只记账不抛；⑥`run_loop` 分派到 `EXTRACT_POOL`（FakePool）且永不落 `run_job` 图路径、state 落盘；⑦同一 tick 内 extract 与普通 job 混合时分派互不串道。全部打桩 `run_extract`，不触真实库/网络/LLM。
+- 文档三处同步：`docs/langTrack-tech.md` §9.28 补「调度接入（S5）」小节 + 实跑验证 + 未纳入收窄；`docs/kg-extract-plan.md` 状态行 + §5 S5 偏差；本 ROADMAP 记录。
+
+**实测验证**：`load_jobs(Config.default())` → `[('kg-extract', 'extract', '23:30', True), ('daily-report', 'job', '23:50', True), ('weekly-summary', 'job', 'every 7d', True)]`。`_build_kg('2026-10-16', Config.default())` 灰度开启后仍 `status=ok`、`pack=1071` 字符（builder 只读行为不变）。全仓 `uv run ruff check apps packages tests` 全绿；`uv run --all-packages pytest` **1469 passed / 5 skipped**（S4 为 1462，净增 7）。
+
+**偏差说明**：①计划书 §5 S5 与「约束」第 4 条原假设「新任务只改 `config/schedule.json`，不动 `scheduler.run_job`」经实测**有误**——`scheduler.load_jobs` 对非 `proactive` job 强制要求 `prompt`（缺失 `KeyError` 静默跳过），`run_loop` 只有 `proactive` 与默认 `job`（LLM 图）两条分支，全仓无 CLI/shell 型 job 通道，`run_extract` 唯一调用点原为 `extract/__main__.py`；故必须改 `scheduler.py`（换触发方式的 Option B/C 会引入非确定性或运维分叉，已弃）。②目标日口径取 today（23:30 抽当天）：当日图进当日 23:50 日报，代价是当天最后 ~20 分钟数据不进图（计划书已接受的取舍）；次日凌晨抽前一日会赶不上 23:50 日报，与 S5 目标冲突。③抽取时 23:30 早于日报 23:50，`pack_detail/{day}/*.md` 尚未落盘 → `material.load_material` 走 `build_info_pack_report` 回退重跑全部取数，属**常态路径**（非异常）。④「默认停用」仓库层可复现（风险①）**本次不处理**：`config/info_pack.json` gitignore、代码默认 `enabled`，新克隆环境 `_KG` 默认开启；要可复现需 `SourceSpec.default_enabled` 或 `info_pack.example.json`，属独立阶段。⑤`docs/sre/` 未跟踪目录为定时任务运维产出，与本案无关，未提交。
+
+**待办更新**：（S1–S5 代码与灰度全落地）①按军规⑥**观测一周** `data/logs/info_pack_health.jsonl`（`_KG` 的 `status`/`chars`/`full_chars`），确认长期 `ok` 且 `full_chars` 不长期 > cap；页面 `http://127.0.0.1:8010/health`（矩阵）与 `/health/source`（单源三节归因）交叉核看，回算历史日用 `backfill_health.refresh_day`。②观测期结束写 `docs(langTrack): KG 抽取上线观测记录`（第二笔提交）。③回滚预案：`_KG.enabled=false` 秒级生效（无代码回滚）→ 必要时删 `kg_*` 表（源数据在 `events` 与 `pack_detail`，可重建）→ 阶段 tag 逐个 `git revert`。④遗留项：「默认停用」仓库层可复现、候选升格机制、图查询层、周期聚合（计划 §12）。

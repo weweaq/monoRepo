@@ -1,6 +1,6 @@
 # langTrack 结构化知识图谱（KG）抽取层 · 落地实现计划
 
-> 状态：S1（骨架 + events 通道）、S2（relations/todos 通道 + 实体消解 + 区间闭合）、S3（emotions/patterns/worldview 候选通道）、S4（`_KG` 源接入日报信息包）已落地（2026-10-18）；S5 未实施 · 编写日期：2026-10-17
+> 状态：S1（骨架 + events 通道）、S2（relations/todos 通道 + 实体消解 + 区间闭合）、S3（emotions/patterns/worldview 候选通道）、S4（`_KG` 源接入日报信息包）、S5（`scheduler` 调度入口 + 灰度开启 `_KG`）已落地（2026-10-18）；S5 观测一周待跨日实跑 · 编写日期：2026-10-17
 > 目标：把现有"笼统"的日报，升级为**按日结构化抽取 + 可溯源**的素材，且**不破坏现有日报功能**
 > 依据：外部设计文档《日报知识库系统 · 实现技术文档 v2.0》+ 对 mono 现有代码的实测核实
 > 上游设计缺口已在本方案中修正（见 §6 两个设计债）
@@ -350,14 +350,16 @@ uv run --package gacore python -m gacore.backfill_health --day 2026-10-16   # re
 ```
 **提交**：`feat(langTrack): 将 KG 接入日报信息包（_KG 源，最低优先级，默认停用）`
 
-### S5 调度 + 灰度验收（1.5 天）
+### S5 调度 + 灰度验收（1.5 天）✅ 代码与灰度已落地（2026-10-18，观测一周待跨日实跑）
 
-- [ ] `config/schedule.json` 新增 job（纯 JSON）：`{"name": "kg-extract", "schedule": "23:30", "enabled": true, ...}`
+- [x] `config/schedule.json` 新增 job：`{"name": "kg-extract", "schedule": "23:30", "type": "extract", "enabled": true}`
       —— 排在 `daily-report`（23:50）之前，保证当日图能进当日日报
-- [ ] 灰度开启 `_KG`：`config/info_pack.json` 的 `"_KG".enabled = true`
-- [ ] 用现有补跑链验证：`python -m gacore.rerun --day 2026-09-14`（北京那几天），人工对比新旧日报
-- [ ] 按军规⑥**观测一周** `info_pack_health.jsonl`，确认 `_KG` 状态与字符数稳定
+- [x] 调度入口：**改 `scheduler.py`**（原「零代码」假设不成立，见下方偏差）——新增 `type="extract"` 通道 + `run_extract_job` + 独立 `EXTRACT_POOL`
+- [x] 灰度开启 `_KG`：`config/info_pack.json` 的 `"_KG".enabled = true`（该文件 gitignore，不入库）
+- [ ] 按军规⑥**观测一周** `info_pack_health.jsonl`，确认 `_KG` 状态与字符数稳定（跨日实跑，运行期动作）
 - [ ] 提交：`chore(langTrack): 新增 kg-extract 定时任务并灰度开启 _KG 源` + `docs(langTrack): KG 抽取上线观测记录`
+
+> **落地偏差（2026-10-18）**：计划本假设「新任务只改 `config/schedule.json`，不动 `scheduler.run_job`」经实测**有误**。`scheduler.load_jobs` 对非 `proactive` job 强制要求 `prompt`（缺失 `KeyError` 静默跳过），`run_loop` 只有 `proactive` 与默认 `job`（LLM 图）两条分支，全仓无 CLI/shell 型 job 通道，`run_extract` 唯一调用点原为 `extract/__main__.py`。故 S5 改动 `scheduler.py`：`load_jobs` 放行无 prompt 的 `extract` job；`run_loop` 新增分支提交 `run_extract_job` 到独立单 worker 池 `EXTRACT_POOL`（不阻塞轮询、与 `PROACTIVE_POOL` 隔离），执行体**不投递、不写日报**。**目标日口径取 today**（23:30 抽当天，当日图进当日日报；代价是当天最后 ~20 分钟数据不进图，计划书已接受）。参见 `docs/langTrack-tech.md` §9.28「调度接入（S5）」。
 
 ---
 

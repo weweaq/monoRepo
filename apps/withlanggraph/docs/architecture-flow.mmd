@@ -6,7 +6,7 @@ flowchart TD
 
     subgraph ENTRY["① 入口/触发  (scheduler · proactive · cli · qq · rerun)"]
         direction LR
-        SC["scheduler.run_job<br/>配置: config/schedule.json<br/>(name/schedule/type/window/<br/>cooldown_minutes/deliver_to)<br/>触发: 每30s轮询一次<br/>next_run_time 支持 每日固定 HH:MM<br/>或 every N<d/h/m> 间隔"]
+        SC["scheduler.run_job<br/>配置: config/schedule.json<br/>(name/schedule/type/window/<br/>cooldown_minutes/deliver_to)<br/>触发: 每30s轮询一次<br/>next_run_time 支持 每日固定 HH:MM<br/>或 every N<d/h/m> 间隔<br/>type 分派: job(LLM图·run_job)<br/>/proactive(主动池·PROACTIVE_POOL)<br/>/extract(KG抽取·run_extract_job→EXTRACT_POOL)"]
         QQ["qq 消息/反馈"]
         RC["proactive=定时主动推送:<br/>scheduler 每30s轮询 schedule.json 中<br/>type==proactive 的 job<br/>(proactive_due 过 window+cooldown)→入池<br/>cli=交互式 REPL: python -m gacore<br/>rerun=补跑: python -m gacore.rerun --day"]
     end
@@ -79,7 +79,7 @@ flowchart TD
             COR --> CB
             PRE --> CB
         end
-        SIP["daily_info_pack.SOURCES 注册表<br/>13 源 key/cap/priority/builder·注册序=priority升序<br/>(config/info_pack.json 覆盖预算<br/>·评审页 /config 改完即生效)<br/>classify_body 四态→header 状态<br/>(状态行守卫: - 开头+关键词≤行首8字符)<br/>_cap_lines 行级截断<br/>_assemble_blocks 整块丢弃熔断<br/>_LONG_TERM 采样: _compact_long_term<br/>global_mem_anchor 全保留+编年史尾窗单一截断<br/>v3.3 手机事实源:<br/>_PHONE_PLACE(15) fact_card卡·轨迹/异常<br/>_PHONE_USAGE(45) daily_stats聚合·作息<br/>_PHONE_NOTIF(65) 通知内容尾窗8条·同源合并<br/>sms/input/clipboard 边界=仅本地+本人邮箱(军规7)<br/>S4 KG 抽取源:<br/>_KG(105) _build_kg 只读 kg_* 当日图摘要·默认停用"]
+        SIP["daily_info_pack.SOURCES 注册表<br/>13 源 key/cap/priority/builder·注册序=priority升序<br/>(config/info_pack.json 覆盖预算<br/>·评审页 /config 改完即生效)<br/>classify_body 四态→header 状态<br/>(状态行守卫: - 开头+关键词≤行首8字符)<br/>_cap_lines 行级截断<br/>_assemble_blocks 整块丢弃熔断<br/>_LONG_TERM 采样: _compact_long_term<br/>global_mem_anchor 全保留+编年史尾窗单一截断<br/>v3.3 手机事实源:<br/>_PHONE_PLACE(15) fact_card卡·轨迹/异常<br/>_PHONE_USAGE(45) daily_stats聚合·作息<br/>_PHONE_NOTIF(65) 通知内容尾窗8条·同源合并<br/>sms/input/clipboard 边界=仅本地+本人邮箱(军规7)<br/>S4/S5 KG 抽取源:<br/>_KG(105) _build_kg 只读 kg_* 当日图摘要·灰度开启"]
         HP[("data/logs/info_pack_health.jsonl<br/>status/chars/full_chars/detail_chars<br/>write_pack_health")]
         DT[("data/logs/pack_detail/{date}/{key}.md<br/>三节: 完整取数详情/渲染文本/实际进包<br/>write_pack_detail · 保留90天<br/>+ _FACT_CARD.md (write_fact_card_detail)")]
         RVW["review_server :8010<br/>/review 锚点批注+diff 视图<br/>/health 矩阵(14天全窗口恒渲染·缺日整列hcol-norec<br/>·点日期表头=重算该日体检) /health/source 三节归因<br/>/llm-requests 运行回放(llm_runview 重建)<br/>/data 数据目录(data_catalog 纯读盘点·按日取数 /api/data/events)<br/>/places 语义地点编辑(places_page·待办队列+地图点选<br/>·POST /api/places/labels 直写 places.label/note(DB即真源 v3.5)<br/>·v3.6 人工改判: POST /api/places/correction 写 poi_override/address_override/lat_override/lon_override<br/>·v3.6 同名合并: POST /api/places/merge(stays/cells/trips/anomalies 改挂+删被并点)<br/>·GET /api/places/name_candidates 按有效坐标问高德候选<br/>·GET /api/places/data(与页面同源:含 amap key+选名阈值)<br/>·编辑面板「选名依据」:候选chip(名+POI/AOI+距离)可点亮填改判<br/>·POST /api/places/districts 区县背景)<br/>POST /api/revise(默认)·/api/rerun(需确认)<br/>POST /api/health/refresh(↻重算体检·零LLM)<br/>POST /api/etl/run·GET /api/etl/status(代理langTrack:8000<br/>·⟳立即转换ETL→轮询→自动重算窗口末日)"]
@@ -130,7 +130,8 @@ flowchart TD
     DT -. "完整取数详情节 (material._read_pack_detail)" .-> EX
     SIP -. "回退: build_info_pack_report detail_body (material._build_fresh)" .-> EX
     EX --> KG
-    KG -. "只读 kg_* 当日图摘要 (daily_info_pack._build_kg·_KG 源默认停用)" .-> SIP
+    KG -. "只读 kg_* 当日图摘要 (daily_info_pack._build_kg·_KG 源灰度开启)" .-> SIP
+    SC -. "kg-extract job (type=extract·23:30)<br/>run_loop→EXTRACT_POOL→run_extract_job(day)<br/>不投递/不写日报" .-> EX
     FB --> RVW
     RVW -. "_deliver_revised→scheduler._deliver（与 redeliver_day 同通道）/ run_job(for_day)" .-> FB
 
