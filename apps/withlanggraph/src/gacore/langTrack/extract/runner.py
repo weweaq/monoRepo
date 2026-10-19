@@ -26,7 +26,7 @@ import re
 import secrets
 import sqlite3
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
@@ -36,6 +36,15 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from gacore.config import Config
 from gacore.jsonl_logger import get_logger
 from gacore.langTrack.extract.channels import CHANNELS
+from gacore.langTrack.extract.contract import (
+    corrective_message,
+    detect_question,
+    fingerprint,
+    is_opencode,
+    max_attempts,
+    retryable_error,
+    with_no_question_rule,
+)
 from gacore.langTrack.extract.intervals import reclose_day
 from gacore.langTrack.extract.material import Material, load_material, material_stats
 from gacore.langTrack.extract.resolve import resolve_entities
@@ -188,6 +197,58 @@ def _log_channel(outcome: ChannelOutcome) -> None:
         _LOG.warning("kg_extract_channel", channel=outcome.key, **fields)
 
 
+def _log_attempt(
+    channel: str,
+    attempt: int,
+    result: str,
+    raw: str,
+    elapsed_ms: int,
+    *,
+    base: dict[str, Any] | None = None,
+    response: Any = None,
+    violation: str = "",
+    error: str = "",
+    action: str = "",
+) -> None:
+    """单次 LLM 调用的审计行：只记指纹/长度/用量，不记原文。"""
+    fields: dict[str, Any] = {
+        **(base or {}),
+        "channel": channel,
+        "attempt": attempt,
+        "result": result,
+        "elapsed_ms": elapsed_ms,
+    }
+    if action:
+        fields["action"] = action
+    if raw:
+        fields["response_chars"] = len(raw)
+        fields["response_hash"] = fingerprint(raw)
+    if response is not None:
+        usage = _usage_of(response)
+        if usage:
+            fields["usage"] = usage
+        finish = _finish_reason_of(response)
+        if finish:
+            fields["finish_reason"] = finish
+    if violation:
+        fields["violation"] = violation
+    if error:
+        fields["error"] = error
+    if result == "ok":
+        _LOG.info("kg_extract_attempt", **fields)
+    else:
+        _LOG.warning("kg_extract_attempt", **fields)
+
+
+def _exc_summary(exc: BaseException) -> str:
+    """异常摘要：只留类型/状态码，避免把上游响应体写进日志和 channel_stats。"""
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    name = type(exc).__name__
+    return f"{name} status={status}" if status else name
+
+
 async def _extract_channel(
     spec: ChannelSpec,
     llm: Any,
@@ -196,7 +257,7 @@ async def _extract_channel(
     conn: sqlite3.Connection,
     ctx: ExtractContext,
 ) -> ChannelOutcome:
-    """单通道：素材 → LLM（JSON 解析失败重试 1 次）→ 单事务落库。异常只记 failed。
+    """单通道：素材 → LLM（opencode 带契约重试）→ 单事务落库。异常只记 failed。
 
     无论成败都把本次调用的体检指标记进 ``outcome.extra``：素材侧看 ``prompt_chars``，
     provider 侧看 ``usage`` / ``finish_reason``，中间看 ``elapsed_ms`` / ``attempts``。
@@ -210,23 +271,120 @@ async def _extract_channel(
     started = time.perf_counter()
     attempts = 0
     response: Any = None
+    payload: dict[str, Any] | None = None
+    reasons: list[str] = []
+    last_error = ""
+    oc = is_opencode(llm)
+    limit = max_attempts(llm)
+    system_prompt = with_no_question_rule(prompt) if oc else prompt
+    messages = [SystemMessage(content=system_prompt), HumanMessage(content=material_text)]
+    audit_base = {
+        "day": ctx.day,
+        "run_id": ctx.run_id,
+        "provider": str(getattr(llm, "_llm_type", "") or ""),
+        "model": str(getattr(llm, "model_name", "") or getattr(llm, "model", "") or ""),
+    }
+    audit_base = {key: value for key, value in audit_base.items() if value}
     try:
-        messages = [SystemMessage(content=prompt), HumanMessage(content=material_text)]
-        attempts += 1
-        response = await llm.ainvoke(messages)
-        raw = _content_of(response)
-        try:
-            payload = parse_json_payload(raw)
-        except (ValueError, json.JSONDecodeError):
+        while attempts < limit:
             attempts += 1
-            response = await llm.ainvoke(messages)
-            payload = parse_json_payload(_content_of(response))
-        written, extra = spec.handle(conn, ctx, payload)
-        outcome.rows = written
-        outcome.extra.update(extra)
+            response = None
+            attempt_started = time.perf_counter()
+            try:
+                response = await llm.ainvoke(messages)
+            except Exception as exc:
+                elapsed_ms = int((time.perf_counter() - attempt_started) * 1000)
+                reasons.append(f"transport:{type(exc).__name__}")
+                will_retry = oc and attempts < limit and retryable_error(exc)
+                _log_attempt(
+                    spec.key,
+                    attempts,
+                    "error",
+                    "",
+                    elapsed_ms,
+                    base=audit_base,
+                    error=type(exc).__name__,
+                    action="retry" if will_retry else "abort",
+                )
+                if will_retry:
+                    await asyncio.sleep(min(2.0, 0.5 * 2 ** (attempts - 1)))
+                    continue
+                raise
+            raw = _content_of(response)
+            elapsed_ms = int((time.perf_counter() - attempt_started) * 1000)
+            try:
+                payload = parse_json_payload(raw)
+            except ValueError as exc:
+                marker = detect_question(raw) if oc else None
+                reason = f"question:{marker}" if marker else f"json_invalid:{type(exc).__name__}"
+                reasons.append(reason)
+                last_error = f"{type(exc).__name__}: {exc}"
+                will_retry = attempts < limit
+                _log_attempt(
+                    spec.key,
+                    attempts,
+                    "rejected",
+                    raw,
+                    elapsed_ms,
+                    base=audit_base,
+                    response=response,
+                    violation=reason,
+                    action="retry" if will_retry else "abort",
+                )
+                if not will_retry:
+                    break
+                if oc:
+                    messages = [*messages, HumanMessage(content=corrective_message(reason))]
+                continue
+            violation = ""
+            if oc:
+                marker = detect_question(raw)
+                if marker:
+                    violation = f"question_ignored:{marker}"
+                    _LOG.warning(
+                        "kg_extract_question_ignored",
+                        **audit_base,
+                        channel=spec.key,
+                        attempt=attempts,
+                        marker=marker,
+                        response_hash=fingerprint(raw),
+                        response_chars=len(raw),
+                        action="accept",
+                    )
+            _log_attempt(
+                spec.key,
+                attempts,
+                "ok",
+                raw,
+                elapsed_ms,
+                base=audit_base,
+                response=response,
+                violation=violation,
+                action="accept",
+            )
+            break
+        if payload is None:
+            detail = f"attempts={attempts}"
+            if reasons:
+                detail += f", reasons={','.join(reasons)}"
+            if last_error:
+                detail += f", last={last_error}"
+            outcome.status = "failed"
+            outcome.error = f"LLM 输出不可用（{detail}）"
+        else:
+            written, extra = spec.handle(conn, ctx, payload)
+            outcome.rows = written
+            outcome.extra.update(extra)
     except Exception as exc:  # noqa: BLE001 - 失败隔离：单通道异常不拖垮整次运行
         outcome.status = "failed"
-        outcome.error = f"{type(exc).__name__}: {exc}"
+        detail = _exc_summary(exc)
+        if attempts:
+            detail += f" | attempts={attempts}"
+        if reasons:
+            detail += f" | reasons={','.join(reasons)}"
+        outcome.error = detail
+    if reasons:
+        outcome.extra["failure_reasons"] = reasons
     _probe(response, outcome, started, attempts)
     _log_channel(outcome)
     return outcome
@@ -423,19 +581,32 @@ def _resolve_llm(llm: Any) -> Any:
     """注入点：默认按 .env 的 provider 建无工具模型（与 feedback/memory_maintenance 同法）。
 
     抽取路径与交互路径的预算不同：超时放宽到 ``KG_EXTRACT_LLM_TIMEOUT``（默认 600s，推理
-    模型合法长生成需要），且不重试——重试一次等于再等一个完整超时预算（300s 时代最坏
-    2×300s 空等），而超时的请求重试基本还会超时。
+    模型合法长生成需要）。传输层不重试（``max_retries=0``）：超时的请求重试基本还会超时；
+    opencode 的“输出不合规”重试在 ``_extract_channel`` 里做（默认 3 次，见
+    ``OPENCODE_MAX_ATTEMPTS``），非 opencode 仍只做 JSON 解析失败的 1 次重试。
+
+    ``log_requests=False``：整日 KG 素材含私聊/通知原文，不写 ``llm_requests.jsonl``；
+    只保留每通道的 hash/长度/usage 审计行。
+
+    可选 ``KG_EXTRACT_LLM_PROVIDER`` 只覆盖抽取路径的 provider（如 ``opencode``），
+    交互 agent 仍按 ``LLM_PROVIDER``——opencode 会话 API 不支持 gacore 的工具绑定。
     """
     if llm is not None:
         return llm
     from gacore.llm import get_llm
 
+    source: Mapping[str, str] = os.environ
+    override = (os.environ.get("KG_EXTRACT_LLM_PROVIDER") or "").strip()
+    if override:
+        source = {**os.environ, "LLM_PROVIDER": override}
+
     return get_llm(
         [],
-        os.environ,
+        source,
         bind_tools=False,
         timeout=_extract_llm_timeout(),
         max_retries=0,
+        log_requests=False,
     )
 
 

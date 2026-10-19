@@ -17,8 +17,13 @@ from langchain_openai import ChatOpenAI
 
 from gacore.config import ConfigError
 from gacore.llm_request_log import install_llm_logging
+from gacore.opencode_llm import (
+    DEFAULT_MODEL as OPENCODE_DEFAULT_MODEL,
+    DEFAULT_SERVER_URL as OPENCODE_DEFAULT_SERVER_URL,
+    OpencodeChatModel,
+)
 
-_SUPPORTED_PROVIDERS: Final = ("openai", "anthropic", "deepseek", "zhipu")
+_SUPPORTED_PROVIDERS: Final = ("openai", "anthropic", "deepseek", "zhipu", "opencode")
 _DEFAULT_OPENAI_MODEL: Final = "gpt-4o"
 _DEFAULT_ANTHROPIC_MODEL: Final = "claude-sonnet-4-5"
 # DeepSeek is an OpenAI-compatible endpoint (GA's configure_mykey.py: "native_oai").
@@ -80,6 +85,7 @@ def get_llm(
     bind_tools: bool = True,
     timeout: float | None = None,
     max_retries: int | None = None,
+    log_requests: bool = True,
 ) -> BaseChatModel:
     """Build a chat model for the env-named provider, optionally bound to the given tools.
 
@@ -91,6 +97,10 @@ def get_llm(
     indefinitely. Callers whose workload differs from the interactive default — e.g.
     the KG extract channels, which run a reasoning model over a whole day of material —
     can pass ``timeout``/``max_retries`` to override the env values for that client only.
+
+    ``log_requests=False`` skips the full request/response logger; the KG extract path
+    uses it so whole-day private material stays out of ``llm_requests.jsonl`` (it keeps
+    the per-attempt hash/length/usage audit instead).
 
     Raises MissingApiKeyError (a ValueError) when the provider's API key is missing.
     """
@@ -147,10 +157,19 @@ def get_llm(
                 timeout=timeout,
                 max_retries=max_retries,
             )
+        case "opencode":
+            llm = OpencodeChatModel(
+                server_url=source.get("OPENCODE_SERVER_URL") or OPENCODE_DEFAULT_SERVER_URL,
+                model_name=source.get("OPENCODE_MODEL") or OPENCODE_DEFAULT_MODEL,
+                provider_id=source.get("OPENCODE_PROVIDER_ID") or "opencode",
+                agent=source.get("OPENCODE_AGENT") or None,
+                timeout=timeout,
+                max_retries=max_retries,
+            )
         case _:
             raise ConfigError(f"LLM_PROVIDER must be one of {_SUPPORTED_PROVIDERS}, got {provider!r}")
     # Attach request-body logging at the single get_llm choke point: every model built
     # here (main agent graph, scheduled jobs, QQ trivial-reply branch) is intercepted
     # so the full payload sent to the LLM lands in logs/<YYYY-MM-DD>/llm_requests.jsonl.
-    _tracked = install_llm_logging(llm, provider)
+    _tracked = install_llm_logging(llm, provider) if log_requests else llm
     return _tracked.bind_tools(list(tool_list)) if bind_tools else _tracked

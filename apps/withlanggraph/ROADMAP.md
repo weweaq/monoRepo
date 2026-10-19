@@ -57,6 +57,22 @@ langTrack 数据链路服务端：`/ingest` 接收 + ETL 加工 + 报告 + dashb
       `vector_store` 真实画像 sync + `VectorTrigger` 端到端 + `persist_entry`
       统一写入口 + Semantic/Episodic 双表并行召回均已落地
 
+- [x] **opencode 免费模型外挂式接入（原型已落地：仅模型型调用）**：OpenCode 免费模型额度被网关硬锁在
+      opencode 本体进程内——带 key 直连外部 OpenAI 兼容端点
+      `https://opencode.ai/inference/openai/v1` 实测返回
+      `403 FreeTierError: free tier can only be used from within OpenCode`，故
+      「在 llm.py 增加 openai 兼容 provider」路线不可行（已回退，勿再走）。
+      可行方向：本地 `opencode serve` + 会话 API 实测可用（v1.18.27，
+      `opencode/glm-5.3-flash-free` 对话 cost=0、严格 JSON 抽取无围栏且可解析）。
+      推荐形态：写一个薄 LangChain `ChatModel` 适配器打本地 `/session` +
+      `/session/:id/message`（kg prompt 作 system、素材作 user），外挂式接入，
+      落地为 `opencode_llm.py` 适配器 + `llm.py` provider 分支 + runner 的 `KG_EXTRACT_LLM_PROVIDER` 开关（agent 图不动）；不启用工具循环即可绕开 permission 挂死。
+      注意：免费模型为限时促销；个人敏感数据须选 zero-retention 模型；7 通道并发需限流。
+- [ ] **LLM provider 可快速切回 zhipu（成本兜底）**：免费/低价模型（含 opencode 免费
+      额度）均为限时或易变，日报链路必须保留「一键切回 zhipu/付费 provider」的兜底
+      能力。现有 env 驱动的 `LLM_PROVIDER` 已具备雏形；待补：失败自动回落 zhipu +
+      显式开关，并在日报/抽取失败时告警，避免静默降级。
+
 ---
 
 ## 执行记录
@@ -1442,3 +1458,41 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 **偏差说明**：①用户「没并行」的直觉**不成立**（已反推 `logs/<day>/llm_requests.jsonl` 时间线核实）：六通道 start 落在同一秒，墙钟 ≈ `max(duration)` 而非 `sum(duration)`，阶梯感是各通道输出体量不同造成的假象。②`todos` 耗时的**主因在 provider 侧**：`GLM-5.3-Flash` 是推理模型，耗时几乎全花在隐藏推理 token 上（`output_tokens` 12K–25.7K，按 ~60 tok/s 需 156–411s），与可见 JSON 体量不成比例；此前 `LLM_TIMEOUT=300s` 卡在正常区间中段，把合法长生成误杀成超时。③我方放大项是「`ChannelSpec.sources` 只声明未接线」（输入白付 46%）与「`LLM_MAX_RETRIES=1`」（超时后再空等一个完整预算），本次一并消除。④客户端超时语义是「空闲无数据」而非「总时长上限」：同轮 `relations` 单次 592s 仍成功（token 持续流动），`todos` 在 300s 内一个字节都没回来才被判超时。
 
 **待办更新**：①评估 `events` 通道是否裁剪 `_EDGE` 源（当前 55154 字符，600s 超时点被截断）。②今晚 23:30 `kg-extract` 首次定时触发，次日核 `kg_runs` 当日行 `status` 与 `channel_stats`，确认无通道超时。③按军规⑥继续观测一周 `info_pack_health.jsonl` 的 `_KG`。④重跑语义改为「只补上次失败/未跑的通道，已 ok 的跳过」，并新增显式 `--rebuild` 用于清理已有改述污染。
+
+## [2026-10-19] opencode 免费模型外挂式接入（原型，仅模型型调用）
+
+**背景**：langTrack 每日 6 通道 KG 抽取 + 日报的 LLM 成本压不下去。OpenCode 免费模型额度被锁在 opencode 本体进程内（带 key 直连 `https://opencode.ai/inference/openai/v1` 实测 `403 FreeTierError`），故改走本地 `opencode serve` 会话 API：新增薄 LangChain `ChatModel` 适配器复用免费模型，不引入工具循环。
+
+**已完成**：
+- 新增 `src/gacore/opencode_llm.py`：`OpencodeChatModel(BaseChatModel)`，`_generate`/`_agenerate` 走 `POST /session` → `POST /session/:id/message` → `DELETE /session/:id`；system/多轮合并为 `parts`；`usage_metadata` 映射 `info.tokens`，`response_metadata` 带 model/finish/cost；支持 `timeout`/`max_retries` 与会话清理；`transport` 可注入 `httpx.MockTransport`。
+- `llm.py`：`_SUPPORTED_PROVIDERS` 增加 `opencode`，读取 `OPENCODE_SERVER_URL`（默认 `http://127.0.0.1:4096`）/`OPENCODE_MODEL`（默认 `glm-5.3-flash-free`）/`OPENCODE_PROVIDER_ID`/`OPENCODE_AGENT`，沿用统一超时/重试参数。
+- `runner.py`：新增 `KG_EXTRACT_LLM_PROVIDER`，只覆盖抽取路径 provider；交互 agent/日报仍按 `LLM_PROVIDER`。原因是 opencode 会话 API 不接受 gacore 的工具 schema，`bind_tools` 传非空工具时显式 `NotImplementedError`，避免静默丢工具。
+- `.env.example` 补 `OPENCODE_*` 与 `KG_EXTRACT_LLM_PROVIDER`；新增 `tests/test_opencode_llm.py`（15 例：默认/覆盖、同步/异步请求体与会话清理、错误体透传、bind_tools 空/非空、抽取 provider 覆盖）。
+- 安全加固：会话创建带 deny-all `permission`；每条消息体 `tools` 传 `"*": false` + 14 个内置工具全 false（`"*"` 才是真正兜底：opencode 会用 `tools` 映射整体替换会话权限，只传 14 个 id 会丢掉 wildcard deny，未知/MCP 工具会回落到 build agent 的 `* allow`）。另补 200 非 JSON、空 parts、`info.error`、stop 拒绝、connect 超时（5s）与会话清理告警。KG 素材是外部不可信输入，不能让它驱动 opencode 的 bash/edit/read。
+
+**实测验证**：
+- 本地 `opencode serve` v1.18.27 healthy；加固前 `get_llm(... opencode ...)` 实跑返回严格 JSON、`cost=0`、`finish=stop`，并完成 `relations` 真实抽取。加固后请求体被 server 接受（走到 provider 调用），但随后命中上游免费额度网络门禁：`403 FreeTierError`（见风险①），故加固后的端到端模型返回未能复测。
+- 真实抽取（2026-10-16、`relations` 通道、临时库副本、`KG_EXTRACT_LLM_PROVIDER=opencode`）：`status=ok`、`rows=13`、`elapsed_ms=124196`、`input_tokens=39680`、`output_tokens=1238`、`finish=stop`、`attempts=1`。
+- `ruff` 全绿；`tests/test_llm.py` + `tests/test_opencode_llm.py` 38 passed；抽取/调度相关 6 个测试文件 50 passed。
+
+**偏差/风险**：
+- 只接模型型调用；日报/交互 agent 依赖工具绑定，仍走原 provider，未做到「全后端 opencode」。
+- opencode 每次调用自带框架上下文：小 prompt 实测 `input_tokens=21552`，抽取单通道约 4 万输入 token；免费额度为限时促销，且 `serve` 当前 `0.0.0.0:4096` 未设 `OPENCODE_SERVER_PASSWORD`，须先收紧到 loopback/加密码。
+- 免费额度不可靠：2026-10-17 起上游 Zen 网关按出口 IP 信誉拦截，官方 TUI/CLI 同样中招（GitHub opencode #56324/#56750 等）；同机同配置会时好时坏（本机 60s 后曾恢复一次，随后再次 403）。这不是适配器缺陷，但意味着 opencode 不适合作为唯一抽取后端。
+- 未做失败自动回退 zhipu（原待办保留）；抽取失败仍按既有 `partial` 记账。
+
+**待办更新**：①给 `opencode serve` 加 `OPENCODE_SERVER_PASSWORD` 并绑回 `127.0.0.1`；②免费额度受上游网络门禁影响，默认不要把 `KG_EXTRACT_LLM_PROVIDER` 设为 opencode，先做「opencode 失败自动回 zhipu」再谈启用；③若要 agent 图也走 opencode，需另做工具桥接（prompt 化 tool_calls 或换 provider），不在本次范围。
+
+## [2026-10-20] KG 抽取「禁止反问 + 校正重试 + 审计」
+
+**背景**：opencode 抽取偶发把「反问/要求确认」当结果，或返回非 JSON；需要契约化重试与可审计。
+
+**已完成**：
+- `src/gacore/langTrack/extract/contract.py`：`NO_QUESTION_RULE` 追加到 opencode system prompt；`detect_question` 标记反问；`corrective_message` 做校正重试；`max_attempts` 读 `OPENCODE_MAX_ATTEMPTS`（默认 3，clamp 1..5；非 opencode 固定 2）；`retryable_error` 只重试传输层 409/429/5xx，403/超时不重试，并识别 opencode 200 响应体内的 `OpencodeProviderError`（`statusCode`/`isRetryable`）。
+- `src/gacore/langTrack/extract/runner.py`：`_extract_channel` 改为有界重试循环 + 每通道审计行 `kg_extract_attempt`（day/run_id/provider/model/attempt/result/action/violation/hash/length/usage，不落原文）；`_resolve_llm` 传 `log_requests=False`，抽取路径不再写 `llm_requests.jsonl`；失败摘要只留异常类型/状态码。
+- `src/gacore/opencode_llm.py`：新增 `OpencodeProviderError` 保留 `status_code`/`is_retryable`，异常文本不含上游 body。
+- `.env.example`：新增 `OPENCODE_MAX_ATTEMPTS`。
+
+**验证**：`uv run pytest -q` → 1461 passed / 1 skipped（已知 Windows 文件锁 flaky，单跑通过）；`uv run ruff check .` 全绿。检视四轮，最终 PASS。
+
+**待办**：①`opencode serve` 可用时补真实 opencode 抽取端到端复测；②opencode 失败自动回 zhipu 兜底；③`events` 通道素材裁剪。

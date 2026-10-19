@@ -212,3 +212,11 @@ def test_get_llm_explicit_budget_applies_to_anthropic() -> None:
     bound = get_llm([], _ANTHROPIC_ENV, timeout=600.0, max_retries=0)
     assert bound.bound.default_request_timeout == 600.0
     assert bound.bound.max_retries == 0
+
+
+def test_get_llm_log_requests_false_skips_request_logger() -> None:
+    """抽取路径关掉 llm_requests.jsonl：整日素材不落盘，只走 per-attempt hash 审计。"""
+    plain = get_llm([], _OPENAI_ENV, log_requests=False)
+    assert not getattr(plain.bound, "_gacore_llm_log_installed", False)
+    tracked = get_llm([], _OPENAI_ENV)
+    assert getattr(tracked.bound, "_gacore_llm_log_installed", False)

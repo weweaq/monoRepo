@@ -389,6 +389,7 @@ def test_extract_llm_budget_is_wider_and_never_retries(monkeypatch):
     """
     monkeypatch.setenv("LLM_PROVIDER", "zhipu")
     monkeypatch.setenv("ZHIPU_API_KEY", "test.zhipu-secret")
+    monkeypatch.delenv("KG_EXTRACT_LLM_PROVIDER", raising=False)
     monkeypatch.delenv("KG_EXTRACT_LLM_TIMEOUT", raising=False)
 
     llm = runner._resolve_llm(None)
