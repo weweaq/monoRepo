@@ -78,6 +78,8 @@ def get_llm(
     env: Mapping[str, str] | None = None,
     *,
     bind_tools: bool = True,
+    timeout: float | None = None,
+    max_retries: int | None = None,
 ) -> BaseChatModel:
     """Build a chat model for the env-named provider, optionally bound to the given tools.
 
@@ -86,14 +88,18 @@ def get_llm(
 
     Every client is built with an explicit per-request ``timeout`` and ``max_retries``
     (LLM_TIMEOUT / LLM_MAX_RETRIES) so a stalled connection cannot hang a caller
-    indefinitely.
+    indefinitely. Callers whose workload differs from the interactive default — e.g.
+    the KG extract channels, which run a reasoning model over a whole day of material —
+    can pass ``timeout``/``max_retries`` to override the env values for that client only.
 
     Raises MissingApiKeyError (a ValueError) when the provider's API key is missing.
     """
     source = os.environ if env is None else env
     provider = get_provider(source)
-    timeout = _parse_timeout(source.get("LLM_TIMEOUT"))
-    max_retries = _parse_max_retries(source.get("LLM_MAX_RETRIES"))
+    timeout = _parse_timeout(source.get("LLM_TIMEOUT")) if timeout is None else timeout
+    max_retries = (
+        _parse_max_retries(source.get("LLM_MAX_RETRIES")) if max_retries is None else max(0, max_retries)
+    )
     match provider:  # noqa: MATCH_OK - provider is a validated str, not a closed union
         case "openai":
             api_key = source.get("OPENAI_API_KEY")

@@ -193,3 +193,22 @@ def test_get_llm_falls_back_on_invalid_timeout_env() -> None:
     bound = get_llm([], env)
     assert bound.bound.request_timeout == 300.0
     assert bound.bound.max_retries == 0
+
+
+def test_get_llm_explicit_budget_beats_env() -> None:
+    """显式 timeout/max_retries 覆盖 env（抽取路径用：放宽超时 + 不重试）。"""
+    env = {**_OPENAI_ENV, "LLM_TIMEOUT": "45", "LLM_MAX_RETRIES": "4"}
+    bound = get_llm([], env, timeout=600.0, max_retries=0)
+    assert bound.bound.request_timeout == 600.0
+    assert bound.bound.max_retries == 0
+
+
+def test_get_llm_explicit_negative_retries_clamps_to_zero() -> None:
+    bound = get_llm([], _OPENAI_ENV, max_retries=-2)
+    assert bound.bound.max_retries == 0
+
+
+def test_get_llm_explicit_budget_applies_to_anthropic() -> None:
+    bound = get_llm([], _ANTHROPIC_ENV, timeout=600.0, max_retries=0)
+    assert bound.bound.default_request_timeout == 600.0
+    assert bound.bound.max_retries == 0

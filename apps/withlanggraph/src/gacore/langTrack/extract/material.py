@@ -101,8 +101,13 @@ def load_material(day: str, cfg: Config) -> Material:
 
 
 def material_stats(material: Material) -> dict[str, Any]:
-    """素材体检元信息（进 ``kg_runs.channel_stats``，便于回答"这天抽了多少料"）。"""
+    """素材体检元信息（进 ``kg_runs.channel_stats``，便于回答"这天抽了多少料"）。
+
+    ``by_source_chars`` 让运维日志能一眼看出当日哪个源把素材撑大（如 ``_LONG_TERM``
+    独占大半），从而判断某通道耗时是不是素材侧问题。
+    """
     return {
         "chars": len(material.text),
         "sources": sorted(material.by_source),
+        "by_source_chars": {k: len(v) for k, v in sorted(material.by_source.items())},
     }

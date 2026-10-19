@@ -21,6 +21,22 @@ def _parse_only(raw: str | None) -> list[str] | None:
     return [part.strip() for part in raw.split(",") if part.strip()]
 
 
+def _channel_line(key: str, stat: dict) -> str:
+    """One ASCII line per channel carrying the ops telemetry (duration / tokens / finish)."""
+    parts = [f"channel={key}", f"status={stat.get('status')}", f"rows={stat.get('rows', 0)}"]
+    for field_name in ("prompt_chars", "response_chars", "elapsed_ms", "attempts"):
+        if stat.get(field_name) is not None:
+            parts.append(f"{field_name}={stat[field_name]}")
+    usage = stat.get("usage") or {}
+    if usage.get("output_tokens") is not None:
+        parts.append(f"out_tokens={usage['output_tokens']}")
+    if stat.get("finish_reason"):
+        parts.append(f"finish={stat['finish_reason']}")
+    if stat.get("error"):
+        parts.append(f"error={stat['error']}")
+    return "  " + " ".join(parts)
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -54,8 +70,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(f"day={result.day} status={result.status} run_id={result.run_id or '-'}")
     print(f"material_chars={result.material_chars} raw_hash={result.raw_hash[:12]} rows={result.rows}")
+    material = result.channels.get("_material") or {}
+    if material:
+        print(f"  material sources={material.get('sources')} by_source_chars={material.get('by_source_chars')}")
     for key, stat in result.channels.items():
-        print(f"  channel={key} status={stat.get('status')} rows={stat.get('rows', 0)} {stat.get('error', '')}")
+        if key.startswith("_"):
+            continue
+        print(_channel_line(key, stat))
     return 1 if result.status == "failed" else 0
 
 

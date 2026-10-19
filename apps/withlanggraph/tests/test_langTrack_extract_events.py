@@ -69,8 +69,16 @@ PAYLOAD: dict[str, Any] = {
 
 
 class _Resp:
-    def __init__(self, content: str) -> None:
+    def __init__(
+        self,
+        content: str,
+        *,
+        usage: dict[str, Any] | None = None,
+        finish: str | None = None,
+    ) -> None:
         self.content = content
+        self.usage_metadata = usage
+        self.response_metadata = {"finish_reason": finish} if finish else {}
 
 
 class FakeLLM:
@@ -303,3 +311,92 @@ def test_empty_material_skips_channel(tmp_path, monkeypatch):
     assert result.status == "skipped"
     assert result.channels["events"]["status"] == "skipped"
     assert llm.calls == 0
+
+
+def test_channel_receives_only_its_routed_sources(tmp_path, monkeypatch):
+    """素材路由接线：通道只吃 spec.sources 声明的源，不再六通道同吃当日全量素材。"""
+    cfg = Config.for_tests(tmp_path)
+    write_pack_detail(cfg, DAY, "_CHAT", "〔CHAT〕", "ok", "- chat 详情", "pack", "in-pack")
+    write_pack_detail(cfg, DAY, "_LONG_TERM", "〔LONG_TERM〕", "ok", "- long 详情", "pack", "in-pack")
+    prompt_dir = cfg.root / "config" / "kg_prompts"
+    prompt_dir.mkdir(parents=True, exist_ok=True)
+    for spec in CHANNELS:
+        (prompt_dir / spec.prompt).write_text(f"prompt::{spec.key}", encoding="utf-8")
+    (prompt_dir / "zzz@v1.md").write_text("prompt::zzz_probe", encoding="utf-8")
+
+    seen: dict[str, str] = {}
+
+    class _RecordingLLM:
+        async def ainvoke(self, messages: list[Any]) -> _Resp:
+            seen[str(messages[0].content)] = str(messages[1].content)
+            return _Resp("{}")
+
+    probe = ChannelSpec(
+        key="zzz_probe", prompt="zzz@v1.md", sources=("_LONG_TERM",), handle=lambda c, x, p: (0, {})
+    )
+    monkeypatch.setattr(runner, "CHANNELS", (*runner.CHANNELS, probe))
+
+    result = run_extract(DAY, cfg, db_path=tmp_path / "kg.db", llm=_RecordingLLM(),
+                         only=["events", "zzz_probe"])
+
+    # events 声明了 _CHAT 与 _LONG_TERM（含），zzz_probe 只声明 _LONG_TERM（_CHAT 被裁掉）
+    assert "_CHAT" in seen["prompt::events"] and "_LONG_TERM" in seen["prompt::events"]
+    assert "_LONG_TERM" in seen["prompt::zzz_probe"]
+    assert "_CHAT" not in seen["prompt::zzz_probe"]
+    assert result.channels["zzz_probe"]["prompt_chars"] < result.channels["events"]["prompt_chars"]
+
+
+def test_channel_stats_carry_ops_telemetry(tmp_path):
+    """每通道落库体检指标（素材字符数 / 耗时 / token 用量 / finish_reason / 尝试次数）。
+
+    这是"哪边慢、为什么慢"的运维日志：素材侧看 prompt_chars，provider 侧看 usage 与
+    finish_reason，重跑/重试痕迹看 attempts。
+    """
+    cfg, db = _setup(tmp_path)
+    resp = _Resp(
+        json.dumps(PAYLOAD, ensure_ascii=False),
+        usage={"input_tokens": 5000, "output_tokens": 12000, "total_tokens": 17000},
+        finish="stop",
+    )
+
+    class _TelemetryLLM:
+        async def ainvoke(self, messages: list[Any]) -> _Resp:
+            return resp
+
+    result = run_extract(DAY, cfg, db_path=db, llm=_TelemetryLLM(), only=["events"])
+
+    stat = result.channels["events"]
+    assert stat["status"] == "ok"
+    assert stat["prompt_chars"] > 0
+    assert "_CHAT" in stat["routed_sources"]
+    assert stat["attempts"] == 1
+    assert stat["elapsed_ms"] >= 0
+    assert stat["usage"]["output_tokens"] == 12000
+    assert stat["finish_reason"] == "stop"
+
+    # 同一份指标必须落进 kg_runs.channel_stats（重启后仍可回溯），素材侧尺寸也在其中
+    stored = json.loads(_query(db, "SELECT channel_stats FROM kg_runs")[0][0])
+    assert stored["events"]["usage"]["output_tokens"] == 12000
+    assert stored["events"]["prompt_chars"] > 0
+    assert stored["_material"]["by_source_chars"]["_CHAT"] > 0
+
+
+def test_extract_llm_budget_is_wider_and_never_retries(monkeypatch):
+    """抽取路径的客户端：超时放宽到 KG_EXTRACT_LLM_TIMEOUT（默认 600s），且不重试。
+
+    推理模型的合法长生成可达 400s+，用交互路径的 300s 预算会把正常生成误杀成超时；
+    而超时的请求重试基本还会超时，重试只会再空等一个完整预算。
+    """
+    monkeypatch.setenv("LLM_PROVIDER", "zhipu")
+    monkeypatch.setenv("ZHIPU_API_KEY", "test.zhipu-secret")
+    monkeypatch.delenv("KG_EXTRACT_LLM_TIMEOUT", raising=False)
+
+    llm = runner._resolve_llm(None)
+    assert llm.request_timeout == 600.0
+    assert llm.max_retries == 0
+
+    monkeypatch.setenv("KG_EXTRACT_LLM_TIMEOUT", "120")
+    assert runner._resolve_llm(None).request_timeout == 120.0
+
+    monkeypatch.setenv("KG_EXTRACT_LLM_TIMEOUT", "abc")
+    assert runner._resolve_llm(None).request_timeout == 600.0

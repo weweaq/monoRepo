@@ -5,9 +5,14 @@
 
 - 幂等：唯一索引 ``ux_kg_runs_day_hash_ver(day, raw_hash, prompt_ver)`` 命中且
   ``status='ok'`` → 整次跳过；非 ok 的历史运行复用同一 ``run_id`` 原地重跑。
+- 素材路由：每个通道只吃自己 ``spec.sources`` 声明的源（``Material.select``），
+  不再六通道同吃当日全量素材——素材越大，推理模型的合法生成越久。
 - 失败隔离：通道并发执行，任一通道异常只记 ``failed``，不影响其他通道（整次 status=partial）。
 - 超时兜底：单通道超过 ``KG_EXTRACT_CHANNEL_TIMEOUT``（默认 900s）未返回即记 failed，
   避免"LLM 客户端挂死在空闲连接"的通道把 ``asyncio.gather`` 无限拖住。
+- 运维日志：每通道一行进 ``logs/<day>/app.jsonl``，并把同一份体检指标（耗时 / 素材与回复
+  字符数 / token 用量 / finish_reason / 尝试次数）落进 ``kg_runs.channel_stats``——据此可判定
+  慢在素材侧（``prompt_chars``）还是 provider 侧（``output_tokens`` + ``finish_reason``）。
 - 落库幂等：``edge_id`` 由内容派生，重跑撞 PK 即静默忽略。
 """
 
@@ -20,6 +25,7 @@ import os
 import re
 import secrets
 import sqlite3
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,9 +34,10 @@ from typing import Any, Final
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from gacore.config import Config
+from gacore.jsonl_logger import get_logger
 from gacore.langTrack.extract.channels import CHANNELS
 from gacore.langTrack.extract.intervals import reclose_day
-from gacore.langTrack.extract.material import load_material, material_stats
+from gacore.langTrack.extract.material import Material, load_material, material_stats
 from gacore.langTrack.extract.resolve import resolve_entities
 from gacore.langTrack.extract.schema import migrate_extract_tables
 from gacore.langTrack.extract.types import ChannelOutcome, ChannelSpec, ExtractContext
@@ -42,10 +49,17 @@ _FENCE_RE: Final = re.compile(r"^```[a-zA-Z]*\s*|\s*```$")
 
 _OK_STATUS: Final = "ok"
 
+_LOG = get_logger("langTrack.extract")
+
 # 单通道超时兜底（秒）。正常一整天素材的单通道 LLM 调用约 4 分钟，此处留 ~4x 余量；
 # 它兜的是"LLM 客户端挂死在空闲连接上、永不返回"这条路径——没有它，一个通道挂死会
 # 让 asyncio.gather 无限等待，整轮抽取卡住（LLM_TIMEOUT 只能兜单次请求，兜不住重试叠加）。
 _DEFAULT_CHANNEL_TIMEOUT: Final = 900.0
+
+# 抽取路径的单次 LLM 请求超时（秒）。比全局 LLM_TIMEOUT(300s) 大一倍：抽取跑的是推理
+# 模型，一整天素材的合法生成（隐藏推理 token 为主）实测可达 400s+，用交互路径的预算会把
+# 正常生成误杀成超时（2026-10-18 todos 通道即此症状）。
+_DEFAULT_EXTRACT_LLM_TIMEOUT: Final = 600.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +149,45 @@ def _content_of(response: Any) -> str:
     return str(content)
 
 
+def _usage_of(response: Any) -> dict[str, Any]:
+    """取响应里的 token 用量（provider 不给就空 dict）；运维日志用来分辨耗时构成。"""
+    usage = getattr(response, "usage_metadata", None)
+    return dict(usage) if isinstance(usage, dict) else {}
+
+
+def _finish_reason_of(response: Any) -> str:
+    """取 finish_reason（如 ``length`` = 被截断）；缺失返回空串。"""
+    meta = getattr(response, "response_metadata", None)
+    finish = meta.get("finish_reason") if isinstance(meta, dict) else None
+    return str(finish) if finish else ""
+
+
+def _probe(response: Any, outcome: ChannelOutcome, started: float, attempts: int) -> None:
+    """把一次通道调用的体检指标写进 outcome.extra（含失败路径）。"""
+    outcome.extra["elapsed_ms"] = int((time.perf_counter() - started) * 1000)
+    outcome.extra["attempts"] = attempts
+    if response is None:
+        return
+    outcome.extra["response_chars"] = len(_content_of(response))
+    usage = _usage_of(response)
+    if usage:
+        outcome.extra["usage"] = usage
+    finish = _finish_reason_of(response)
+    if finish:
+        outcome.extra["finish_reason"] = finish
+
+
+def _log_channel(outcome: ChannelOutcome) -> None:
+    """通道级运维日志：一次运行每通道一行，回答"哪边慢、为什么慢"。"""
+    fields: dict[str, Any] = {"status": outcome.status, "rows": outcome.rows, **outcome.extra}
+    if outcome.error:
+        fields["error"] = outcome.error
+    if outcome.status == "ok":
+        _LOG.info("kg_extract_channel", channel=outcome.key, **fields)
+    else:
+        _LOG.warning("kg_extract_channel", channel=outcome.key, **fields)
+
+
 async def _extract_channel(
     spec: ChannelSpec,
     llm: Any,
@@ -143,26 +196,39 @@ async def _extract_channel(
     conn: sqlite3.Connection,
     ctx: ExtractContext,
 ) -> ChannelOutcome:
-    """单通道：素材 → LLM（JSON 解析失败重试 1 次）→ 单事务落库。异常只记 failed。"""
+    """单通道：素材 → LLM（JSON 解析失败重试 1 次）→ 单事务落库。异常只记 failed。
+
+    无论成败都把本次调用的体检指标记进 ``outcome.extra``：素材侧看 ``prompt_chars``，
+    provider 侧看 ``usage`` / ``finish_reason``，中间看 ``elapsed_ms`` / ``attempts``。
+    """
     outcome = ChannelOutcome(key=spec.key)
+    outcome.extra = {"prompt_chars": len(material_text), "routed_sources": list(spec.sources)}
     if not material_text.strip():
         outcome.status = "skipped"
         outcome.error = "该通道素材为空"
         return outcome
+    started = time.perf_counter()
+    attempts = 0
+    response: Any = None
     try:
         messages = [SystemMessage(content=prompt), HumanMessage(content=material_text)]
-        raw = _content_of(await llm.ainvoke(messages))
+        attempts += 1
+        response = await llm.ainvoke(messages)
+        raw = _content_of(response)
         try:
             payload = parse_json_payload(raw)
         except (ValueError, json.JSONDecodeError):
-            raw = _content_of(await llm.ainvoke(messages))
-            payload = parse_json_payload(raw)
+            attempts += 1
+            response = await llm.ainvoke(messages)
+            payload = parse_json_payload(_content_of(response))
         written, extra = spec.handle(conn, ctx, payload)
         outcome.rows = written
-        outcome.extra = extra
+        outcome.extra.update(extra)
     except Exception as exc:  # noqa: BLE001 - 失败隔离：单通道异常不拖垮整次运行
         outcome.status = "failed"
         outcome.error = f"{type(exc).__name__}: {exc}"
+    _probe(response, outcome, started, attempts)
+    _log_channel(outcome)
     return outcome
 
 
@@ -205,13 +271,15 @@ async def _run_channels(
     specs: Sequence[ChannelSpec],
     llm: Any,
     prompts: dict[str, str],
-    material_text: str,
+    material: Material,
     conn: sqlite3.Connection,
     ctx: ExtractContext,
 ) -> list[ChannelOutcome]:
     timeout = _channel_timeout()
     tasks = [
-        _extract_channel_guarded(spec, llm, prompts[spec.key], material_text, conn, ctx, timeout)
+        _extract_channel_guarded(
+            spec, llm, prompts[spec.key], material.select(spec.sources), conn, ctx, timeout
+        )
         for spec in specs
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -310,7 +378,7 @@ def run_extract(
         ctx = ExtractContext(day=day, run_id=run_id, prompt_ver=PROMPT_VER)
         prompts = {spec.key: load_prompt(resolved, spec.prompt) for spec in specs}
         outcomes = asyncio.run(
-            _run_channels(specs, _resolve_llm(llm), prompts, material.text, conn, ctx)
+            _run_channels(specs, _resolve_llm(llm), prompts, material, conn, ctx)
         )
         status = _overall_status(outcomes)
         channel_stats: dict[str, Any] = {"_material": material_stats(material)}
@@ -339,13 +407,36 @@ def run_extract(
         conn.close()
 
 
+def _extract_llm_timeout() -> float:
+    """抽取路径的单次 LLM 请求超时（秒）：``KG_EXTRACT_LLM_TIMEOUT`` 覆盖，非法回落默认。"""
+    raw = os.environ.get("KG_EXTRACT_LLM_TIMEOUT")
+    if raw is None:
+        return _DEFAULT_EXTRACT_LLM_TIMEOUT
+    try:
+        seconds = float(raw)
+    except (TypeError, ValueError):
+        return _DEFAULT_EXTRACT_LLM_TIMEOUT
+    return seconds if seconds > 0 else _DEFAULT_EXTRACT_LLM_TIMEOUT
+
+
 def _resolve_llm(llm: Any) -> Any:
-    """注入点：默认按 .env 的 provider 建无工具模型（与 feedback/memory_maintenance 同法）。"""
+    """注入点：默认按 .env 的 provider 建无工具模型（与 feedback/memory_maintenance 同法）。
+
+    抽取路径与交互路径的预算不同：超时放宽到 ``KG_EXTRACT_LLM_TIMEOUT``（默认 600s，推理
+    模型合法长生成需要），且不重试——重试一次等于再等一个完整超时预算（300s 时代最坏
+    2×300s 空等），而超时的请求重试基本还会超时。
+    """
     if llm is not None:
         return llm
     from gacore.llm import get_llm
 
-    return get_llm([], os.environ, bind_tools=False)
+    return get_llm(
+        [],
+        os.environ,
+        bind_tools=False,
+        timeout=_extract_llm_timeout(),
+        max_retries=0,
+    )
 
 
 # --------------------------------------------------------------------------- #
