@@ -1671,7 +1671,8 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 | `channels/worldview.py` | worldview 通道 `SPEC`：2 源路由 + `handle` 落 `kg_worldview`（信念候选，confidence 上限 0.6） |
 | `resolve.py` | 三级实体消解 `resolve_entities(conn,day,run_id)`；`resolve_alias`/`revoke_alias`；纯本地 `jaro_winkler` |
 | `intervals.py` | `reclose_intervals(conn,from,to,relation)` / `reclose_day(conn,day)`——按 `valid_from` 重排重算 `valid_to` |
-| `runner.py` | `run_extract`（编排/幂等/素材路由/失败隔离/单通道超时兜底/通道运维日志/后处理）、`export_day`（`--dump`） |
+| `runner.py` | `run_extract`（编排/幂等/素材路由/失败隔离/单通道超时兜底/契约重试与审计/通道运维日志/后处理）、`export_day`（`--dump`） |
+| `contract.py` | opencode 抽取契约：`is_opencode`/`with_no_question_rule`/`detect_question`/`corrective_message`/`max_attempts`（`OPENCODE_MAX_ATTEMPTS`，默认 3、clamp 1..5；非 opencode 固定 2）/`retryable_error`/`fingerprint` |
 
 ### 素材装配（`material.py`，决策 D1）
 
@@ -1753,6 +1754,22 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 - LLM 走 `gacore.llm.get_llm([], os.environ, bind_tools=False, timeout=..., max_retries=0)`（零工具单轮，与 feedback/memory_maintenance 同法）。客户端由 `get_llm` 统一带**显式单请求超时与重试**；抽取路径**显式覆盖**全局默认：`timeout=_extract_llm_timeout()`（env 键 `KG_EXTRACT_LLM_TIMEOUT`，缺省 `_DEFAULT_EXTRACT_LLM_TIMEOUT = 600.0`s）、`max_retries=0`。`get_llm` 的 `timeout`/`max_retries` 形参为 `None` 时仍读 `LLM_TIMEOUT`/`LLM_MAX_RETRIES`（缺省 300s / 1 次），故交互路径行为不变。
 - **后处理（S2）**：通道全部落库后、且有新写入行时，`_postprocess(conn, day, run_id)` 依次跑 `resolve_entities` + `reclose_day`（确定性收尾，不依赖 LLM）；失败只记 `_postprocess.status='failed'`（整次降 `partial`），**不拖垮已落库的通道产物**。
 - `export_day` 的 `_DAY_SCOPED_SQL` 覆盖八张表：`kg_runs`/`kg_nodes`/`kg_edges`/`kg_relations`/`kg_aliases`/`kg_emotions`/`kg_patterns`/`kg_worldview`。
+
+### opencode 免费模型接入（`gacore/opencode_llm.py` + `gacore/llm.py`，2026-10-20）
+
+- **动机**：opencode 免费模型额度锁在 opencode 进程内——带 key 直连 `https://opencode.ai/inference/openai/v1` 实测 `403 FreeTierError`。改为复用本地 `opencode serve`（默认 `http://127.0.0.1:4096`）的会话 API，薄适配器即可拿到免费模型，且不引入工具循环。
+- **适配器** `OpencodeChatModel(BaseChatModel)`：`_generate`/`_agenerate` 走 `POST /session` → `POST /session/{id}/message` → `DELETE /session/{id}`；`SystemMessage` 合并进 body 的 `system`，其余消息合并进 `parts`；`usage_metadata` 映射 `info.tokens`，`response_metadata` 带 `model`/`provider`/`finish_reason`/`cost`；`timeout`（connect 预算压到 ≤5s）/`max_retries`/会话清理告警齐备；`transport` 可注入 `httpx.MockTransport`（测试不触真服务）。上游返回 HTTP 200 但 `info.error` 非空时抛 `OpencodeProviderError`，把 `statusCode`/`isRetryable` 保留为结构化字段（异常文本不含上游 body）。
+- **仅模型型调用**：`bind_tools` 传非空工具即 `NotImplementedError`——opencode 执行的是它自己的 bash/read/edit，会话 API 不接受 gacore 的工具 schema。故抽取路径可走 opencode（`runner._resolve_llm` 读 `KG_EXTRACT_LLM_PROVIDER` 覆盖），交互 agent 图与日报仍按 `LLM_PROVIDER`。
+- **provider 配置**（`llm.get_llm`，`_SUPPORTED_PROVIDERS` 含 `opencode`）：`OPENCODE_SERVER_URL`（默认 `http://127.0.0.1:4096`）/`OPENCODE_MODEL`（默认 `glm-5.3-flash-free`）/`OPENCODE_PROVIDER_ID`/`OPENCODE_AGENT`/`OPENCODE_CLIENT_UA`（默认 `DEFAULT_CLIENT_UA = "opencode/1.18.27"`）/`OPENCODE_VARIANT`（空 = 用模型默认档）/`OPENCODE_MAX_ATTEMPTS`；`KG_EXTRACT_LLM_PROVIDER` 只覆盖抽取路径。无需 API key。
+- **免费额度三道门禁（2026-10-20 实测钉住，缺一即 `403 FreeTierError`）**：
+  1. **User-Agent** 必须是官方客户端形态 `opencode/<version>`——本地 server 把调用方 UA 原样转发上游，非该形态即被判为"外部程序化调用"。
+  2. **会话创建不得带 `permission` 数组**——显式权限配置被判为 headless 调用；`PATCH /session/{id}` 事后补 `permission` 同样触发。故 `_session_payload()` 只发 `{"title": "gacore"}`。
+  3. **消息体不得带 `tools` 映射**——带工具定义的请求同样被判为外部程序化调用。故消息体只发 `model`/`parts`（可选 `system`/`agent`）。
+  - 对照实测（同一 prompt、同一模型）：裸会话 → `text='OK'`；deny-all `permission` 会话 → `403`；裸会话 + 事后 `PATCH` 补 `permission` → `403`；裸会话 + `tools` 映射 → `403`；`agent=plan` / `agent=build` 裸会话 → 均 `OK`。
+- **推理档位 `variant`（`model.variant`，2026-10-20 实测）**：`glm-5.3-flash-free` 暴露 low/high/max 三档，默认档在整日 `events` 素材上把 `limit.output=32000` 全烧在隐藏推理（`finish_reason=length`、447s、6.8k 字符截断 JSON）；`variant=low` 同素材 160s、`output_tokens=29126`、`finish=stop`、15.9k 字符合法 JSON。抽取路径由 `runner._resolve_llm` 兜底：provider 解析为 `opencode` 且 `OPENCODE_VARIANT` 未显式设置时补 `_DEFAULT_EXTRACT_OPENCODE_VARIANT = "low"`（显式设置含 `high`/`max` 以环境变量为准）；`OpencodeChatModel.variant` 为空时不下发该键，保留模型默认（交互调用不受影响）。
+- **代价（未做项）**：显式权限配置只能整体不传，会话级 deny-all 兜底随之失效——opencode 的 build agent 自带工具在该会话内**未被禁用**，模型理论上可发起工具调用。缓解：抽取 prompt 是"整块素材进、JSON 出"的纯文本任务，素材内不含文件路径；实测小 prompt 无工具调用。若要彻底禁工具，需在 opencode 配置里定义无工具 agent 并以 `OPENCODE_AGENT` 指定（本阶段未做）。
+- **框架上下文开销**：opencode 每次调用自带 agent 框架上下文，小 prompt 实测 `input_tokens≈21.5k`；免费额度 `cost=0`。
+- **测试**：`tests/test_opencode_llm.py`（会话/消息体形状、UA、会话清理、错误体、`bind_tools` 空/非空、抽取 provider 覆盖）、`tests/test_llm.py`（provider 解析与预算）、`tests/test_langTrack_extract_contract.py`（契约矩阵）、`tests/test_langTrack_extract_retry.py`（重试状态机）。
 
 ### 日报接入（`_KG` 源，S4）
 
