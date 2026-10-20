@@ -1100,10 +1100,14 @@ class TestDataPage:
         import sqlite3 as _sq
 
         con = _sq.connect(cfg.root / "data" / "langTrack.db")
-        now_ms = int(time.time() * 1000)
+        # 锚定东八区当天正午（与 _make_langtrack_db 同口径），避免午夜后运行
+        # 时 now-2min 的事件落到昨天、被当日日窗排除（去日期腐化，同 7561583 族）
+        noon_ms = int(
+            datetime.datetime.now(_tz8).replace(hour=12, minute=0, second=0, microsecond=0).timestamp() * 1000
+        )
         con.executemany(
             "INSERT INTO events (ts, type, payload) VALUES (?, ?, ?)",
-            [(now_ms - 60_000 * k, "music_play", "{}") for k in (1, 2)],
+            [(noon_ms - 60_000 * k, "music_play", "{}") for k in (1, 2)],
         )
         con.commit()
         con.close()
