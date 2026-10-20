@@ -67,7 +67,7 @@ flowchart TD
         OU["读方出口<br/>fact_card·report·dashboard·qq_push"]
         EX["KG 抽取层 langTrack/extract<br/>python -m gacore.langTrack.extract<br/>material.load_material(day,cfg)<br/>channels/{events,relations,todos,emotions,patterns,worldview}.SPEC<br/>runner.run_extract：六通道并发 gather<br/>+ 逐通道素材路由 Material.select(spec.sources)<br/>+ 单通道超时兜底(KG_EXTRACT_CHANNEL_TIMEOUT,默认900s)<br/>抽取 LLM 预算(gacore.llm·KG_EXTRACT_LLM_TIMEOUT默认600s·max_retries=0)<br/>通道运维日志 _log_channel→logs/&lt;day&gt;/app.jsonl + kg_runs.channel_stats<br/>→ resolve.resolve_entities + intervals.reclose_day (后处理)"]
         KG[("langTrack.db kg_* 表<br/>kg_runs/kg_nodes/kg_edges<br/>kg_relations/kg_aliases<br/>kg_emotions/kg_patterns/kg_worldview<br/>schema.migrate_extract_tables")]
-        OC["opencode 免费模型适配器 gacore/opencode_llm.py<br/>OpencodeChatModel(BaseChatModel) · bind_tools 非空即拒绝<br/>POST /session → POST /session/{id}/message → DELETE /session/{id}<br/>_session_payload 只发 title（显式 permission 触发 403 FreeTierError）<br/>消息体只发 model/parts(/system/agent) · 无 tools 映射<br/>UA=DEFAULT_CLIENT_UA=opencode/1.18.27（OPENCODE_CLIENT_UA 可覆盖）<br/>model.variant=OPENCODE_VARIANT（抽取层 low，空=模型默认档）<br/>→ 本地 opencode serve 127.0.0.1:4096"]
+        OC["opencode 免费模型适配器 gacore/opencode_llm.py<br/>OpencodeChatModel(BaseChatModel) · bind_tools 非空即拒绝<br/>POST /session → POST /session/{id}/message → DELETE /session/{id}<br/>_session_payload 只发 title（显式 permission 触发 403 FreeTierError）<br/>消息体只发 model/parts(/system/agent) · 无 tools 映射<br/>UA 默认不发（OPENCODE_CLIENT_UA 显式 opt-in；opencode/&lt;version&gt; 有条款/403 风险）<br/>model.variant=OPENCODE_VARIANT（抽取层 low，空=模型默认档）<br/>→ 本地 opencode serve 127.0.0.1:4096"]
     end
 
     subgraph DAILY["⑥ 日报链路 v3 (daily_info_pack · feedback · review_server)"]

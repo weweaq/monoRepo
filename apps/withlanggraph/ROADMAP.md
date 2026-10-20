@@ -1502,10 +1502,11 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 **背景**：接上一条「禁止反问 + 校正重试 + 审计」。上一版适配器沿用 deny-all `permission` 会话 + 消息体 `tools` 全 false 的加固思路，加固后请求体虽被本地 server 接受，但端到端模型返回一直停在 `403 FreeTierError`，抽取从未真正跑通。用户要求复用已在跑的 `opencode serve`（不每次起进程）把免费模型当对话模型用，据此逐层剥离门禁。
 
 **已完成**：
-- `src/gacore/opencode_llm.py`：新增 `DEFAULT_CLIENT_UA = "opencode/1.18.27"` 与 `client_ua` 字段，sync/async 两个 httpx 客户端均带 `User-Agent`；**删除** `_TOOL_IDS` 常量与 `_tools_payload()`，消息体不再含 `tools` 键；`_session_payload()` 改为只发 `{"title": "gacore"}`，**移除** `permission` 数组。
-- `src/gacore/llm.py`：读 `OPENCODE_CLIENT_UA` 并透传构造参数。
+- `src/gacore/opencode_llm.py`：新增 `client_ua` 字段；默认 `DEFAULT_CLIENT_UA = ""`（不再伪装），仅显式设置 `OPENCODE_CLIENT_UA` 时 sync/async 两个 httpx 客户端才带 `User-Agent`；**删除** `_TOOL_IDS` 常量与 `_tools_payload()`，消息体不再含 `tools` 键；`_session_payload()` 改为只发 `{"title": "gacore"}`，**移除** `permission` 数组。
+- 安全口径：UA 伪装改为显式 opt-in，默认不发送；免费档仍可能随时 403，且伪装可能触犯上游条款。
+- `src/gacore/llm.py`：读 `OPENCODE_CLIENT_UA` 并透传（空值 = 不发送 UA override）。
 - `src/gacore/langTrack/extract/runner.py`：传输层重试判定由 `will_retry = oc and attempts < limit and retryable_error(exc)` 改为 provider-agnostic 的 `will_retry = attempts < limit and retryable_error(exc)`——非 opencode provider（zhipu 等）的 5xx/网络抖动此前被 `oc and` 直接短路判死通道。
-- 测试：`tests/test_opencode_llm.py` 新增「UA 每调用必带」与「`OPENCODE_CLIENT_UA` 可覆盖」两例，并把会话体断言收紧为 `{"title": "gacore"}`、消息体断言补 `"tools" not in body`；`tests/test_langTrack_extract_retry.py` 新增 `test_non_opencode_retries_5xx` / `test_non_opencode_does_not_retry_timeout`。
+- 测试：`tests/test_opencode_llm.py` 新增「默认不带 UA override」与「显式配置后每调用必带」两例，并把会话体断言收紧为 `{"title": "gacore"}`、消息体断言补 `"tools" not in body`；`tests/test_langTrack_extract_retry.py` 新增 `test_non_opencode_retries_5xx` / `test_non_opencode_does_not_retry_timeout`。
 - 文档三处同步：`docs/langTrack-tech.md` §9.28 新增「opencode 免费模型接入」小节（含三道门禁对照实测与「显式权限只能整体不传」的代价）+ `contract.py` 模块表行；`docs/architecture-flow.mmd` 新增 `OC` 节点与 `EX -. "KG_EXTRACT_LLM_PROVIDER=opencode → runner._resolve_llm 建 OpencodeChatModel" .-> OC` 边，`class IG,RW,ET,OU,EX,OC lang`；`docs/kg-extract-plan.md` 状态行补同日三道门禁与重试解耦。
 
 **实测验证（2026-10-19 真实数据、生产库快照副本、`KG_EXTRACT_LLM_PROVIDER=opencode`）**：整次 `status=ok`、`rows=111`、**6/6 通道全 ok**。逐通道：`events` 49 行（`elapsed_ms=499749`、**attempts=2**）、`patterns` 29 行（67776ms）、`relations` 11 行（68919ms）、`emotions` 10 行（129403ms）、`worldview` 7 行（92212ms）、`todos` 5 行（63621ms）。门禁对照实测（同一 prompt、同一模型）：裸会话 → `text='OK'`；deny-all `permission` 会话 → `403`；裸会话 + 事后 `PATCH /session/{id}` 补 `permission` → `403`；`agent=plan` / `agent=build` 裸会话 → 均 `OK`。全仓 `uv run pytest` → **1521 passed / 5 skipped**；`uv run ruff check apps packages tests` 全绿。
@@ -1522,7 +1523,7 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 - `src/gacore/opencode_llm.py`：新增 `variant: str | None` 字段，`_payload()` 构造 `model` 字典时追加 `variant` 键（为空则不下发，保留模型默认档）。
 - `src/gacore/llm.py`：读 `OPENCODE_VARIANT` 并透传构造参数。
 - `src/gacore/langTrack/extract/runner.py`：`_resolve_llm` 新增 `_DEFAULT_EXTRACT_OPENCODE_VARIANT = "low"`——provider 解析为 `opencode` 且 `OPENCODE_VARIANT` 未显式设置时补 `low`，避免换环境（`.env` 未配该键）就回落到默认档重新撞顶；显式设置（含 `high`/`max`）以环境变量为准。
-- `.env.example`：新增 `OPENCODE_CLIENT_UA` / `OPENCODE_VARIANT` 两个键名与注释（含撞顶实测说明）。
+- `.env.example`：新增 `OPENCODE_CLIENT_UA` / `OPENCODE_VARIANT` 两个键名与注释（UA 默认空，显式 `opencode/<version>` 为高风险 opt-in；含撞顶实测说明）。
 - `.env`：抽取层显式 `OPENCODE_VARIANT=low`。
 - 测试：`tests/test_opencode_llm.py` 新增 `test_invoke_omits_variant_by_default` / `test_invoke_sends_variant_when_set` / `test_get_llm_opencode_reads_variant_env` / `test_resolve_llm_defaults_opencode_variant_to_low` / `test_resolve_llm_honors_explicit_opencode_variant` / `test_resolve_llm_defaults_variant_when_main_provider_is_opencode`。
 - 文档三处同步：`docs/langTrack-tech.md` 补 `OPENCODE_VARIANT` 配置项与「推理档位 `variant`」小节、门禁表述由两道细化为三道；`docs/architecture-flow.mmd` 的 `OC` 节点补 `model.variant=OPENCODE_VARIANT` 行；本文件本节。
@@ -1538,3 +1539,17 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 **偏差说明**：①`variant=low` 并非"缩短输出"，而是把输出预算从隐藏推理挪到正文——同素材 `output_tokens` 从 32000 降到 29126，但有效字符从 6800 升到 15924，行数从 49 降到 25（早先 49 行是截断 JSON 被容错解析后的结果，非真实产出）。②档位是**模型侧 effort 预设**，不是适配器裁剪；`OpencodeChatModel.variant` 为空即不下发该键（保留模型默认），抽取路径的 `low` 兜底写在 `runner._resolve_llm` 而非适配器默认值，故交互 agent 路径不受影响。③`events` 仍是最慢通道（199s，素材 40071 字符、`_KG`+`_LONG_TERM` 合计近 5 万字符占大头），撞顶风险已消除但绝对耗时未变，后续若要再压需裁素材。
 
 **待办更新**：①原「`events` 撞顶待压推理/裁素材」**关闭**（`variant=low` 已解决撞顶）。②`events` 绝对耗时（199s）仍居首，素材裁剪留作后续优化。③「opencode 失败自动回 zhipu」兜底仍未做，`.env` 的 `KG_EXTRACT_LLM_PROVIDER=opencode` 属本地灰度，未进 `.env.example` 默认值。
+
+## [2026-10-20] 工作区修订：UA 伪装定稿 opt-in + jsonl_logger 日志根可覆盖
+
+**背景**：repo-hygiene 盘点工作区未提交改动，属上一条「三道门禁」记录的同源修订：UA 伪装口径从「默认发送 opencode/<version>」收紧为「默认不发送」；jsonl_logger 需支持日志根覆盖以隔离测试。
+
+**已完成**：
+- `src/gacore/opencode_llm.py`：`DEFAULT_CLIENT_UA` 改为 `""`（不再默认伪装）；仅显式设置 `OPENCODE_CLIENT_UA` 时 sync/async httpx 客户端才带 `User-Agent`。
+- `src/gacore/jsonl_logger.py`：新增 `_LOG_ROOT_ENV = "GACORE_LOG_ROOT"`；`_build_sink` 优先取环境变量作为日志根，未设置回退 `Config.logs_dir`。
+- 测试：`tests/conftest.py` 设 `GACORE_LOG_ROOT` 指向 tmp 日志根并延迟 `Config`/tools 导入（`TYPE_CHECKING`）；`tests/test_jsonl_logger_daily.py` 新增 log root 覆盖用例；`tests/test_opencode_llm.py` 新增「默认不带 UA override」「显式配置后每调用必带」两例。
+- 文档同步：`docs/architecture-flow.mmd` 的 `OC` 节点改为「UA 默认不发（OPENCODE_CLIENT_UA 显式 opt-in）」，`docs/langTrack-tech.md` §9.28 门禁①表述同步收紧，`docs/kg-extract-plan.md` 状态行补 UA 口径，`.env.example` 补 `OPENCODE_CLIENT_UA`/`OPENCODE_VARIANT` 键（UA 默认空）。
+
+**验证**（repo-hygiene 全量）：`uv run ruff check apps packages tests` 全绿；`uv run --all-packages pytest -q` → **1529 passed / 5 skipped**；`node apps/mermaid-viewer/tests/check_prompt_logic.js` → ALL PASS。
+
+**偏差说明**：①本次为工作区修订（对应 2026-10-20「三道门禁」记录已完成部分更新为最终口径），不新增独立功能线。②`GACORE_LOG_ROOT` 为测试隔离环境变量，不入生产配置文档细节。③`docs/sre/` 未跟踪目录为定时任务运维产出，与本案无关，未提交。
