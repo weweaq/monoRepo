@@ -30,6 +30,7 @@ from typing import Final, final
 from gacore.config import Config, ConfigError
 
 _LOG_FILENAME: Final = "app.jsonl"
+_LOG_ROOT_ENV: Final = "GACORE_LOG_ROOT"
 _LOG_DIR_FORMAT: Final = "%Y-%m-%d"
 _LOG_TIMEZONE: Final = "Asia/Shanghai"
 _LOG_UTC_OFFSET: Final = timedelta(hours=8)
@@ -226,6 +227,9 @@ class _DailyFileHandler(logging.Handler):
 def _build_sink() -> logging.Handler:
     """Create the process-wide file handler; degrades to a no-op sink if setup fails."""
     try:
+        root = os.environ.get(_LOG_ROOT_ENV)
+        if root:
+            return _DailyFileHandler(Path(root))
         config = Config.default()
         return _DailyFileHandler(config.logs_dir)
     except (OSError, ConfigError):

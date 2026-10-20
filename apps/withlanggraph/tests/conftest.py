@@ -11,10 +11,12 @@ internally, so the fakes must accept (and ignore) that call and keep returning t
 
 from __future__ import annotations
 
+import os
+import tempfile
 import uuid
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from langchain_core.language_models.fake_chat_models import (
@@ -25,8 +27,10 @@ from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.tools import BaseTool
 from langgraph.pregel import Pregel
 
-from gacore.config import Config
-from gacore.tools import build_tool_list
+if TYPE_CHECKING:
+    from gacore.config import Config
+
+os.environ["GACORE_LOG_ROOT"] = tempfile.mkdtemp(prefix="gacore-pytest-logs-")
 
 
 class BindableFakeMessagesListChatModel(FakeMessagesListChatModel):
@@ -46,12 +50,16 @@ class BindableGenericFakeChatModel(GenericFakeChatModel):
 @pytest.fixture
 def tmp_cfg(tmp_path: Path) -> Config:
     """A Config rooted at the pytest tmp dir so tests never touch real project dirs."""
-    return Config.for_tests(tmp_path)
+    from gacore.config import Config as _Config
+
+    return _Config.for_tests(tmp_path)
 
 
 @pytest.fixture
 def tool_list(tmp_cfg: Config) -> list[BaseTool]:
     """Every registered tool, built with the tmp cfg."""
+    from gacore.tools import build_tool_list
+
     return build_tool_list(tmp_cfg)
 
 

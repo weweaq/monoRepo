@@ -7,6 +7,8 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from gacore.jsonl_logger import _DailyFileHandler
 
 
@@ -55,3 +57,16 @@ def test_records_carry_formatted_ts(tmp_path: Path) -> None:
 
     line = (tmp_path / "logs" / "2026-07-01" / "app.jsonl").read_text(encoding="utf-8")
     assert '"ts": "2026-07-01T09:05:07.000+08:00"' in line
+
+
+def test_build_sink_honors_log_root_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from gacore import jsonl_logger
+
+    monkeypatch.setenv("GACORE_LOG_ROOT", str(tmp_path / "logs"))
+    handler = jsonl_logger._build_sink()
+    try:
+        handler.emit(_make_record("2026-07-01", "09:05:07"))
+    finally:
+        handler.close()
+
+    assert (tmp_path / "logs" / "2026-07-01" / "app.jsonl").is_file()
