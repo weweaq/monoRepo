@@ -78,7 +78,7 @@ def test_get_llm_opencode_reads_env_and_explicit_budget() -> None:
     assert llm.max_retries == 0
 
 
-def test_invoke_sends_one_denied_session_then_deletes_it() -> None:
+def test_invoke_sends_one_bare_session_then_deletes_it() -> None:
     calls: list[tuple[str, str, bytes]] = []
     llm = OpencodeChatModel(transport=_handler(calls))
 
@@ -100,23 +100,20 @@ def test_invoke_sends_one_denied_session_then_deletes_it() -> None:
         ("DELETE", "/session/ses_test"),
     ]
 
+    # A bare session: an explicit permission array makes opencode treat the run as a
+    # headless call, and the free-tier gateway answers 403 FreeTierError.
     session_body = json.loads(calls[0][2])
-    assert session_body == {
-        "title": "gacore",
-        "permission": [{"permission": "*", "pattern": "*", "action": "deny"}],
-    }
+    assert session_body == {"title": "gacore"}
 
     body = json.loads(calls[1][2])
     assert body["model"] == {"providerID": "opencode", "modelID": "glm-5.3-flash-free"}
     assert body["system"] == "sys prompt"
     assert body["parts"] == [{"type": "text", "text": "user prompt"}]
-    assert body["tools"]["*"] is False
-    assert body["tools"]["bash"] is False
-    assert body["tools"]["edit"] is False
-    assert all(enabled is False for enabled in body["tools"].values())
+    # No tools map either: the same gateway 403s any message that carries one.
+    assert "tools" not in body
 
 
-async def test_ainvoke_sends_one_denied_session_then_deletes_it() -> None:
+async def test_ainvoke_sends_one_bare_session_then_deletes_it() -> None:
     calls: list[tuple[str, str, bytes]] = []
     llm = OpencodeChatModel(transport=_handler(calls))
 
@@ -128,8 +125,8 @@ async def test_ainvoke_sends_one_denied_session_then_deletes_it() -> None:
         ("POST", "/session/ses_test/message"),
         ("DELETE", "/session/ses_test"),
     ]
-    assert json.loads(calls[1][2])["tools"]["*"] is False
-    assert json.loads(calls[1][2])["tools"]["bash"] is False
+    assert "tools" not in json.loads(calls[1][2])
+    assert json.loads(calls[0][2]) == {"title": "gacore"}
 
 
 def test_invoke_surfaces_server_error_body_and_still_deletes() -> None:
@@ -249,3 +246,104 @@ def test_resolve_llm_keeps_main_provider_without_override(monkeypatch: pytest.Mo
     llm = _resolve_llm(None)
 
     assert isinstance(llm, ChatOpenAI)
+
+
+def test_resolve_llm_defaults_opencode_variant_to_low(monkeypatch: pytest.MonkeyPatch) -> None:
+    from gacore.langTrack.extract.runner import _resolve_llm
+
+    monkeypatch.setenv("LLM_PROVIDER", "zhipu")
+    monkeypatch.setenv("ZHIPU_API_KEY", "test.zhipu-secret")
+    monkeypatch.setenv("KG_EXTRACT_LLM_PROVIDER", "opencode")
+    monkeypatch.delenv("OPENCODE_VARIANT", raising=False)
+
+    llm = _resolve_llm(None)
+
+    assert isinstance(llm, OpencodeChatModel)
+    assert llm.variant == "low"
+
+
+def test_resolve_llm_honors_explicit_opencode_variant(monkeypatch: pytest.MonkeyPatch) -> None:
+    from gacore.langTrack.extract.runner import _resolve_llm
+
+    monkeypatch.setenv("LLM_PROVIDER", "zhipu")
+    monkeypatch.setenv("ZHIPU_API_KEY", "test.zhipu-secret")
+    monkeypatch.setenv("KG_EXTRACT_LLM_PROVIDER", "opencode")
+    monkeypatch.setenv("OPENCODE_VARIANT", "high")
+
+    llm = _resolve_llm(None)
+
+    assert isinstance(llm, OpencodeChatModel)
+    assert llm.variant == "high"
+
+
+def test_resolve_llm_defaults_variant_when_main_provider_is_opencode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gacore.langTrack.extract.runner import _resolve_llm
+
+    monkeypatch.setenv("LLM_PROVIDER", "opencode")
+    monkeypatch.delenv("KG_EXTRACT_LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("OPENCODE_VARIANT", raising=False)
+
+    llm = _resolve_llm(None)
+
+    assert isinstance(llm, OpencodeChatModel)
+    assert llm.variant == "low"
+
+
+def test_invoke_sends_client_user_agent_on_every_call() -> None:
+    seen: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("user-agent", ""))
+        if request.url.path == "/session":
+            return httpx.Response(200, json={"id": "ses_test"})
+        if request.method == "DELETE":
+            return httpx.Response(200, json=True)
+        return httpx.Response(200, json=_reply())
+
+    llm = OpencodeChatModel(transport=httpx.MockTransport(handle))
+    assert llm.invoke(_messages()).content == "hello world"
+    assert seen
+    assert all(ua == "opencode/1.18.27" for ua in seen)
+
+
+def test_get_llm_opencode_reads_client_ua_env() -> None:
+    env = {**_OPENCODE_ENV, "OPENCODE_CLIENT_UA": "opencode/9.9.9"}
+    llm = get_llm([], env, bind_tools=False)
+    assert isinstance(llm, OpencodeChatModel)
+    assert llm.client_ua == "opencode/9.9.9"
+
+
+def test_invoke_omits_variant_by_default() -> None:
+    calls: list[tuple[str, str, bytes]] = []
+    llm = OpencodeChatModel(transport=_handler(calls))
+
+    llm.invoke(_messages())
+
+    assert json.loads(calls[1][2])["model"] == {
+        "providerID": "opencode",
+        "modelID": "glm-5.3-flash-free",
+    }
+
+
+def test_invoke_sends_variant_when_set() -> None:
+    calls: list[tuple[str, str, bytes]] = []
+    llm = OpencodeChatModel(transport=_handler(calls), variant="low")
+
+    llm.invoke(_messages())
+
+    assert json.loads(calls[1][2])["model"] == {
+        "providerID": "opencode",
+        "modelID": "glm-5.3-flash-free",
+        "variant": "low",
+    }
+
+
+def test_get_llm_opencode_reads_variant_env() -> None:
+    env = {**_OPENCODE_ENV, "OPENCODE_VARIANT": "low"}
+    llm = get_llm([], env, bind_tools=False)
+    assert isinstance(llm, OpencodeChatModel)
+    assert llm.variant == "low"
+
+    assert get_llm([], _OPENCODE_ENV, bind_tools=False).variant is None

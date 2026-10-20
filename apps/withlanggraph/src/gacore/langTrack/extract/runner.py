@@ -70,6 +70,11 @@ _DEFAULT_CHANNEL_TIMEOUT: Final = 900.0
 # 正常生成误杀成超时（2026-10-18 todos 通道即此症状）。
 _DEFAULT_EXTRACT_LLM_TIMEOUT: Final = 600.0
 
+# 抽取路径走 opencode 时的默认推理档位。免费档 glm-5.3-flash-free 的模型默认档在整日
+# events 素材上会把 limit.output=32000 全烧在隐藏推理（finish_reason=length、447s、
+# 截断成非法 JSON），low 档同素材实测 160s、finish=stop（2026-10-20 A/B）。
+_DEFAULT_EXTRACT_OPENCODE_VARIANT: Final = "low"
+
 
 @dataclass(frozen=True, slots=True)
 class RunResult:
@@ -295,7 +300,11 @@ async def _extract_channel(
             except Exception as exc:
                 elapsed_ms = int((time.perf_counter() - attempt_started) * 1000)
                 reasons.append(f"transport:{type(exc).__name__}")
-                will_retry = oc and attempts < limit and retryable_error(exc)
+                # Provider-agnostic: transient transport failures (409/429/5xx/network) get
+                # one retry on every provider; timeouts and auth 4xx do not
+                # (contract.retryable_error). Gating this on ``oc`` made zhipu 5xx flakiness
+                # fail a channel outright.
+                will_retry = attempts < limit and retryable_error(exc)
                 _log_attempt(
                     spec.key,
                     attempts,
@@ -590,6 +599,11 @@ def _resolve_llm(llm: Any) -> Any:
 
     可选 ``KG_EXTRACT_LLM_PROVIDER`` 只覆盖抽取路径的 provider（如 ``opencode``），
     交互 agent 仍按 ``LLM_PROVIDER``——opencode 会话 API 不支持 gacore 的工具绑定。
+
+    走 opencode 且 ``OPENCODE_VARIANT`` 未显式设置时补 ``low``：免费档 ``glm-5.3-flash-free``
+    的默认推理档会把整日 events 素材的 32000 输出上限烧在隐藏推理上（``finish_reason=length``、
+    截断成非法 JSON），``low`` 同素材实测 447s→160s 且 ``finish=stop``。显式设置（含 ``high``/
+    ``max``）以环境变量为准，交互路径不受影响。
     """
     if llm is not None:
         return llm
@@ -599,6 +613,9 @@ def _resolve_llm(llm: Any) -> Any:
     override = (os.environ.get("KG_EXTRACT_LLM_PROVIDER") or "").strip()
     if override:
         source = {**os.environ, "LLM_PROVIDER": override}
+    provider = (source.get("LLM_PROVIDER") or "").strip().lower()
+    if provider == "opencode" and not (source.get("OPENCODE_VARIANT") or "").strip():
+        source = {**source, "OPENCODE_VARIANT": _DEFAULT_EXTRACT_OPENCODE_VARIANT}
 
     return get_llm(
         [],

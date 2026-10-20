@@ -193,6 +193,29 @@ def test_opencode_does_not_retry_timeout() -> None:
     assert "ReadTimeout" in outcome.error
 
 
+def test_non_opencode_retries_5xx() -> None:
+    request = httpx.Request("POST", "http://zhipu.test/v1")
+    error = httpx.HTTPStatusError("503", request=request, response=httpx.Response(503, request=request))
+    llm = FakeLLM([error, '{"nodes": []}'], llm_type="zhipu")
+
+    outcome = _run(llm)
+
+    assert outcome.status == "ok"
+    assert outcome.extra["attempts"] == 2
+    assert outcome.extra["failure_reasons"] == ["transport:HTTPStatusError"]
+
+
+def test_non_opencode_does_not_retry_timeout() -> None:
+    request = httpx.Request("POST", "http://zhipu.test/v1")
+    llm = FakeLLM([httpx.ReadTimeout("slow", request=request)], llm_type="zhipu")
+
+    outcome = _run(llm)
+
+    assert outcome.status == "failed"
+    assert outcome.extra["attempts"] == 1
+    assert outcome.extra["failure_reasons"] == ["transport:ReadTimeout"]
+
+
 def test_per_attempt_audit_records_action_and_base(monkeypatch: pytest.MonkeyPatch) -> None:
     events: list[tuple[str, dict[str, Any]]] = []
 

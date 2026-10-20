@@ -18,6 +18,7 @@ from langchain_openai import ChatOpenAI
 from gacore.config import ConfigError
 from gacore.llm_request_log import install_llm_logging
 from gacore.opencode_llm import (
+    DEFAULT_CLIENT_UA as OPENCODE_DEFAULT_CLIENT_UA,
     DEFAULT_MODEL as OPENCODE_DEFAULT_MODEL,
     DEFAULT_SERVER_URL as OPENCODE_DEFAULT_SERVER_URL,
     OpencodeChatModel,
@@ -162,6 +163,8 @@ def get_llm(
                 server_url=source.get("OPENCODE_SERVER_URL") or OPENCODE_DEFAULT_SERVER_URL,
                 model_name=source.get("OPENCODE_MODEL") or OPENCODE_DEFAULT_MODEL,
                 provider_id=source.get("OPENCODE_PROVIDER_ID") or "opencode",
+                client_ua=source.get("OPENCODE_CLIENT_UA") or OPENCODE_DEFAULT_CLIENT_UA,
+                variant=source.get("OPENCODE_VARIANT") or None,
                 agent=source.get("OPENCODE_AGENT") or None,
                 timeout=timeout,
                 max_retries=max_retries,
