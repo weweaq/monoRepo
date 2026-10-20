@@ -63,6 +63,7 @@ def test_get_llm_opencode_uses_defaults() -> None:
     assert llm.server_url == "http://127.0.0.1:4096"
     assert llm.model_name == "glm-5.3-flash-free"
     assert llm.provider_id == "opencode"
+    assert llm.client_ua == ""
     assert llm.timeout == 300.0
     assert llm.max_retries == 1
 
@@ -291,7 +292,24 @@ def test_resolve_llm_defaults_variant_when_main_provider_is_opencode(
     assert llm.variant == "low"
 
 
-def test_invoke_sends_client_user_agent_on_every_call() -> None:
+def test_invoke_sends_configured_client_user_agent_on_every_call() -> None:
+    seen: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("user-agent", ""))
+        if request.url.path == "/session":
+            return httpx.Response(200, json={"id": "ses_test"})
+        if request.method == "DELETE":
+            return httpx.Response(200, json=True)
+        return httpx.Response(200, json=_reply())
+
+    llm = OpencodeChatModel(transport=httpx.MockTransport(handle), client_ua="opencode/1.18.27")
+    assert llm.invoke(_messages()).content == "hello world"
+    assert seen
+    assert all(ua == "opencode/1.18.27" for ua in seen)
+
+
+def test_invoke_omits_user_agent_override_by_default() -> None:
     seen: list[str] = []
 
     def handle(request: httpx.Request) -> httpx.Response:
@@ -303,9 +321,10 @@ def test_invoke_sends_client_user_agent_on_every_call() -> None:
         return httpx.Response(200, json=_reply())
 
     llm = OpencodeChatModel(transport=httpx.MockTransport(handle))
-    assert llm.invoke(_messages()).content == "hello world"
+    llm.invoke(_messages())
+
     assert seen
-    assert all(ua == "opencode/1.18.27" for ua in seen)
+    assert all("opencode/" not in ua.lower() for ua in seen)
 
 
 def test_get_llm_opencode_reads_client_ua_env() -> None:

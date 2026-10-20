@@ -9,14 +9,15 @@ Scope is text generation only. Tool calling is deliberately unsupported: the Ope
 runtime executes *its* tools (bash/read/edit), not gacore's Python tools, and the
 session API cannot accept arbitrary tool schemas.
 
-Two constraints come from the free-tier gateway and were both verified against a live
-server. The caller's ``User-Agent`` must look like the official client
-(``opencode/<version>``); and the request must not carry any explicit tool/permission
-config. A session created with a ``permission`` array, or a message carrying a ``tools``
-map, is treated as a headless programmatic call and answered with ``403 FreeTierError``
--- even when the permission is attached later via ``PATCH /session/{id}``. Only a plain
-session passes, so the session is created with just a title and the message body holds
-no ``tools`` key.
+Two constraints come from the free-tier gateway. The caller's ``User-Agent`` may need
+to look like the official client (``opencode/<version>``), and the request must not
+carry any explicit tool/permission config. This adapter sends no UA override by
+default; set ``OPENCODE_CLIENT_UA`` to opt in, accepting that the gate may change or
+that impersonating the official client may violate upstream terms. A session created
+with a ``permission`` array, or a message carrying a ``tools`` map, is treated as a
+headless programmatic call and answered with ``403 FreeTierError`` -- even when the
+permission is attached later via ``PATCH /session/{id}``. Only a plain session passes,
+so the session is created with just a title and the message body holds no ``tools`` key.
 """
 
 from __future__ import annotations
@@ -37,12 +38,10 @@ from gacore.jsonl_logger import get_logger
 
 DEFAULT_SERVER_URL: Final = "http://127.0.0.1:4096"
 DEFAULT_MODEL: Final = "glm-5.3-flash-free"
-# The upstream gateway gates free models by User-Agent: a caller that does not look
-# like the official client gets ``403 FreeTierError`` ("free tier can only be used
-# from within OpenCode"), while ``opencode/<version>`` passes. The local server
-# forwards the caller's UA upstream, so the adapter must present the client UA to
-# reuse the free models over the plain HTTP session API.
-DEFAULT_CLIENT_UA: Final = "opencode/1.18.27"
+# The upstream gateway may gate free models by User-Agent. This adapter sends no UA
+# override by default; set OPENCODE_CLIENT_UA only if you consciously accept that the
+# value tries to pass a gate intended for the official client.
+DEFAULT_CLIENT_UA: Final = ""
 # Model variant (``model.variant``) selects a reasoning-effort preset. The free
 # ``glm-5.3-flash-free`` exposes low/high/max and its default preset over-thinks:
 # on the full events material it burned the entire 32000-token output cap on
@@ -52,6 +51,11 @@ DEFAULT_CLIENT_UA: Final = "opencode/1.18.27"
 _SESSION_TITLE: Final = "gacore"
 _RETRY_STATUS: Final = frozenset({408, 409, 429})
 _LOG = get_logger("llm.opencode")
+
+
+def _ua_headers(client_ua: str) -> dict[str, str]:
+    """Return an explicit User-Agent header only when configured."""
+    return {"User-Agent": client_ua} if client_ua else {}
 
 
 def _text_of(content: Any) -> str:
@@ -250,7 +254,7 @@ class OpencodeChatModel(BaseChatModel):
         with httpx.Client(
             base_url=self.server_url,
             timeout=_client_timeout(self.timeout),
-            headers={"User-Agent": self.client_ua},
+            headers=_ua_headers(self.client_ua),
             transport=self.transport,
         ) as client:
             for attempt in range(self.max_retries + 1):
@@ -280,7 +284,7 @@ class OpencodeChatModel(BaseChatModel):
         async with httpx.AsyncClient(
             base_url=self.server_url,
             timeout=_client_timeout(self.timeout),
-            headers={"User-Agent": self.client_ua},
+            headers=_ua_headers(self.client_ua),
             transport=self.transport,
         ) as client:
             for attempt in range(self.max_retries + 1):
