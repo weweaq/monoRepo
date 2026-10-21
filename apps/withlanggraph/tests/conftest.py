@@ -31,6 +31,14 @@ if TYPE_CHECKING:
     from gacore.config import Config
 
 os.environ["GACORE_LOG_ROOT"] = tempfile.mkdtemp(prefix="gacore-pytest-logs-")
+# 心跳目录隔离：开发者 shell 里的 GACORE_RUN_DIR 会把心跳写进真实目录，测试一律清掉；
+# 需要自定义目录的用例自行 monkeypatch.setenv("GACORE_RUN_DIR", ...)。
+os.environ.pop("GACORE_RUN_DIR", None)
+
+from gacore import jsonl_logger as _jsonl_logger  # noqa: E402
+
+# 若在 conftest 生效前已有模块按旧环境建过 sink，显式重置成按测试根目录重建。
+_jsonl_logger._sink = None
 
 
 class BindableFakeMessagesListChatModel(FakeMessagesListChatModel):
