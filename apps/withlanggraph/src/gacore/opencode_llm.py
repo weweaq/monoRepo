@@ -112,6 +112,22 @@ class OpencodeProviderError(RuntimeError):
         super().__init__(f"opencode assistant error: {name or type(error).__name__}")
 
 
+class OpencodeEmptyResponse(RuntimeError):
+    """HTTP 200 assistant message with no text part.
+
+    The free-tier gateway occasionally finishes a long generation with an empty
+    ``parts`` array (observed on the events channel: 275s, then no text). That is a
+    transient provider flake, not a malformed prompt, so it is flagged retryable and
+    carries ``finish``/``parts`` for triage instead of a bare RuntimeError.
+    """
+
+    def __init__(self, finish: str | None, parts: int) -> None:
+        self.finish_reason = finish
+        self.parts = parts
+        self.is_retryable = True
+        super().__init__(f"opencode returned no text (finish={finish!r}, parts={parts})")
+
+
 def _json_or_raise(resp: httpx.Response) -> dict[str, Any]:
     """Return the JSON body, or raise carrying the server's error text (e.g. FreeTierError)."""
     if resp.is_error:
@@ -135,6 +151,8 @@ def _client_timeout(seconds: float) -> httpx.Timeout:
 
 
 def _retryable(exc: Exception) -> bool:
+    if isinstance(exc, OpencodeEmptyResponse):
+        return True
     if isinstance(exc, OpencodeProviderError):
         status = exc.status_code
         if status is not None and (status in _RETRY_STATUS or 500 <= status < 600):
@@ -227,9 +245,7 @@ class OpencodeChatModel(BaseChatModel):
         if info.get("error"):
             raise OpencodeProviderError(info["error"])
         if not text:
-            raise RuntimeError(
-                f"opencode returned no text (finish={info.get('finish')!r}, parts={len(parts)})"
-            )
+            raise OpencodeEmptyResponse(info.get("finish"), len(parts))
         message = AIMessage(
             content=text,
             usage_metadata=_usage(info.get("tokens")),

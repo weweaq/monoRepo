@@ -11,7 +11,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from gacore.llm import get_llm, get_provider
-from gacore.opencode_llm import OpencodeChatModel
+from gacore.opencode_llm import OpencodeChatModel, OpencodeEmptyResponse
 
 _OPENCODE_ENV: Mapping[str, str] = {
     "LLM_PROVIDER": "opencode",
@@ -191,8 +191,43 @@ def test_invoke_raises_on_non_json_success() -> None:
 
 def test_invoke_raises_on_empty_text() -> None:
     llm = OpencodeChatModel(transport=_handler([], reply=_reply(text="")))
-    with pytest.raises(RuntimeError, match="no text"):
+    with pytest.raises(OpencodeEmptyResponse, match="no text"):
         llm.invoke(_messages())
+
+
+def test_empty_text_is_flagged_retryable_with_finish_detail() -> None:
+    """Free-tier flake: HTTP 200 with no text. Must be retryable, and carry finish/parts."""
+    llm = OpencodeChatModel(transport=_handler([], reply=_reply(text="")))
+    with pytest.raises(OpencodeEmptyResponse) as caught:
+        llm.invoke(_messages())
+
+    exc = caught.value
+    assert isinstance(exc, RuntimeError)  # keeps the old contract for callers
+    assert exc.is_retryable is True
+    assert exc.finish_reason == "stop"
+    assert exc.parts == 0
+    assert "finish='stop'" in str(exc)
+
+
+def test_invoke_retries_empty_text_when_retry_budget_allows() -> None:
+    calls: list[tuple[str, str, bytes]] = []
+    replies = {"n": 0}
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, request.url.path, request.content))
+        if request.method == "POST" and request.url.path == "/session":
+            return httpx.Response(200, json={"id": "ses_test"})
+        if request.method == "POST" and request.url.path.endswith("/message"):
+            replies["n"] += 1
+            return httpx.Response(200, json=_reply(text="" if replies["n"] == 1 else "recovered"))
+        if request.method == "DELETE":
+            return httpx.Response(200, json=True)
+        return httpx.Response(404, json={"error": "not found"})
+
+    llm = OpencodeChatModel(transport=httpx.MockTransport(handle), max_retries=1)
+
+    assert llm.invoke(_messages()).content == "recovered"
+    assert replies["n"] == 2
 
 
 def test_invoke_raises_on_assistant_error() -> None:
