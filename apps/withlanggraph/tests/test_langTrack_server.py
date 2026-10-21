@@ -1,18 +1,38 @@
-from __future__ import annotations
-
-import pytest
-from fastapi.testclient import TestClient
-
-from gacore.langTrack.server import create_app
-from gacore.langTrack.storage import Storage
-
-
-@pytest.fixture
-def client(tmp_path):
-    storage = Storage(tmp_path / "langTrack.db")
-    app = create_app(storage)
-    c = TestClient(app)
-    yield c, storage
+from __future__ import annotations
+
+import json
+import os
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+import gacore.langTrack.server as server_mod
+from gacore.langTrack.server import create_app
+from gacore.langTrack.storage import Storage
+
+
+def _read_jsonl_logs() -> list[dict]:
+    """All app.jsonl records of this test process (GACORE_LOG_ROOT is isolated by conftest)."""
+    root = Path(os.environ["GACORE_LOG_ROOT"])
+    out: list[dict] = []
+    for path in root.glob("*/app.jsonl"):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                out.append(json.loads(line))
+    return out
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    # Pin ETL knobs: the lifespan-started loop must only block on stop_event, so no
+    # test can ever launch the real ETL subprocess.
+    monkeypatch.setattr(server_mod, "_ETL_INTERVAL_SECONDS", 3600)
+    monkeypatch.setattr(server_mod, "_ETL_TIMEOUT_SECONDS", 3600)
+    storage = Storage(tmp_path / "langTrack.db")
+    app = create_app(storage, heartbeat_dir=tmp_path / "run")
+    with TestClient(app) as c:
+        yield c, storage
     storage.close()
 
 
@@ -104,11 +124,18 @@ def test_ingest_normalizes_alias_device(client, tmp_path, monkeypatch):
 
 
 def test_etl_status_shape(client):
-    """/etl/status 暴露 running/last_finished_at/last_ok 三字段。"""
+    """/etl/status 暴露运行状态与最近一次结果（含触发来源/耗时/错误）。"""
     c, _ = client
     st = c.get("/etl/status").json()
     assert st["running"] is False
-    assert set(st) >= {"running", "last_finished_at", "last_ok"}
+    assert set(st) >= {
+        "running",
+        "last_finished_at",
+        "last_ok",
+        "last_trigger",
+        "last_duration_ms",
+        "last_error",
+    }
 
 
 def test_etl_run_endpoint_triggers_and_guards(client, monkeypatch):
@@ -119,8 +146,8 @@ def test_etl_run_endpoint_triggers_and_guards(client, monkeypatch):
 
     calls = []
 
-    def fake_once():
-        calls.append(1)
+    def fake_once(trigger="manual"):
+        calls.append(trigger)
         _time.sleep(0.3)
         return True
 
@@ -163,3 +190,93 @@ def test_client_version_reads_config_file(client, tmp_path, monkeypatch):
     body = c.get("/api/client/version").json()
     assert body["app_version"] == "9.9"
     assert body["latest_apk_url"] == "/static/app-debug.apk"
+
+
+def test_ingest_emits_completed_log(client):
+    """Given a normal batch, When POST /ingest, Then one `ingest completed` line is written."""
+    c, _ = client
+    payload = {
+        "device_id": "dev1", "batch_id": "log-b1", "client_ts": 1000,
+        "events": [{"type": "usage", "ts": 1000, "data": {"pkg": "com.x"}}],
+    }
+    assert c.post("/ingest", json=payload).status_code == 200
+    hit = [x for x in _read_jsonl_logs() if x.get("message") == "ingest completed" and x.get("batch_id") == "log-b1"]
+    assert len(hit) == 1
+    assert hit[0]["event_count"] == 1
+    assert hit[0]["inserted"] == 1
+    assert hit[0]["deduplicated"] is False
+    assert hit[0]["client_device_id"] is None
+    assert "duration_ms" in hit[0]
+
+
+def test_ingest_alias_logs_client_device_id(client, tmp_path, monkeypatch):
+    """别名设备批次：device_id 写主设备，client_device_id 保留客户端原始值。"""
+    import json as _json
+
+    from gacore.langTrack import etl as _etl
+
+    alias_file = tmp_path / "device_aliases.json"
+    alias_file.write_text(_json.dumps({"dev2": "dev1"}), encoding="utf-8")
+    monkeypatch.setattr(_etl, "DEVICE_ALIASES_PATH", alias_file)
+
+    c, _ = client
+    payload = {
+        "device_id": "dev2", "batch_id": "log-alias", "client_ts": 1000,
+        "events": [{"type": "usage", "ts": 1000, "data": {"pkg": "com.x"}}],
+    }
+    assert c.post("/ingest", json=payload).status_code == 200
+    hit = [x for x in _read_jsonl_logs() if x.get("message") == "ingest completed" and x.get("batch_id") == "log-alias"]
+    assert hit[-1]["device_id"] == "dev1"
+    assert hit[-1]["client_device_id"] == "dev2"
+
+
+def test_ingest_failure_logs_once(tmp_path, monkeypatch):
+    """入库异常：路由打一行 ingest failed（含真栈），中间件不重复打 http request crashed。"""
+    monkeypatch.setattr(server_mod, "_ETL_INTERVAL_SECONDS", 3600)
+    monkeypatch.setattr(server_mod, "_ETL_TIMEOUT_SECONDS", 3600)
+    storage = Storage(tmp_path / "langTrack.db")
+    app = create_app(storage, heartbeat_dir=tmp_path / "run")
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(storage, "ingest_batch", boom)
+    payload = {
+        "device_id": "dev1", "batch_id": "log-fail", "client_ts": 1000,
+        "events": [{"type": "usage", "ts": 1000, "data": {"pkg": "com.x"}}],
+    }
+    with TestClient(app, raise_server_exceptions=False) as c:
+        r = c.post("/ingest", json=payload)
+    assert r.status_code == 500
+
+    logs = _read_jsonl_logs()
+    failed = [x for x in logs if x.get("message") == "ingest failed" and x.get("batch_id") == "log-fail"]
+    crashed = [x for x in logs if x.get("message") == "http request crashed" and x.get("path") == "/ingest"]
+    assert len(failed) == 1
+    assert crashed == []
+    assert "Traceback (most recent call last)" in failed[-1]["stack_trace"]
+    assert failed[-1]["error_type"] == "RuntimeError"
+    storage.close()
+
+
+def test_ingest_422_logs_http_failed(client):
+    """校验失败（422）：走 http request failed 分支，带状态码。"""
+    c, _ = client
+    assert c.post("/ingest", json={"bad": "payload"}).status_code == 422
+    hit = [x for x in _read_jsonl_logs() if x.get("message") == "http request failed" and x.get("path") == "/ingest"]
+    assert hit and hit[-1]["status"] == 422
+
+
+def test_lifespan_writes_server_heartbeat(tmp_path, monkeypatch):
+    """lifespan 期间心跳为 running，退出后为 stopped。"""
+    monkeypatch.setattr(server_mod, "_ETL_INTERVAL_SECONDS", 3600)
+    monkeypatch.setattr(server_mod, "_ETL_TIMEOUT_SECONDS", 3600)
+    storage = Storage(tmp_path / "langTrack.db")
+    app = create_app(storage, heartbeat_dir=tmp_path / "run")
+    with TestClient(app):
+        data = json.loads((tmp_path / "run" / "langtrack_server.json").read_text(encoding="utf-8"))
+        assert data["state"] == "running"
+        assert data["component"] == "langtrack_server"
+    data = json.loads((tmp_path / "run" / "langtrack_server.json").read_text(encoding="utf-8"))
+    assert data["state"] == "stopped"
+    storage.close()

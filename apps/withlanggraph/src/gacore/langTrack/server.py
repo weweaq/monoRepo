@@ -1,26 +1,28 @@
 """FastAPI 应用：POST /ingest 接收上报，GET /health 健康检查，GET /dashboard 仪表盘。"""
 from __future__ import annotations
 
+import asyncio
 import json
-import logging
 import os
 import sqlite3
 import subprocess
 import sys
 import threading
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, HTMLResponse
 
+from gacore.heartbeat import DEFAULT_INTERVAL_SECONDS, Heartbeat, run_dir
+from gacore.jsonl_logger import get_logger
 from gacore.langTrack.dashboard import DB_PATH, build_map_day_data, render_dashboard_html
 from gacore.langTrack.etl import canonical_device_id
 from gacore.langTrack.schemas import IngestRequest
 from gacore.langTrack.storage import Storage
 
-logger = logging.getLogger("gacore.langTrack.server")
+logger = get_logger("langTrack.server")
 
 # 项目根目录：src/gacore/langTrack/server.py -> 项目根
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -34,8 +36,35 @@ _ETL_INTERVAL_SECONDS = int(os.environ.get("LANGTRACK_ETL_INTERVAL_SECONDS", "18
 _ETL_TIMEOUT_SECONDS = int(os.environ.get("LANGTRACK_ETL_TIMEOUT_SECONDS", "120"))
 
 
-def _run_etl_once() -> bool:
+def _tail(value: bytes | str | None, limit: int = 2000) -> str:
+    """Tail of a subprocess stream for logs: last `limit` chars, decoded."""
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", errors="replace")
+    return value[-limit:]
+
+
+# 手动/周期 ETL 共用的防重入状态（Task 12c：dashboard"立即转换"按钮）
+_ETL_STATE_LOCK = threading.Lock()
+_ETL_STATE: dict = {
+    "running": False,
+    "last_finished_at": None,
+    "last_ok": None,
+    "last_trigger": None,
+    "last_duration_ms": None,
+    "last_error": None,
+}
+
+
+def _set_etl_outcome(error: str | None) -> None:
+    with _ETL_STATE_LOCK:
+        _ETL_STATE["last_error"] = error
+
+
+def _run_etl_once(trigger: str = "manual") -> bool:
     """幂等重建事实表；失败只记日志不阻塞。返回是否成功（Task 12c）。"""
+    started = time.perf_counter()
     try:
         result = subprocess.run(
             [sys.executable, "-m", "gacore.langTrack.etl"],
@@ -45,26 +74,41 @@ def _run_etl_once() -> bool:
             check=False,
             creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
         )
+        duration_ms = round((time.perf_counter() - started) * 1000, 1)
         if result.returncode == 0:
-            logger.info("periodic ETL ok")
+            _set_etl_outcome(None)
+            logger.info("periodic ETL finished", trigger=trigger, returncode=0, duration_ms=duration_ms)
             return True
+        tail = _tail(result.stderr)
+        _set_etl_outcome(f"rc={result.returncode} stderr={tail}")
         logger.warning(
-            "periodic ETL failed rc=%s stderr=%s",
-            result.returncode,
-            (result.stderr or "")[-2000:],
+            "periodic ETL failed",
+            trigger=trigger,
+            returncode=result.returncode,
+            duration_ms=duration_ms,
+            stderr_tail=tail,
+        )
+        return False
+    except subprocess.TimeoutExpired as exc:
+        # 子进程已被 kill：如果它只留下了 etl.run.started，这一行是权威归属信号。
+        duration_ms = round((time.perf_counter() - started) * 1000, 1)
+        _set_etl_outcome(f"timeout after {_ETL_TIMEOUT_SECONDS}s")
+        logger.warning(
+            "ETL timeout",
+            trigger=trigger,
+            timeout_sec=_ETL_TIMEOUT_SECONDS,
+            duration_ms=duration_ms,
+            stderr_tail=_tail(exc.stderr),
         )
         return False
     except Exception as e:  # noqa: BLE001
-        logger.warning("periodic ETL error: %s", e)
+        duration_ms = round((time.perf_counter() - started) * 1000, 1)
+        _set_etl_outcome(f"{type(e).__name__}: {e}")
+        logger.exception("periodic ETL crashed", exc=e, trigger=trigger, duration_ms=duration_ms)
         return False
 
 
-# 手动/周期 ETL 共用的防重入状态（Task 12c：dashboard"立即转换"按钮）
-_ETL_STATE_LOCK = threading.Lock()
-_ETL_STATE: dict = {"running": False, "last_finished_at": None, "last_ok": None}
-
-
-def _try_start_etl() -> bool:
+def _try_start_etl(trigger: str = "manual") -> bool:
     """非阻塞启动一次 ETL 后台任务；已有 ETL 在跑则返回 False（防重入）。
 
     周期线程与手动按钮共用同一守卫，杜绝两个 ETL 子进程并发写库。
@@ -76,43 +120,92 @@ def _try_start_etl() -> bool:
 
     def _task() -> None:
         ok = False
+        started = time.perf_counter()
         try:
-            ok = _run_etl_once()
+            ok = _run_etl_once(trigger=trigger)
         finally:
             with _ETL_STATE_LOCK:
                 _ETL_STATE["running"] = False
                 _ETL_STATE["last_ok"] = bool(ok)
                 _ETL_STATE["last_finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                _ETL_STATE["last_trigger"] = trigger
+                _ETL_STATE["last_duration_ms"] = round((time.perf_counter() - started) * 1000, 1)
 
     threading.Thread(target=_task, daemon=True, name="langTrack-etl-manual").start()
     return True
 
 
 def _etl_loop(stop_event: threading.Event) -> None:
+    logger.info("periodic ETL loop started", interval_sec=_ETL_INTERVAL_SECONDS)
     while not stop_event.wait(_ETL_INTERVAL_SECONDS):
         try:
-            _try_start_etl()
-        except Exception:
-            logger.exception("periodic ETL loop crashed")
+            _try_start_etl("periodic")
+        except Exception as exc:
+            logger.exception("periodic ETL loop crashed", exc=exc)
+    logger.info("periodic ETL loop stopped")
 
 
-@asynccontextmanager
-async def _lifespan(app: FastAPI):
-    stop_event = threading.Event()
-    thread = threading.Thread(
-        target=_etl_loop, args=(stop_event,), daemon=True, name="langTrack-etl"
-    )
-    thread.start()
-    logger.info("periodic ETL thread started (interval=%ss)", _ETL_INTERVAL_SECONDS)
-    try:
-        yield
-    finally:
-        stop_event.set()
-        thread.join(timeout=5)
+async def _heartbeat_loop(heartbeat: Heartbeat) -> None:
+    while True:
+        await asyncio.sleep(DEFAULT_INTERVAL_SECONDS)
+        heartbeat.beat(etl_interval_sec=_ETL_INTERVAL_SECONDS)  # 不传 state
 
 
-def create_app(storage: Storage) -> FastAPI:
-    app = FastAPI(title="langTrack ingest", lifespan=_lifespan)
+def _make_lifespan(hb_dir: Path):
+    @asynccontextmanager
+    async def _lifespan(app: FastAPI):
+        heartbeat = Heartbeat("langtrack_server", root=hb_dir)
+        heartbeat.start(etl_interval_sec=_ETL_INTERVAL_SECONDS)
+        heartbeat.beat(state="running", etl_interval_sec=_ETL_INTERVAL_SECONDS)
+        beat_task = asyncio.create_task(_heartbeat_loop(heartbeat))
+        stop_event = threading.Event()
+        thread = threading.Thread(
+            target=_etl_loop, args=(stop_event,), daemon=True, name="langTrack-etl"
+        )
+        thread.start()
+        logger.info("periodic ETL thread started", interval_sec=_ETL_INTERVAL_SECONDS)
+        try:
+            yield
+        finally:
+            stop_event.set()
+            thread.join(timeout=5)
+            beat_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await beat_task
+            heartbeat.stop()
+    return _lifespan
+
+
+def create_app(storage: Storage, *, heartbeat_dir: Path | None = None) -> FastAPI:
+    hb_dir = heartbeat_dir or run_dir(_PROJECT_ROOT)
+    app = FastAPI(title="langTrack ingest", lifespan=_make_lifespan(hb_dir))
+
+    @app.middleware("http")
+    async def _log_failed_requests(request, call_next):
+        started = time.perf_counter()
+        try:
+            response = await call_next(request)
+        except Exception as exc:
+            # /ingest 的异常由路由内的 `ingest failed` 归属，避免一行错误两份 ERROR。
+            if request.url.path != "/ingest":
+                logger.exception(
+                    "http request crashed",
+                    exc=exc,
+                    method=request.method,
+                    path=request.url.path,
+                    status=500,
+                    duration_ms=round((time.perf_counter() - started) * 1000, 1),
+                )
+            raise
+        if response.status_code >= 400:
+            logger.warning(
+                "http request failed",
+                method=request.method,
+                path=request.url.path,
+                status=response.status_code,
+                duration_ms=round((time.perf_counter() - started) * 1000, 1),
+            )
+        return response
 
     @app.get("/health")
     def health() -> dict:
@@ -136,7 +229,11 @@ def create_app(storage: Storage) -> FastAPI:
                 version = obj.get("app_version", version)
                 apk_url = obj.get("latest_apk_url", apk_url)
             except Exception as e:  # noqa: BLE001
-                logger.warning("client_version.json unreadable: %s", e)
+                logger.warning(
+                    "client_version.json unreadable",
+                    error_type=type(e).__name__,
+                    error_message=str(e),
+                )
         return {"app_version": version, "latest_apk_url": apk_url}
 
     @app.get("/download/latest.apk")
@@ -158,7 +255,7 @@ def create_app(storage: Storage) -> FastAPI:
     @app.post("/etl/run")
     def etl_run() -> dict:
         """手动触发一次 ETL（异步执行，立即返回；运行中则 busy，Task 12c）。"""
-        started = _try_start_etl()
+        started = _try_start_etl("manual")
         return {"status": "started" if started else "busy"}
 
     @app.get("/etl/status")
@@ -178,16 +275,37 @@ def create_app(storage: Storage) -> FastAPI:
 
     @app.post("/ingest")
     def ingest(req: IngestRequest) -> dict:
+        started = time.perf_counter()
         received_at = int(time.time() * 1000)
+        client_device_id = req.device_id
         # 入库即归一别名设备（Task 12b）：原始层只存主设备，ETL 归并仅兜底历史行
-        device_id = canonical_device_id(req.device_id)
-        storage.upsert_device(device_id, req.client_ts)
-
-        inserted = storage.ingest_batch(
-            req.batch_id,
-            device_id,
-            received_at,
-            [(ev.ts, ev.type, ev.data) for ev in req.events],
+        device_id = canonical_device_id(client_device_id)
+        try:
+            storage.upsert_device(device_id, req.client_ts)
+            inserted = storage.ingest_batch(
+                req.batch_id,
+                device_id,
+                received_at,
+                [(ev.ts, ev.type, ev.data) for ev in req.events],
+            )
+        except Exception as exc:
+            logger.exception(
+                "ingest failed",
+                exc=exc,
+                batch_id=req.batch_id,
+                device_id=device_id,
+                event_count=len(req.events),
+            )
+            raise
+        logger.info(
+            "ingest completed",
+            batch_id=req.batch_id,
+            device_id=device_id,
+            client_device_id=client_device_id if client_device_id != device_id else None,
+            event_count=len(req.events),
+            inserted=len(req.events) if inserted else 0,
+            deduplicated=not inserted,
+            duration_ms=round((time.perf_counter() - started) * 1000, 1),
         )
         if not inserted:
             return {"status": "ok", "inserted": 0, "deduplicated": True}
