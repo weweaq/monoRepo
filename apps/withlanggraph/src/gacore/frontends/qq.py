@@ -72,6 +72,8 @@ import uuid
 
 from collections import deque
 
+from contextlib import suppress
+
 from datetime import datetime, timedelta, timezone
 
 from pathlib import Path
@@ -97,6 +99,7 @@ from langgraph.types import Command
 from gacore.character import card_name, card_prompt, list_cards
 from gacore.config import Config, load_dotenv
 from gacore.graph import DEFAULT_RECURSION_LIMIT, build_graph
+from gacore.heartbeat import DEFAULT_INTERVAL_SECONDS, Heartbeat, run_dir
 from gacore.llm import get_llm
 from gacore.jsonl_logger import get_logger
 from gacore.proactive import record_last_active, record_user_emotion
@@ -807,6 +810,13 @@ def _make_bot_class(app: QQApp):
 
             name = getattr(getattr(self, "robot", None), "name", "QQBot")
 
+            if app._heartbeat is not None:
+
+                app._heartbeat.beat(
+                    state="running",
+                    connected_at=datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+                )
+
             logger.info(f"QQ bot ready: {name}")
 
 
@@ -833,6 +843,18 @@ def _make_bot_class(app: QQApp):
 
 
 
+async def _heartbeat_loop(heartbeat: Heartbeat) -> None:
+
+    """Periodic beat that keeps the last state (never flattens reconnecting→running)."""
+
+    while True:
+
+        await asyncio.sleep(DEFAULT_INTERVAL_SECONDS)
+
+        heartbeat.beat()
+
+
+
 
 
 class QQApp:
@@ -852,6 +874,9 @@ class QQApp:
         self.graph = graph
 
         self.client: botpy.Client | None = None
+
+        # Heartbeat handle bound in start(); on_ready and the reconnect loop update it.
+        self._heartbeat: Heartbeat | None = None
 
         self._running_tasks: dict[str, asyncio.Task] = {}  # user_id -> running agent task
 
@@ -2165,31 +2190,59 @@ class QQApp:
 
         self.client = _make_bot_class(self)()
 
+        heartbeat = Heartbeat("qq", root=run_dir(Config.default().root))
+
+        self._heartbeat = heartbeat
+
+        heartbeat.start(launcher="qq")
+
+        heartbeat.beat(state="connecting", launcher="qq")
+
+        beat_task = asyncio.create_task(_heartbeat_loop(heartbeat))
+
         delay = _RECONNECT_INITIAL
 
-        while True:
+        try:
 
-            started_at = time.monotonic()
+            while True:
 
-            try:
+                started_at = time.monotonic()
 
-                logger.info(f"QQ bot starting... {time.strftime('%m-%d %H:%M')}")
+                try:
 
-                await self.client.start(appid=_APP_ID, secret=_APP_SECRET)
+                    logger.info(f"QQ bot starting... {time.strftime('%m-%d %H:%M')}")
 
-            except Exception as e:  # noqa: BLE001 — top-level reconnect guard
+                    await self.client.start(appid=_APP_ID, secret=_APP_SECRET)
 
-                logger.error(f"QQ bot error: {e}")
+                except Exception as e:  # noqa: BLE001 — top-level reconnect guard
 
-            if time.monotonic() - started_at >= 60:
+                    logger.exception("QQ bot error", exc=e)
 
-                delay = _RECONNECT_INITIAL
+                if time.monotonic() - started_at >= 60:
 
-            logger.warning(f"QQ reconnect in {delay}s...")
+                    delay = _RECONNECT_INITIAL
 
-            await asyncio.sleep(delay)
+                # Idle exit and exception path both land here: the bot is not connected
 
-            delay = min(delay * 2, _RECONNECT_MAX)
+                # until on_ready fires again, so record the backoff window.
+
+                heartbeat.beat(state="reconnecting", retry_in_sec=delay)
+
+                logger.warning(f"QQ reconnect in {delay}s...")
+
+                await asyncio.sleep(delay)
+
+                delay = min(delay * 2, _RECONNECT_MAX)
+
+        finally:
+
+            beat_task.cancel()
+
+            with suppress(asyncio.CancelledError):
+
+                await beat_task
+
+            heartbeat.stop()
 
 
 
