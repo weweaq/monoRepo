@@ -38,12 +38,18 @@ import sqlite3
 
 import time
 
+import uuid
+
 from collections import defaultdict
 
 from pathlib import Path
 
 
+from gacore.jsonl_logger import get_logger
+
 from gacore.langTrack.etl_config import load_etl_config
+
+logger = get_logger("langTrack.etl")
 DB_PATH = Path(__file__).resolve().parents[3] / "data" / "langTrack.db"
 
 
@@ -1850,9 +1856,6 @@ def build_contract_coverage(conn: sqlite3.Connection) -> int:
     - events 中出现但不在契约中的类型 → unexpected（expected=0）
     """
     from gacore.langTrack.contract import EXPECTED_EVENT_TYPES, STALE_DAYS
-    from gacore.jsonl_logger import get_logger
-
-    log = get_logger("langTrack.etl")
 
     # 实际到达类型：type -> (count, max_ts)
     actual: dict[str, tuple[int, int]] = {}
@@ -1862,7 +1865,7 @@ def build_contract_coverage(conn: sqlite3.Connection) -> int:
         ).fetchall()
     except sqlite3.OperationalError as e:
         # events 表不存在（极端情况）时不阻塞 ETL
-        log.warning("contract_coverage 跳过: events 表不可读", error_type=type(e).__name__, error=str(e))
+        logger.warning("contract_coverage 跳过: events 表不可读", error_type=type(e).__name__, error=str(e))
         return 0
     for type_, cnt, max_ts in rows:
         if type_ is not None:
@@ -1895,7 +1898,7 @@ def build_contract_coverage(conn: sqlite3.Connection) -> int:
         out,
     )
     conn.commit()
-    log.info("contract_coverage 重建完成", type_count=len(out))
+    logger.info("contract_coverage 重建完成", type_count=len(out))
     return len(out)
 
 
@@ -2393,7 +2396,29 @@ def _build_location_v1(conn: sqlite3.Connection, events, incremental_active: boo
     conn.close()
 
 
-def run(db_path: Path = DB_PATH, device_id: str | None = None, run_geocode: bool = True, run_route: bool = True, run_poi: bool = True, incremental: bool = False) -> None:
+_SUMMARY_TABLES = ("events", "sessions", "daily_stats", "places", "stays", "trips", "anomalies", "contract_coverage")
+
+
+def _collect_table_counts(conn: sqlite3.Connection) -> dict[str, int | None]:
+    """每个摘要表的行数；表不存在时记 None（v1 库没有 v2 表，不能崩）。"""
+    counts: dict[str, int | None] = {}
+    for table in _SUMMARY_TABLES:
+        try:
+            counts[table] = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        except sqlite3.OperationalError:
+            counts[table] = None
+    return counts
+
+
+def _run_impl(db_path: Path = DB_PATH, device_id: str | None = None, run_geocode: bool = True, run_route: bool = True, run_poi: bool = True, incremental: bool = False) -> dict[str, object]:
+
+    n_geo: int | None = None
+
+    n_route: int | None = None
+
+    n_poi: int | None = None
+
+    n_stays_v2: int | None = None
 
     conn = sqlite3.connect(db_path)
 
@@ -2583,9 +2608,9 @@ def run(db_path: Path = DB_PATH, device_id: str | None = None, run_geocode: bool
 
             from gacore.langTrack import geocode
 
-            n = geocode.incremental_encode(db_path)
+            n_geo = geocode.incremental_encode(db_path)
 
-            print(f"[etl] 增量 regeo 编码: {n} 个常驻点")
+            print(f"[etl] 增量 regeo 编码: {n_geo} 个常驻点")
 
         except SystemExit as e:
 
@@ -2603,9 +2628,9 @@ def run(db_path: Path = DB_PATH, device_id: str | None = None, run_geocode: bool
 
             from gacore.langTrack import routes
 
-            n = routes.incremental_encode_trips(db_path)
+            n_route = routes.incremental_encode_trips(db_path)
 
-            print(f"[etl] 增量补路(路径规划): {n} 段")
+            print(f"[etl] 增量补路(路径规划): {n_route} 段")
 
         except SystemExit as e:
 
@@ -2645,9 +2670,9 @@ def run(db_path: Path = DB_PATH, device_id: str | None = None, run_geocode: bool
 
         try:
 
-            n_p = routes.encode_belt_pois(db_path, limit=_POI_MAX_PER_RUN)
+            n_poi = routes.encode_belt_pois(db_path, limit=_POI_MAX_PER_RUN)
 
-            print(f"[etl] 沿途 POI 编码: {n_p} 个网格")
+            print(f"[etl] 沿途 POI 编码: {n_poi} 个网格")
 
         except SystemExit as e:
 
@@ -2670,7 +2695,93 @@ def run(db_path: Path = DB_PATH, device_id: str | None = None, run_geocode: bool
 
     print("[etl] 完成")
 
+    # 运行摘要：给 JSONL 的 `etl.run.finished` 提供数字证据（新开只读连接再关）
+    conn = sqlite3.connect(db_path)
+    try:
+        table_counts = _collect_table_counts(conn)
+        watermarks = _read_watermarks(conn)
+        max_event_ts = conn.execute("SELECT MAX(ts) FROM events").fetchone()[0]
+    finally:
+        conn.close()
 
+    return {
+        "events": len(events),
+        "sessions": len(sessions),
+        "daily_stats": len(daily),
+        "anomalies": n_anom,
+        "route_changes": n_rc,
+        "contract_coverage": n_cov,
+        "geocode": n_geo,
+        "route": n_route,
+        "poi": n_poi,
+        "incremental_active": incremental_active,
+        "affected_days": len(affected_days),
+        "v2_location": v2_location,
+        "alias_merged": n_alias,
+        "stays_v2": n_stays_v2,
+        "table_counts": table_counts,
+        "watermarks": watermarks,
+        "max_event_ts": max_event_ts,
+        "db_size_bytes": db_path.stat().st_size if db_path.exists() else None,
+    }
+
+
+
+
+def run(
+    db_path: Path = DB_PATH,
+    device_id: str | None = None,
+    run_geocode: bool = True,
+    run_route: bool = True,
+    run_poi: bool = True,
+    incremental: bool = False,
+) -> None:
+    """ETL 入口：跑 _run_impl，并把 started/finished/failed 摘要写进 JSONL 日志。"""
+    run_id = uuid.uuid4().hex[:8]
+    started = time.monotonic()
+    mode = "incremental" if incremental else "full"
+    logger.info(
+        "etl.run.started",
+        run_id=run_id,
+        mode=mode,
+        db_path=str(db_path),
+        device_id=device_id,
+        geocode=run_geocode,
+        route=run_route,
+        poi=run_poi,
+    )
+    try:
+        metrics = _run_impl(db_path, device_id, run_geocode, run_route, run_poi, incremental)
+    except Exception as exc:
+        logger.exception(
+            "etl.run.failed",
+            exc=exc,
+            run_id=run_id,
+            mode=mode,
+            db_path=str(db_path),
+            duration_ms=round((time.monotonic() - started) * 1000, 1),
+        )
+        raise
+    except BaseException as exc:
+        logger.warning(
+            "etl.run.interrupted",
+            run_id=run_id,
+            mode=mode,
+            db_path=str(db_path),
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+            duration_ms=round((time.monotonic() - started) * 1000, 1),
+        )
+        raise
+    logger.info(
+        "etl.run.finished",
+        run_id=run_id,
+        status="ok",
+        mode=mode,
+        db_path=str(db_path),
+        duration_ms=round((time.monotonic() - started) * 1000, 1),
+        **metrics,
+    )
 
 
 def main() -> None:
