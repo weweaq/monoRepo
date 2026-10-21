@@ -8,6 +8,7 @@ flowchart TD
         direction LR
         SC["scheduler.run_job<br/>配置: config/schedule.json<br/>(name/schedule/type/window/<br/>cooldown_minutes/deliver_to)<br/>触发: 每30s轮询一次<br/>next_run_time 支持 每日固定 HH:MM<br/>或 every N<d/h/m> 间隔<br/>type 分派: job(LLM图·run_job)<br/>/proactive(主动池·PROACTIVE_POOL)<br/>/extract(KG抽取·run_extract_job→EXTRACT_POOL)"]
         QQ["qq 消息/反馈"]
+        MN["start.py 主进程<br/>_main(): scheduler 线程 + QQ 主循环<br/>main 心跳(每15s) + 优雅停机(stop_event)"]
         RC["proactive=定时主动推送:<br/>scheduler 每30s轮询 schedule.json 中<br/>type==proactive 的 job<br/>(proactive_due 过 window+cooldown)→入池<br/>cli=交互式 REPL: python -m gacore<br/>rerun=补跑: python -m gacore.rerun --day"]
     end
 
@@ -65,9 +66,9 @@ flowchart TD
         RW["原始层 events"]
         ET["ETL 事实层"]
         OU["读方出口<br/>fact_card·report·dashboard·qq_push"]
-        EX["KG 抽取层 langTrack/extract<br/>python -m gacore.langTrack.extract<br/>material.load_material(day,cfg)<br/>channels/{events,relations,todos,emotions,patterns,worldview}.SPEC<br/>runner.run_extract：六通道并发 gather<br/>+ 逐通道素材路由 Material.select(spec.sources)<br/>+ 单通道超时兜底(KG_EXTRACT_CHANNEL_TIMEOUT,默认900s)<br/>抽取 LLM 预算(gacore.llm·KG_EXTRACT_LLM_TIMEOUT默认600s·max_retries=0)<br/>通道运维日志 _log_channel→logs/&lt;day&gt;/app.jsonl + kg_runs.channel_stats<br/>→ resolve.resolve_entities + intervals.reclose_day (后处理)"]
+        EX["KG 抽取层 langTrack/extract<br/>python -m gacore.langTrack.extract<br/>material.load_material(day,cfg)<br/>channels/{events,relations,todos,emotions,patterns,worldview}.SPEC<br/>runner.run_extract：六通道并发 gather<br/>+ 逐通道素材路由 Material.select(spec.sources)<br/>+ 单通道超时兜底(KG_EXTRACT_CHANNEL_TIMEOUT,默认900s)<br/>抽取 LLM 预算(gacore.llm·KG_EXTRACT_LLM_TIMEOUT默认600s·max_retries=0)<br/>+ 落库前按通道替换当日旧行(_clear_channel_rows·day+src·同事务)·空/0行保旧<br/>运行级日志 run_start/run_end + 通道 _log_channel→logs/&lt;day&gt;/app.jsonl + kg_runs.channel_stats<br/>+ _extract_channel 内被删 triple 精确 reclose_intervals<br/>→ resolve.resolve_entities + intervals.reclose_day(当日) (后处理)"]
         KG[("langTrack.db kg_* 表<br/>kg_runs/kg_nodes/kg_edges<br/>kg_relations/kg_aliases<br/>kg_emotions/kg_patterns/kg_worldview<br/>schema.migrate_extract_tables")]
-        OC["opencode 免费模型适配器 gacore/opencode_llm.py<br/>OpencodeChatModel(BaseChatModel) · bind_tools 非空即拒绝<br/>POST /session → POST /session/{id}/message → DELETE /session/{id}<br/>_session_payload 只发 title（显式 permission 触发 403 FreeTierError）<br/>消息体只发 model/parts(/system/agent) · 无 tools 映射<br/>UA 默认不发（OPENCODE_CLIENT_UA 显式 opt-in；opencode/&lt;version&gt; 有条款/403 风险）<br/>model.variant=OPENCODE_VARIANT（抽取层 low，空=模型默认档）<br/>→ 本地 opencode serve 127.0.0.1:4096"]
+        OC["opencode 免费模型适配器 gacore/opencode_llm.py<br/>OpencodeChatModel(BaseChatModel) · bind_tools 非空即拒绝<br/>POST /session → POST /session/{id}/message → DELETE /session/{id}<br/>_session_payload 只发 title（显式 permission 触发 403 FreeTierError）<br/>消息体只发 model/parts(/system/agent) · 无 tools 映射<br/>UA 默认不发（OPENCODE_CLIENT_UA 显式 opt-in；opencode/&lt;version&gt; 有条款/403 风险）<br/>model.variant=OPENCODE_VARIANT（抽取层 low，空=模型默认档）<br/>空 parts → OpencodeEmptyResponse(is_retryable=True) → runner 重试<br/>→ 本地 opencode serve 127.0.0.1:4096"]
     end
 
     subgraph DAILY["⑥ 日报链路 v3 (daily_info_pack · feedback · review_server)"]
@@ -121,6 +122,7 @@ flowchart TD
     ET -. "etl.run.* 摘要 + ETL timeout 归属" .-> HB
     SC -. "scheduler 心跳" .-> HB
     QQ -. "qq 心跳" .-> HB
+    MN -. "main 心跳" .-> HB
     OU --> FC2
     RVW -. "⟳立即转换ETL: /api/etl/run·/api/etl/status 代理 :8000<br/>(防重入锁在 langTrack 进程内·与周期线程共用)" .-> ET
     PS -. "区县背景note" .-> SIP
@@ -175,7 +177,7 @@ flowchart TD
     style OUT   fill:#FEF5F7,stroke:#EC407A,stroke-width:1.5px,color:#880E4F
 
     %% --- 节点归组 (按模块; 焦点/边界/状态单独强调) ---
-    class SC,QQ,RC entry
+    class SC,QQ,RC,MN entry
     class S,CL,WT,MMX,CU main
     class MD,TN focus
     class ST state

@@ -359,6 +359,8 @@ uv run --package gacore python -m gacore.backfill_health --day 2026-10-16   # re
 - [ ] 按军规⑥**观测一周** `info_pack_health.jsonl`，确认 `_KG` 状态与字符数稳定（跨日实跑，运行期动作）
 - [ ] 提交：`chore(langTrack): 新增 kg-extract 定时任务并灰度开启 _KG 源` + `docs(langTrack): KG 抽取上线观测记录`
 
+> **观测进度（2026-10-21）**：已跨日实跑 10-19（ok）、10-20（调度运行 partial：events 600s 超时；22:04 手动重跑 opencode 6/6 通道 ok，含 events 二次尝试成功）。调度器自 10-21 21:38 重启后切 `KG_EXTRACT_LLM_PROVIDER=opencode`（`glm-5.3-flash-free` / `variant=low`）。距"连续一周"仍缺 5 天。
+
 > **落地偏差（2026-10-18）**：计划本假设「新任务只改 `config/schedule.json`，不动 `scheduler.run_job`」经实测**有误**。`scheduler.load_jobs` 对非 `proactive` job 强制要求 `prompt`（缺失 `KeyError` 静默跳过），`run_loop` 只有 `proactive` 与默认 `job`（LLM 图）两条分支，全仓无 CLI/shell 型 job 通道，`run_extract` 唯一调用点原为 `extract/__main__.py`。故 S5 改动 `scheduler.py`：`load_jobs` 放行无 prompt 的 `extract` job；`run_loop` 新增分支提交 `run_extract_job` 到独立单 worker 池 `EXTRACT_POOL`（不阻塞轮询、与 `PROACTIVE_POOL` 隔离），执行体**不投递、不写日报**。**目标日口径取 today**（23:30 抽当天，当日图进当日日报；代价是当天最后 ~20 分钟数据不进图，计划书已接受）。参见 `docs/langTrack-tech.md` §9.28「调度接入（S5）」。
 
 ---
@@ -453,3 +455,7 @@ uv run --package gacore python -m gacore.backfill_health --day 2026-10-16   # re
 1. **候选→规律升格机制**：`patterns`/`worldview` 只产出候选，升格标准/去重/合并规则上游文档空白，需独立设计后再加阶段
 2. **图查询层（`ask.py` 等价物）**：5 类问题模板 + 强制 `[src:]` 校验，属独立能力，本计划仅留 `kg_tools.py` 作为最小下钻入口
 3. **周期聚合（周/月/季）**：上游 Phase 6，依赖前两项完成
+4. **`_FILES` 素材漂移**：同一日两次装配 `_FILES` detail 从 25,806 字符掉到 424（`raw_hash` 不可复现），会把 events 的 prompt 从 60,438 推到 35,496。2026-10-21 起 `kg_material_loaded` 已记录 `origin` 与各源字符数，下一步定位扫描窗口/状态文件。
+5. **events 重试预算**：单通道 900s 上限 vs 单请求 600s + 重试，极端情况（首请求吃满 600s）重试会被截断。需要按通道设 per-request 超时或限制 events 输出体量（nodes/edges 上限）。
+6. **读层多版本**：写入层已按通道替换，`_KG` 仍按 `day` 聚合；若未来要对比同一天多次抽取，需要给 `_KG`/`--dump` 增加显式 `run_id` 选择，而不是回退到跨 run 叠加。
+7. **当日节点计数**：`_KG` 头部按 `kg_nodes.run_id`（首次写入）统计，按通道替换后旧模式/关系节点可能成孤儿但仍被计入；若要精确成图，需按当日边/关系反查 `DISTINCT node_id`。

@@ -1678,6 +1678,7 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 
 - **零新增采集**：优先读已落盘的 `data/logs/pack_detail/{day}/{key}.md` 的「完整取数详情」节（与 `daily_info_pack.write_pack_detail` 同一份契约）；缺失时回退 `build_info_pack_report(day,cfg)` 各源 `detail_body`（当日抽取 23:30 早于日报 23:50，回退属常态路径）。
 - `raw_hash = sha256(按源名排序后的拼装文本)`，同素材恒等 → 作为幂等锚。
+- **装配可观测（2026-10-21）**：`load_material` 落 `kg_material_loaded`（DEBUG：`origin=pack_detail|fresh_build` + `sources` + `chars` + `by_source_chars`）。`_FILES` 曾在同一天从 25,806 掉到 424，靠这行可直接区分「复用了旧 detail」还是「现建取数变少」。
 
 ### 数据表（R6 合规）
 
@@ -1745,20 +1746,20 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 
 ### 编排与幂等（`runner.py`）
 
-- **幂等**：`ux_kg_runs_day_hash_ver` 命中且 `status='ok'` → 整次 `skipped`（rows=0）；非 ok 的历史运行复用同一 `run_id` 原地重跑。
+- **幂等**：`ux_kg_runs_day_hash_ver` 命中且 `status='ok'` → 整次 `skipped`（rows=0）；非 ok 的历史运行复用同一 `run_id` 原地重跑。**重跑按通道替换（2026-10-21）**：`handle` 落库前先删本通道当日的旧行（`_clear_channel_rows`，按 `day + src=通道 key` 清 `kg_edges`/`kg_relations`/`kg_emotions`/`kg_patterns`/`kg_worldview`），删除与插入共用同一连接事务；`kg_nodes` 是跨日共享实体表，不按日删除。故素材漂移导致的 `--force` 重跑不会把两套产物叠加进当日图；`--only events` 只替换 events 的行，其余通道的行与 `channel_stats` 体检字段原样保留（`previous_stats` 合并写回）；若保留的通道里有 `failed`，整次 status 只会更差（`ok`/`skipped` → `partial`，已 `failed` 保持 `failed`），不会被一次单通道修复“洗白”。**退化输出护栏**：payload 无任何非空顶层列表（如 `{}`）时不删不写，记 `kg_extract_empty_payload` 并保留旧行；payload 非空但 `handle` 没写进任何记录表（`_count_channel_rows`=0；`written` 含 `kg_nodes`，不能作判据）时，用写入前快照以补偿写入恢复旧行（仅当本通道当日已有旧行才落 `kept_previous_rows`/`restored_rows` 与 `kg_extract_empty_result`），避免一次退化响应把当日该通道清空且 `kg_runs` 仍记 `ok`。恢复只回记录表；退化 payload 已提交的 `kg_nodes` 插入/日期收敛不回滚（节点跨日共享，副作用无害）。
 - **失败隔离**：通道 `asyncio.gather(..., return_exceptions=True)` 并发执行，任一通道异常只记 `failed`，整次 status=`partial`（全失败=`failed`）。
 - **素材路由（2026-10-19 接线）**：`_run_channels` 逐通道取 `material.select(spec.sources)`，**不再把当日全量素材喂给所有通道**。此前 `ChannelSpec.sources` 只声明未接线，六通道同吃全量文本；接线后 2026-10-18 实测：events 55154/56027（98%，它声明了 9 源）、relations/todos/patterns 各 30445（54%）、worldview 28674（51%）、emotions 2257（4%）。素材越小，推理模型的合法生成越短。
-- **单通道超时兜底**：每个通道外层套 `asyncio.wait_for(_extract_channel(...), timeout)`（`_extract_channel_guarded`），超时即记 `failed`、`error="通道超时：{t}s 内未返回"`，**不让一个挂死通道把 `gather` 无限拖住**。阈值取 `KG_EXTRACT_CHANNEL_TIMEOUT`，缺省 `_DEFAULT_CHANNEL_TIMEOUT = 900.0`s（正常一整天素材单通道约 4 分钟，留 ~4x 余量）。`wait_for` 以取消内层协程生效；`_extract_channel` 只吞 `Exception`，`CancelledError`（属 `BaseException`）正常穿透，不会被误记 `ok`。
-- **通道运维日志（2026-10-19）**：`_probe` 把每次通道调用的体检指标写进 `outcome.extra`，`_log_channel` 再落一行 `kg_extract_channel` 到 `logs/<day>/app.jsonl`（ok 走 `info`、其余走 `warning`）。指标 = `prompt_chars`（该通道实际吃的素材字符数）+ `routed_sources` + `elapsed_ms` + `attempts` + `response_chars` + `usage`（provider 的 token 用量）+ `finish_reason`。同一份 `extra` 经 `ChannelOutcome.as_dict` 进 `kg_runs.channel_stats`，重启后仍可回溯。判读口径：素材侧问题看 `prompt_chars`，provider 侧长尾看 `usage.output_tokens` 与 `finish_reason=length`。CLI 同步逐通道打印这些字段。
+- **单通道超时兜底**：每个通道外层套 `asyncio.wait_for(_extract_channel(...), timeout)`（`_extract_channel_guarded`），超时即记 `failed`、`error="通道超时：{t}s 内未返回"`，**不让一个挂死通道把 `gather` 无限拖住**。阈值取 `KG_EXTRACT_CHANNEL_TIMEOUT`，缺省 `_DEFAULT_CHANNEL_TIMEOUT = 900.0`s（正常一整天素材单通道约 4 分钟，留 ~4x 余量）。`wait_for` 以取消内层协程生效；`_extract_channel` 只吞 `Exception`，`CancelledError`（属 `BaseException`）正常穿透，不会被误记 `ok`。超时分支自身补 `kg_extract_channel_error`（`error_type=TimeoutError` + `error_message` + `stack_trace` + `context`）和一行 `kg_extract_channel`（`prompt_chars`/`timeout_s`/`error_type`/`error_message`），因为内层协程被取消后不会执行自己的收尾日志。
+- **运行/通道日志（2026-10-21 扩写）**：`run_extract` 落 `kg_extract_run_start`（`day`/`run_id`/`force`/`channels`/`material_chars`/`raw_hash`/`by_source_chars`/`provider`/`model`/`db`/`channel_timeout`/`llm_timeout`）与 `kg_extract_run_end`（`status`/`rows`/`elapsed_ms`/`material_chars`/`channel_status`/`failed`/`replaced_rows`）；同素材跳过记 `kg_extract_run_skip`，dry-run 记 `kg_extract_dry_run`；每次 LLM 调用前记 `kg_extract_llm_call`（DEBUG：`prompt_chars`/`system_chars`/`attempt`）。`_probe` 的体检指标经 `_log_channel` 落 `kg_extract_channel`（`ok`/`skipped` 走 `info`、`failed` 走 `error`）：`prompt_chars` + `routed_sources` + `elapsed_ms` + `attempts` + `response_chars` + `usage` + `finish_reason` + `replaced_rows`，异常/超时失败还带 `error_type`/`error_message`。失败 attempt 落 `kg_extract_attempt`，必带 `error_type`/`error_message`/`stack_trace`/`context`（不记素材原文；`stack_trace` 整体上限 4KB，其中上游错误体片段最多 500 字符）。通道级异常/超时另落 `kg_extract_channel_error`（完整栈）；空 payload 落 `kg_extract_empty_payload`，记录表 0 行落 `kg_extract_empty_result`；被删 triple 的区间闭合失败落 `kg_extract_reclose_failed`（warning，不翻转已落库通道）。同一份 `extra` 经 `ChannelOutcome.as_dict` 进 `kg_runs.channel_stats`，重启后仍可回溯。判读口径：素材侧问题看 `prompt_chars`，provider 侧长尾看 `usage.output_tokens` 与 `finish_reason=length`，失败原因直接看 `error_message`/`stack_trace`。CLI 同步逐通道打印主要字段。
 - **prompt 缺失即报错**（`load_prompt`，不做静默降级）；LLM 回复 JSON 解析失败重试 1 次（`parse_json_payload` 剥 ``` 围栏 + 取首尾花括号区间）。
 - LLM 走 `gacore.llm.get_llm([], os.environ, bind_tools=False, timeout=..., max_retries=0)`（零工具单轮，与 feedback/memory_maintenance 同法）。客户端由 `get_llm` 统一带**显式单请求超时与重试**；抽取路径**显式覆盖**全局默认：`timeout=_extract_llm_timeout()`（env 键 `KG_EXTRACT_LLM_TIMEOUT`，缺省 `_DEFAULT_EXTRACT_LLM_TIMEOUT = 600.0`s）、`max_retries=0`。`get_llm` 的 `timeout`/`max_retries` 形参为 `None` 时仍读 `LLM_TIMEOUT`/`LLM_MAX_RETRIES`（缺省 300s / 1 次），故交互路径行为不变。
-- **后处理（S2）**：通道全部落库后、且有新写入行时，`_postprocess(conn, day, run_id)` 依次跑 `resolve_entities` + `reclose_day`（确定性收尾，不依赖 LLM）；失败只记 `_postprocess.status='failed'`（整次降 `partial`），**不拖垮已落库的通道产物**。
+- **后处理（S2）**：通道全部落库后、且有新写入行时，`_postprocess(conn, day, run_id)` 依次跑 `resolve_entities` + `reclose_day`（确定性收尾，不依赖 LLM）。按通道替换删掉的旧边可能在任意历史日留下悬空 `valid_to`，故 `_extract_channel` 在替换成功后对“旧 triple 集合 − 新 triple 集合”逐个 `reclose_intervals`（精确到组，不依赖相邻日期；闭合失败记 `kg_extract_reclose_failed` warning，不翻转已落库通道）。`_postprocess` 自身失败只记 `_postprocess.status='failed'`（整次降 `partial`），**不拖垮已落库的通道产物**。
 - `export_day` 的 `_DAY_SCOPED_SQL` 覆盖八张表：`kg_runs`/`kg_nodes`/`kg_edges`/`kg_relations`/`kg_aliases`/`kg_emotions`/`kg_patterns`/`kg_worldview`。
 
 ### opencode 免费模型接入（`gacore/opencode_llm.py` + `gacore/llm.py`，2026-10-20）
 
 - **动机**：opencode 免费模型额度锁在 opencode 进程内——带 key 直连 `https://opencode.ai/inference/openai/v1` 实测 `403 FreeTierError`。改为复用本地 `opencode serve`（默认 `http://127.0.0.1:4096`）的会话 API，薄适配器即可拿到免费模型，且不引入工具循环。
-- **适配器** `OpencodeChatModel(BaseChatModel)`：`_generate`/`_agenerate` 走 `POST /session` → `POST /session/{id}/message` → `DELETE /session/{id}`；`SystemMessage` 合并进 body 的 `system`，其余消息合并进 `parts`；`usage_metadata` 映射 `info.tokens`，`response_metadata` 带 `model`/`provider`/`finish_reason`/`cost`；`timeout`（connect 预算压到 ≤5s）/`max_retries`/会话清理告警齐备；`transport` 可注入 `httpx.MockTransport`（测试不触真服务）。上游返回 HTTP 200 但 `info.error` 非空时抛 `OpencodeProviderError`，把 `statusCode`/`isRetryable` 保留为结构化字段（异常文本不含上游 body）。
+- **适配器** `OpencodeChatModel(BaseChatModel)`：`_generate`/`_agenerate` 走 `POST /session` → `POST /session/{id}/message` → `DELETE /session/{id}`；`SystemMessage` 合并进 body 的 `system`，其余消息合并进 `parts`；`usage_metadata` 映射 `info.tokens`，`response_metadata` 带 `model`/`provider`/`finish_reason`/`cost`；`timeout`（connect 预算压到 ≤5s）/`max_retries`/会话清理告警齐备；`transport` 可注入 `httpx.MockTransport`（测试不触真服务）。上游返回 HTTP 200 但 `info.error` 非空时抛 `OpencodeProviderError`，把 `statusCode`/`isRetryable` 保留为结构化字段（异常文本不含上游 body）。**200 但 `parts` 无 text（2026-10-21）**：抛 `OpencodeEmptyResponse`（带 `finish`/`parts`，`is_retryable=True`），交给 `contract.retryable_error` 重试；此前裸 `RuntimeError` 被判为不可重试，events 长生成偶发空响应会直接整通道失败。
 - **仅模型型调用**：`bind_tools` 传非空工具即 `NotImplementedError`——opencode 执行的是它自己的 bash/read/edit，会话 API 不接受 gacore 的工具 schema。故抽取路径可走 opencode（`runner._resolve_llm` 读 `KG_EXTRACT_LLM_PROVIDER` 覆盖），交互 agent 图与日报仍按 `LLM_PROVIDER`。
 - **provider 配置**（`llm.get_llm`，`_SUPPORTED_PROVIDERS` 含 `opencode`）：`OPENCODE_SERVER_URL`（默认 `http://127.0.0.1:4096`）/`OPENCODE_MODEL`（默认 `glm-5.3-flash-free`）/`OPENCODE_PROVIDER_ID`/`OPENCODE_AGENT`/`OPENCODE_CLIENT_UA`（默认空 = 不发送 UA override；显式 `opencode/<version>` 是高风险 opt-in）/`OPENCODE_VARIANT`（空 = 用模型默认档）/`OPENCODE_MAX_ATTEMPTS`；`KG_EXTRACT_LLM_PROVIDER` 只覆盖抽取路径。无需 API key。
 - **免费额度三道门禁（2026-10-20 实测钉住，缺一即 `403 FreeTierError`）**：
@@ -1777,7 +1778,7 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 - **只读边界**：builder 读 `cfg.root/data/langTrack.db` 的 `kg_*` 表（`sqlite3.connect(f"file:{db}?mode=ro", uri=True)`），**不触发抽取、不建表、不写文件**（建表是 `extract` CLI 职责）；库缺失 / `kg_*` 表未建（吞 `sqlite3.OperationalError`）→ 返回 `None`。
 - **读层与常量**：`_kg_day_graph(date, cfg)` 读当日图摘要（惰性 import `extract.runner._DAY_SCOPED_SQL` 作 detail 单一真源）；测试注入点 `_KG_FN = _kg_day_graph`（风格同 `_BILLI_FN`，`monkeypatch` 此名即隔离真实库）。常量 `_KG_CAP=1200`、`_KG_PERSON_TOP=6`、`_KG_EDGE_TOP=6`、`_KG_EMOTION_TOP=4`、`_KG_TODO_TOP=6`、`_KG_CLIP=40`（单条证据/陈述字符截断，唯一截断点军规②）。
 - **builder `_build_kg(date, cfg)`**：title `〔KG·当日图摘要〕`；pack=四节行级渲染——①运行头（各表当日计数 `_KG_COUNT_SQL`）②人物 Top-N（`_KG_PERSON_SQL`，按当日 `invalidated=0` 边数 degree 降序）③未完成待办 Top-N（`_KG_TODO_SQL`，`src='todos' AND valid_to IS NULL`）④关系变化 Top-N（`_KG_EDGE_SQL`，`edge_level` 升序 + `confidence` 降序）⑤情绪基调 Top-N（`_KG_EMOTION_SQL`，按 intensity）；detail=当日 `kg_*` 八表**全量逐条**（不挑选不压缩，供 /health 单源页逐层归因）。
-- **空态契约**：库缺失 / 表未建 / 当日无 `kg_runs` 行 / 有运行但各表零行 → 统一 `_KG_MISSING = "- 当日无 KG 抽取结果（抽取未运行或无产出）"`（命中 `_MISSING_DATA_RE` → `classify_body` 判 `missing_data`），**绝不冒充 ok**；builder 抛异常走外层兜底 `- 该源失败：` sentinel。
+- **空态契约**：库缺失 / 表未建 / 当日无 `kg_runs` 行 / 有运行但各表零行 → 统一 `_KG_MISSING = "- 当日无 KG 抽取结果（抽取未运行或无产出）"`（命中 `_MISSING_DATA_RE` → `classify_body` 判 `missing_data`），**绝不冒充 ok**；builder 抛异常走外层兜底 `- 该源失败：` sentinel。读层仍按 `day` 聚合（跨 run），当日不叠加由写入层的按通道替换保证；历史已叠加的数据需对该日重跑一次才消失。
 - **默认停用**：本地 `config/info_pack.json` 追加 `"_KG": {"enabled": false, "cap": 1200, "priority": 105}`（该文件 `apps/withlanggraph/.gitignore` 已忽略，非入库配置；代码默认仍 enabled，灰度须显式开）。停用态 `status=disabled`、`note="已停用(config)"`，不进包。
 - **注入面**：`_KG` **不进** chat system prompt 注入面（`fact_card` compact 仍是 chat 唯一注入出口），只进当日信息包落盘 + 本人邮箱。
 - **关联既有缺陷修复**：`build_info_pack_report` 对 `status=disabled` 的源原会误标 `note="未进包:预算熔断"`，条件改为 `st["status"] not in ("empty", "disabled")`。
@@ -1840,11 +1841,11 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 ## 9.29 可观测性 P0：组件心跳 + 结构化日志补齐（2026-10-21）
 
 > 设计文档：`./observability-design.md`（文件契约 / 状态机 / 取舍）；实施计划：仓库根 `docs/superpowers/plans/2026-10-21-observability-p0.md`。
-> 提交序列：`fcdfb76`（`Logger.exception`）→ `ea66d2f`（heartbeat 模块）→ `98ebf17`（scheduler 心跳 + 优雅停机）→ `8f66b64`（QQ 心跳）→ `c29cc74`（server `/ingest` + ETL 子进程归属）→ `56261de`（ETL 运行摘要）→ `2c9149c`（测试隔离守卫）。
+> 提交序列（实现 → 检视 → 修缺陷 → 文档）：`fcdfb76`（`Logger.exception`）→ `ea66d2f`（heartbeat 模块）→ `98ebf17`（scheduler 心跳 + 优雅停机）→ `8f66b64`（QQ 心跳）→ `c29cc74`（server `/ingest` + ETL 子进程归属）→ `56261de`（ETL 运行摘要）→ `2c9149c`（测试隔离守卫）→ `29b29d2`（本文档 + 设计文档）→ `d7b233f`（心跳测试固定 botpy 桩）→ `de64f29`（ETL 超时归属测试）→ `f0ec494`（修 `/ingest` 零日志盲区）→ `06ba779`（心跳线索保真 + 停机收尾健壮性）。逐条提交说明见 `docs/langTrack-roadmap.md` 同日执行记录。
 
 ### 9.29.1 背景：日志只覆盖 ETL，「进程死了」和「活着但没话说」分不清
 
-- 2026-10-21 实测 `logs/2026-10-21/app.jsonl` 共 73 行：43 行来自 ETL 子进程，其余为 scheduler 相关；**服务端 0 行，四个长驻组件 0 条存活信号**。
+- 2026-10-21 实测 `apps/withlanggraph/logs/2026-10-21/app.jsonl` 里 `module=langTrack.server` **0 行**（该文件当日 422 行：`langTrack.extract` 296 / `langTrack.etl` 49 / `scheduler` 9 / 其余为工具与上下文模块）；**四个长驻组件 0 条存活信号**（`data/run/` 当时根本不存在）。
 - 三个互相独立的缺陷：
   1. **无存活信号**：QQ 前端 / langTrack 服务端 / scheduler 任一挂掉，外部只能靠「没消息」猜；`data/run/` 当时根本不存在。
   2. **服务端盲区**：`POST /ingest` 成功或失败都不写日志——失败只剩 uvicorn 默认输出，且没有 `batch_id` / `device_id` 上下文，无法回答「这批数据到底进库没有」。
@@ -1870,20 +1871,21 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 - **原子写**：先写临时文件再 `os.replace` 替换目标，读者不会读到半截 JSON。
 - **loop 驱动、无后台线程**：`Heartbeat` 自己不 起线程，由持有事件循环 / 主循环的组件在自己的循环里调 `beat()`。这样「事件循环卡死」会直接表现为心跳停更（可判定 stale），而不是被独立线程掩盖成「看起来还活着」。
 - **写失败不抛**：只记一条 `heartbeat write failed`（WARNING，60s 节流）。心跳是观测手段，不能反过来搞崩业务。
-- **`beat(state=None)` 保留上一状态**：周期心跳不带 `state` 时不会把 `reconnecting` 拍回 `running`；`detail` 每次整体替换（周期心跳写空对象），需要留痕的调用方每次自己带上。
+- **`beat(state=None)` 保留上一状态**：周期心跳不带 `state` 时不会把 `reconnecting` 拍回 `running`；`detail` 每次整体替换，需要留痕的线索**由调用方每次带上**（QQ 用 `QQApp._hb_detail` 这张活字典持有 `connected_at` / `retry_in_sec`，周期 task 每拍都带上，`connected_at` 才不会被下一拍冲掉）。
 
 ```mermaid
 stateDiagram-v2
     [*] --> starting: start() 首写
     starting --> running: beat(state="running")
+    starting --> connecting: QQ start()（建立连接中）
+    connecting --> running: on_ready（connected_at）
     running --> busy: scheduler 作业执行中（stale_after_sec=1800）
     busy --> running: 作业结束
     running --> reconnecting: QQ 断线进入退避（retry_in_sec）
-    reconnecting --> connecting: 再次尝试连接
-    connecting --> running: on_ready（connected_at）
+    reconnecting --> running: 重连成功 on_ready
     running --> stopped: 正常退出 stop()
     running --> error: 未捕获异常
-    error --> stopped: 收尾 stop()
+    error --> [*]: 崩溃（不再补写 stopped）
 ```
 
 **组件与写入点（真实符号）**：
@@ -1892,20 +1894,22 @@ stateDiagram-v2
 | --- | --- | --- |
 | main | `data/run/main.json` | `start.py::_main`（`_beat_main` 协程每 15s `beat()`；`finally` 里 `heartbeat.stop()`） |
 | scheduler | `data/run/scheduler.json` | `scheduler.run_loop`（每轮 `beat(state="running")`；作业执行前 `beat(state="busy", stale_after_sec=1800)`，结束后回 `running`；崩溃先 `stop(state="error")` 再 re-raise；正常退出 `stop()`） |
-| qq | `data/run/qq.json` | `frontends/qq.QQApp.start`（`connecting` → 断线 `reconnecting(retry_in_sec)`）+ `on_ready`（`running(connected_at)`） |
+| qq | `data/run/qq.json` | `frontends/qq.QQApp.start`（`connecting` → 断线 `reconnecting(retry_in_sec)`）+ `on_ready`（`running(connected_at)`）；线索存在 `QQApp._hb_detail`，每拍都带 |
 | langtrack_server | `data/run/langtrack_server.json` | `langTrack/server.py::_make_lifespan`（lifespan 起来写 `running`，退出写 `stopped`） |
 
 - scheduler 的心跳周期 = 轮询间隔（`interval_sec=poll_interval`），因此 stale 阈值 = `max(60, poll_interval × 3)`。
 - `busy` 期间把 `stale_after_sec` 放宽到 **1800s**：`run_job` 同步跑日报可能几分钟，不放宽会被误判成「scheduler 死了」。
+- 崩溃判定用 `except BaseException`（不只 `Exception`）：`SystemExit` 之类会让线程静默死亡，若按正常路径收尾会把心跳写成 `stopped`——崩溃看起来像正常停机，正好错过告警。
 
 ### 9.29.3 服务端 `/ingest` 与 ETL 子进程归属（`langTrack/server.py`）
 
 - **日志出口统一**：`server.py` 由 `logging.getLogger` 换成 `gacore.jsonl_logger.get_logger("langTrack.server")`，所有日志改成**关键字字段**（`logger.info("ingest completed", batch_id=..., ...)`），不再用 `%s` 拼接。
 - **`POST /ingest`**：
   - 成功 → `ingest completed`（`batch_id` / `device_id` / `client_device_id` / `event_count` / `inserted` / `deduplicated` / `duration_ms`）。`client_device_id` **恒写入**（与 `device_id` 相同时为 `null`）——别名设备归一后仍能看出客户端原始 ID。
-  - 失败 → `ingest failed`（走 `Logger.exception`，带 `error_type` / `error_message` / `stack_trace`），随后原样抛出。
+  - 失败 → `ingest failed`（走 `Logger.exception`，带 `error_type` / `error_message` / `stack_trace`；同样恒写 `client_device_id` 与 `duration_ms`），随后原样抛出。
+  - **设备别名归一在 try 内**：`canonical_device_id` 要读手改的 `data/device_aliases.json`，若在 try 外抛错（文件根节点不是对象）整批 500 且**零日志**。现在归一化在 try 内，且 `etl._load_device_aliases` 对「根节点不是对象」降级为「无别名」并告警。
   - **不记 payload**：只记条数与 ID，避免把剪贴板 / 短信正文写进日志。
-- **HTTP 中间件** `_log_failed_requests`：响应码 `>=400` 记 `http request failed`（`method` / `path` / `status` / `duration_ms`）；未捕获异常记 `http request crashed`（带真栈），但 **`/ingest` 例外**——该路由自己已归属错误，避免一行错误两份 ERROR。
+- **HTTP 中间件** `_log_failed_requests`：响应码 `>=400` 记 `http request failed`（`method` / `path` / `status` / `duration_ms`）；未捕获异常记 `http request crashed`（带真栈）。`/ingest` 由路由自己归属错误（置 `request.state.ingest_logged`），中间件据此跳过，避免一行错误两份 ERROR；**但路由没来得及归属时中间件必须补一行**，杜绝「零日志批次」。
 - **ETL 子进程归属（父进程侧，`_run_etl_once(trigger=...)`）**：
   - 成功 → `periodic ETL finished`（`trigger` = `manual` | `periodic`，`returncode` / `duration_ms`）；
   - 失败 → `periodic ETL failed`（附 `stderr_tail`，末 2000 字符）；
@@ -1927,13 +1931,13 @@ stateDiagram-v2
 
 metrics（`etl.run.finished` 平铺进同一行）：`events` / `sessions` / `daily_stats` / `anomalies` / `route_changes` / `contract_coverage` / `geocode` / `route` / `poi` / `incremental_active` / `affected_days` / `v2_location` / `alias_merged` / `stays_v2` / `table_counts` / `watermarks` / `max_event_ts` / `db_size_bytes`。
 
-- `table_counts` 由 `_collect_table_counts` 采集（表不存在记 `null`，不炸；表名来自固定常量 `_SUMMARY_TABLES`，不接受外部输入拼接）。
-- `geocode` / `route` / `poi` 未执行或失败时为 `null`——**不谎报 0**。
+- `table_counts` 由 `_collect_table_counts` 采集（表不存在记 `null`，不炸；表名来自固定常量 `_SUMMARY_TABLES`，不接受外部输入拼接）。`max_event_ts` 同样容忍缺表。
+- `geocode` / `route` / `poi` 未执行或失败时为 `null`——**不谎报 0**；子步失败另记 `etl.step.failed`（`step` = `geocode` / `route` / `poi`，带 `error_type` / `error_message`），子进程日志与父进程 `stderr_tail` 一起构成归属证据。
 - `etl.run.started` / `finished` 的 `run_id` 相同，可把一次 ETL 的起止与 metrics 串成一条链。
 
 ### 9.29.5 `Logger.exception` 约定（`src/gacore/jsonl_logger.py`）
 
-- `logger.exception(message, exc=exc, **fields)`：自动派生 `error_type`（异常类名）/ `error_message`（`str(exc)`）/ `stack_trace`（`traceback.format_exception`）；当前没有活动异常时回退 `sys.exc_info()`。
+- `logger.exception(message, exc=exc, **fields)`：自动派生 `error_type`（异常类名）/ `error_message`（`str(exc)`）/ `stack_trace`（`traceback.format_exception`）；**没显式传 `exc` 时**回退到当前活动异常（`sys.exc_info()`），两者都没有则这三个字段为 `null`。
 - `logger.error(message, error_message=..., ...)` 支持显式写 `error_message`（用于「只有一条消息、没有异常对象」的场景）。
 - **业务码与异常类名分离**：`error_type` 放纯类名或业务原因码，`error_message` 放可读描述——不要把整句中文塞进 `error_type`。
 
