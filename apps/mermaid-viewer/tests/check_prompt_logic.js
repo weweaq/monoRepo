@@ -107,7 +107,7 @@ function expect(cond, msg) {
 
 // symbol -> line sanity against the known file
 // (line numbers track apps/withlanggraph/docs/architecture-flow.mmd; update when
-// the diagram legitimately changes shape — last sync 2026-10-20, OC 节点加入后 FB 等后段节点上移 3 行)
+// the diagram legitimately changes shape — last sync 2026-10-21, EX/OC 节点补描述后 日报正文 边下移 1 行)
 expect(currentSymLine["RC"] === 11, "RC -> 行 11 (real symbol recovered)");
 expect(currentSymLine["SC"] === 9, "SC -> 行 9");
 expect(currentSymLine["MMX"] === 30, "MMX -> 行 30");
@@ -121,7 +121,7 @@ const hit = currentEdgeLines[normKey(wtLabel)];
 expect(!!hit && hit.line === 21, "WT-->PR edge label resolves to 行 21");
 const cuLabel = "日报正文";
 const hit2 = currentEdgeLines[normKey(cuLabel)];
-expect(!!hit2 && hit2.line === 116, "dotted label 日报正文 resolves to 行 116");
+expect(!!hit2 && hit2.line === 117, "dotted label 日报正文 resolves to 行 117");
 
 // the 6 legacy reviews: what the fixed export produces
 console.log("\n--- exported prompt (per-review part) ---");
