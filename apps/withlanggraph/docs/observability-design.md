@@ -3,7 +3,7 @@
 > 状态：待评审（设计稿）
 > 日期：2026-10-21
 > 范围：`apps/withlanggraph`（gacore 主进程、scheduler、langTrack server/ETL）
-> 关联事故/证据：`logs/2026-10-21/app.jsonl`、`logs/2026-10-20/app.jsonl`、`logs/2026-10-12-234838/services/langtrack.log`
+> 关联事故/证据：`apps/withlanggraph/logs/2026-10-21/app.jsonl`、`apps/withlanggraph/logs/2026-10-20/app.jsonl`、`apps/dev-console/logs/2026-10-05-101917/services/langtrack.log`
 
 ## 1. 问题定义
 
@@ -17,12 +17,12 @@
 
 证据：
 
-- `2026-10-21/app.jsonl` 共 73 行，其中 43 行是 ETL；`langTrack.server` 0 行；心跳 0 行。
-- 全量 `app.jsonl` 约 104,672 行中，`langTrack.server` 也是 0 行。server 用的是 stdlib `logging`，没有 JSONL handler；`INFO` 被丢弃，`WARNING+` 只进 stderr/service log。
+- `2026-10-21/app.jsonl` 里 `module=langTrack.server` **0 行**（该文件当日 422 行，`langTrack.extract` 296 / `langTrack.etl` 49 / `scheduler` 9 / 其余为工具与上下文模块）；心跳文件 0 个。
+- 全量 `app.jsonl` 中，`langTrack.server` 同样是 0 行。server 用的是 stdlib `logging`，没有 JSONL handler；`INFO` 被丢弃，`WARNING+` 只进 stderr/service log。
 - `2026-10-21` 的 ETL 行从 00:01 持续到 21:01，但主启动器 21:39 才启动。ETL 行只能证明“某个 ETL 子进程跑过”，不能证明服务在线。
 - `2026-08-02..2026-10-21` 有 12 个日期完全没有日志；没有心跳时无法区分“没业务”与“进程没起来”。
-- `logs/2026-10-12-234838/services/langtrack.log` 里有 `sqlite3.OperationalError: cannot commit - no transaction is active` 的完整 traceback，但 `app.jsonl` 里看不到。
-- 2026-10-20 有 315 行 `tmp_pytest` 污染，说明测试日志隔离需要回归守卫（`GACORE_LOG_ROOT` 修复已在 `c4778b0` 落地，10-21 已干净）。
+- `apps/dev-console/logs/2026-10-05-101917/services/langtrack.log` 里有 `sqlite3.OperationalError: cannot commit - no transaction is active` 的完整 traceback，但 `app.jsonl` 里看不到。
+- 2026-10-04/10-18/10-19 的 `app.jsonl` 分别混入 641/339/316 行 `tmp_pytest` 路径（pytest 写进了生产日志目录）；10-20 起为 0。测试日志隔离需要回归守卫（`GACORE_LOG_ROOT` 修复已在 `c4778b0` 落地）。
 
 结论：**不是日志量不够，而是关键业务/存活事件没有进入统一日志，低价值 ETL 行反而占了大头。**
 
@@ -46,7 +46,7 @@
 - 不做 `/health` 深度聚合（下一阶段）。
 - 不做日志保留/轮转/压缩（下一阶段，但设计要留出字段）。
 - 不做跨 app 日志 schema 统一（dev-console/checkself/mermaid-viewer 后续）。
-- 不做全仓 43 处 `stack_trace=str(e)` 的一次性清扫；P0 只改本次触达路径，其余列 P1。
+- 不做全仓 40 处 `stack_trace=str(...)` 的一次性清扫；P0 只改本次触达路径，其余列 P1。
 - 不改 ETL 业务逻辑、不改数据库事实表结构、不改上报协议。
 
 ## 3. 设计原则
@@ -146,7 +146,7 @@ ETL 不写心跳文件。ETL 是短生命周期子进程，心跳会在不运行
 | `component` | str | 组件名，与文件名一致 |
 | `instance_id` | str | 每次进程启动生成；变化即代表重启 |
 | `pid` | int | 写入进程 PID |
-| `state` | str | `starting/running/busy/reconnecting/stopped/error` |
+| `state` | str | `starting/running/busy/connecting/reconnecting/stopped/error` |
 | `seq` | int | 本实例内单调递增，用于发现“文件被旧实例覆盖” |
 | `started_at` | str | 本实例启动时间，+08:00 |
 | `updated_at` | str | 最近一次心跳，+08:00，给人看 |
@@ -158,7 +158,7 @@ ETL 不写心跳文件。ETL 是短生命周期子进程，心跳会在不运行
 写入语义：
 
 - `beat(state=...)` 的 `state` 省略时沿用上一次状态；这样周期心跳不会把 `reconnecting` 冲成 `running`。
-- `detail` **每次写入整体替换**，不做 key 合并；周期心跳不传 `detail` 时写空对象。需要保留的线索由调用方每次带上。
+- `detail` **每次写入整体替换**，不做 key 合并；周期心跳不传 `detail` 时写空对象。需要保留的线索由调用方每次带上（QQ 用 `QQApp._hb_detail` 这张活字典持有 `launcher`/`connected_at`/`retry_in_sec`，周期 task 每次带上，`connected_at` 才不会被下一拍冲掉）。
 - `stale_after_sec` **每次写入默认回到实例默认值**（`max(60, interval_sec * 3)`）；`busy` 只在本次显式放宽，job 结束后下一次 `running` 自动回到默认窗口，避免一次长任务永久拉长死亡检测窗口。
 - `start()` 写 `state=starting`；`stop()` 默认写 `state=stopped`，异常路径可显式传 `state=error`。
 
@@ -168,10 +168,12 @@ ETL 不写心跳文件。ETL 是短生命周期子进程，心跳会在不运行
 stateDiagram-v2
     [*] --> starting
     starting --> running: 首次 beat
+    starting --> connecting: QQ start()
+    connecting --> running: on_ready
     running --> busy: 开始阻塞型 job
     busy --> running: job 结束
     running --> reconnecting: QQ 断开
-    reconnecting --> running: 连接恢复
+    reconnecting --> running: 连接恢复（on_ready）
     running --> stopped: 正常退出
     running --> error: 未捕获异常
     reconnecting --> error: 未捕获异常
@@ -243,7 +245,7 @@ sequenceDiagram
 
 ### 6.3 崩溃与停机路径
 
-- `run_loop` 最外层 `except Exception`：`Logger.exception("scheduler loop crashed")`，心跳写 `state=error`，然后重新抛出。
+- `run_loop` 最外层 `except BaseException`（**不只 `Exception`**：`SystemExit` 之类会让线程静默死亡，若按正常路径收尾会把心跳写成 `stopped`，崩溃看起来像正常停机，正好错过告警）：`Logger.exception("scheduler loop crashed")`，心跳写 `state=error`，然后重新抛出。
 - `run_loop` 接受可选 `stop_event: threading.Event`。生产 `start.py` 传入；`while` 条件检查 `not stop_event.is_set()`，轮询等待用 `stop_event.wait(poll_interval)` 而不是 `time.sleep`。这样正常停机时线程能退出，`finally` 才能写 `stopped`。
 - `start.py` 注册 `gacore.scheduler.on_scheduler_done`（放在 `scheduler.py`，避免测试依赖 QQ/botpy）作为 `scheduler_task` 的 done callback：
   - `task.cancelled()` → `INFO Scheduler task cancelled`（只有外部 cancel 才会走这里）
@@ -261,14 +263,14 @@ sequenceDiagram
 
 `QQApp.start` 的重连循环是长驻路径，必须有自己的心跳：
 
-- `QQApp.__init__` 增加 `self._heartbeat: Heartbeat | None = None`。
+- `QQApp.__init__` 增加 `self._heartbeat: Heartbeat | None = None` 与 `self._hb_detail: dict[str, object] = {"launcher": "qq"}`（活字典：`detail` 每次整体替换，线索由调用方每次带上）。
 - `QQApp.start` 创建 `Heartbeat("qq", root=run_dir(Config.default().root))`，赋给 `self._heartbeat`，`start()` 后先 `beat(state="connecting")`。
-- bot 的 `on_ready` 回调里 `self._heartbeat.beat(state="running", connected_at=...)`，用真实连接成功作为 `running` 的唯一依据。
-- 连接异常/退避分支在 `await asyncio.sleep(delay)` 前 `beat(state="reconnecting", retry_in_sec=delay, connected_at=...)`。
-- 周期 task 只调 `heartbeat.beat()`（不传 state），沿用当前状态，只刷新时间。
+- bot 的 `on_ready` 回调里 `app._heartbeat.beat(state="running", connected_at=...)`，用真实连接成功作为 `running` 的唯一依据（并清掉 `retry_in_sec`）。
+- 连接异常/退避分支在 `await asyncio.sleep(delay)` 前先写 `app._hb_detail["retry_in_sec"] = delay`，再 `beat(state="reconnecting", **app._hb_detail)`（带上 `connected_at`）。
+- 周期 task 调 `heartbeat.beat(**detail)`（不传 state，沿用当前状态，只刷新时间），`detail` 就是 `QQApp._hb_detail` 这张活字典——`connected_at` 不会被下一拍冲掉。
 - `finally` 里 cancel 周期 task、`heartbeat.stop()`。
 
-这样 `qq.json` 能区分三种情况：`connecting`（正在建立连接）、`running`（on_ready 已触发）、`reconnecting`（断线退避中）。
+这样 `qq.json` 能区分三种情况：`connecting`（正在建立连接）、`running`（on_ready 已触发）、`reconnecting`（断线退避中）；detail 键为 `launcher` / `connected_at` / `retry_in_sec`。
 
 ## 7. langTrack server 可观测性
 
@@ -322,9 +324,10 @@ sequenceDiagram
 约束：
 
 - 不记录 `Event.data`，不记录短信/剪贴板/通知正文。
-- `device_id` 记录归一后的主设备；`client_device_id` **恒写键**，没有别名归一时为 `null`。JSONL 消费方不用区分“省略”和“空值”。
+- `device_id` 记录归一后的主设备；`client_device_id` **恒写键**，没有别名归一时为 `null`。JSONL 消费方不用区分“省略”和“空值”。失败行同样恒写 `client_device_id` 与 `duration_ms`。
 - 每批只打一行完成/失败，不打“收到”+“完成”两行，控制体积。
-- `/ingest` 的未捕获异常由路由自己记录（带 batch/device 业务上下文）；HTTP 中间件对 `/ingest` 跳过 `http request crashed`，避免一个失败批次产生两条 ERROR。
+- **设备别名归一必须落在 try 内**：别名文件（`data/device_aliases.json`，手改）损坏时若在 try 外抛错，整批 500 且零日志。归一化已在 try 内，且 `etl._load_device_aliases` 对「根节点不是对象」降级为“无别名”并告警。
+- `/ingest` 的未捕获异常由路由自己记录（带 batch/device 业务上下文）并置 `request.state.ingest_logged`；HTTP 中间件只在**该标记未置位**时才补 `http request crashed`，既避免一个失败批次产生两条 ERROR，又保证任何漏归属的异常不会凭空消失。
 
 ### 7.3 HTTP 失败与 422
 
@@ -340,20 +343,20 @@ FastAPI 中间件只记录 `status >= 400` 的请求和未捕获异常：
 {"level":"ERROR","message":"http request crashed","method":"GET","path":"/dashboard","status":500,"error_type":"RuntimeError","stack_trace":"Traceback ..."}
 ```
 
-`/ingest` 路径的未捕获异常由 7.2 的 `ingest failed` 记录，中间件跳过，保证“每批一行失败”。
+`/ingest` 路径的未捕获异常由 7.2 的 `ingest failed` 记录，中间件据此跳过，保证“每批一行失败”；只有路由没来得及归属（`ingest_logged` 未置位）时，中间件才补一行 `http request crashed`，杜绝“零日志批次”。
 
 不记录所有 200 的 dashboard/map 请求，避免把日志淹没。
 
 ### 7.4 ETL 子进程归属
 
-`server._run_etl_once()` 目前只记 `periodic ETL ok`，没有耗时、触发来源、返回码。P0 增加：
+`server._run_etl_once()` 改造前只记 `periodic ETL ok`，没有耗时、触发来源、返回码。P0 落地后固定为四条消息：
 
-- `trigger=periodic|manual`
-- `returncode`
-- `duration_ms`
-- 失败时 `stderr_tail`（最多 2000 字符）
-- 超时时 `timeout_sec`，并单独记 `periodic ETL timeout` / `manual ETL timeout`
-- `/etl/status` 增加 `last_trigger/last_duration_ms/last_error`
+- 成功 → `periodic ETL finished`（`trigger=periodic|manual` / `returncode` / `duration_ms`）
+- 失败 → `periodic ETL failed`（附 `stderr_tail`，最多 2000 字符）
+- 超时 → `ETL timeout`（`trigger` / `timeout_sec` / `duration_ms` / `stderr_tail`）——**只有这一条**超时消息，用 `trigger` 区分 periodic 与 manual，不再拆成两个消息名
+- 崩溃 → `periodic ETL crashed`（`Logger.exception`）
+
+另：`/etl/status` 增加 `last_trigger/last_duration_ms/last_error`。
 
 ETL 子进程自己的 `etl.run.*` 日志仍是主真源；server 这行只回答“这个子进程什么时候被谁拉起、退出码多少”。
 
@@ -525,7 +528,7 @@ Select-String -Path apps\withlanggraph\logs\<date>\app.jsonl -Pattern '"message"
 - 发一个 `/ingest` 批次，`app.jsonl` 出现且仅出现一行 `ingest completed`，字段齐全（`client_device_id` 无别名时为 `null`）。
 - 发一个非法 `/ingest`，出现 `http request failed`（422），**不**出现 `ingest failed` / `http request crashed`。
 - 跑一次 ETL，出现 `etl.run.started` 和 `etl.run.finished`，`duration_ms > 0`，`table_counts` 非空。
-- 人为让 `run_loop` 抛异常：测试 `test_run_loop_crash_sets_error_heartbeat` 覆盖 `scheduler loop crashed` + `stack_trace` + 心跳 `state=error`；`start.py` 的 `Scheduler task died` 由 `_on_scheduler_done` 单元测试覆盖。
+- 人为让 `run_loop` 抛异常：测试 `test_run_loop_crash_sets_error_heartbeat` 覆盖 `scheduler loop crashed` + `stack_trace` + 心跳 `state=error`；`start.py` 的 `Scheduler task died` 由 `gacore.scheduler.on_scheduler_done` 单元测试覆盖（`tests/test_scheduler_done_callback.py`）。
 - 正常 `stop_event.set()` 停机：`run_loop` 退出，心跳写 `stopped`，不出现 `Scheduler task cancelled`（cancel 只留给异常兜底）。
 
 ## 13. 分阶段路线
@@ -540,7 +543,7 @@ Select-String -Path apps\withlanggraph\logs\<date>\app.jsonl -Pattern '"message"
 
 ### 14.1 通用
 
-- `ts`：日志时间，+08:00 ISO
+- `ts`：日志时间，ISO8601（`jsonl_logger` 用 `datetime.fromtimestamp(record.created).astimezone()`，跟随机器本地时区；国内机器即 +08:00；只有日志**目录日期**强制按 +08:00 归档）
 - `level`：DEBUG/INFO/WARNING/ERROR
 - `module`：`langTrack.server` / `langTrack.etl` / `scheduler` / `qq` / `heartbeat`
 - `message`：稳定的事件名，不作为展示文案
@@ -552,8 +555,8 @@ Select-String -Path apps\withlanggraph\logs\<date>\app.jsonl -Pattern '"message"
 见 5.2。`detail` 允许的键按组件约定：
 
 - `main`：`launcher`
-- `scheduler`：`poll_interval`、`max_iterations`、`iteration`、`job_count`、`job`、`job_type`、`last_job`、`last_status`、`jobs_run`
-- `qq`：`retry_in_sec`、`connected_at`
+- `scheduler`：`poll_interval`、`max_iterations`、`iteration`、`job_count`、`job`、`job_type`、`last_job`、`last_status`、`iterations`、`jobs_run`
+- `qq`：`launcher`、`retry_in_sec`、`connected_at`
 - `langtrack_server`：`etl_interval_sec`
 
 ### 14.3 ETL
