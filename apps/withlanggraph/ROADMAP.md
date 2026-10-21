@@ -1573,7 +1573,7 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 
 **背景**：当日 `apps/withlanggraph/logs/2026-10-21/app.jsonl` 里 `module=langTrack.server` **0 行**（该文件当日 422 行：`langTrack.extract` 296 / `langTrack.etl` 49 / `scheduler` 9），四个长驻组件（main / scheduler / qq / langtrack_server）零存活信号——「进程死了」与「活着但没产出」无法区分；ETL 子进程超时被 kill 时父进程也无归属日志。详见 `docs/langTrack-roadmap.md` 同日记录。
 
-**已完成**（12 个提交，`fcdfb76`→`06ba779`，逐条见 `docs/langTrack-roadmap.md` 同日记录）：
+**已完成**（14 个提交，`fcdfb76`→本轮末笔 `test(...)`，逐条见 `docs/langTrack-roadmap.md` 同日记录）：
 - `src/gacore/heartbeat.py`（新增）：`Heartbeat` 原子写组件心跳 JSON（`data/run/<component>.json`，`GACORE_RUN_DIR` 可覆盖）；写失败不抛（60s 节流 WARNING）；`beat(state=None)` 保留上一状态。
 - `src/gacore/jsonl_logger.py`：`Logger.exception` 输出真实栈（`error_type` / `error_message` / `stack_trace`）。
 - `src/gacore/scheduler.py`：`run_loop` 支持 `stop_event` 优雅停机 + `busy` 心跳 + 崩溃 `stop(state="error")`（捕 `BaseException`）+ `on_scheduler_done` 回调；`Job finished` 补 `status` / `error_type` / `error_message`。
@@ -1585,7 +1585,9 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 
 **实测**：单文件与组合测试全绿（scheduler 三件套 89、ETL 回归 33、server 18、qq 4、heartbeat 8、etl summary 3、isolation 2、logger exception 4）；`ruff check apps packages tests` 全绿；端到端冒烟（临时库 + 临时心跳目录 + 临时日志根）：ETL 失败打出 `etl.run.failed` 真 traceback、成功打出 `etl.run.finished`（`status=ok` + 全 metrics）；server `/ingest` → `{"inserted":1}`、`/health` → ok、`data/run/langtrack_server.json` 落盘（`state=running`）、日志出 `ingest completed`；强杀后心跳停更（stale 生效）；全量 `uv run pytest apps/withlanggraph/tests -q` 全绿。
 
-**检视**：4 个 general 子 agent 并行检视（心跳语义 / server+ETL / 测试隔离 / 文档一致性）。心跳语义组 PASS；server+ETL 组 FAIL 1 个 blocking（`/ingest` 在别名文件损坏时零日志）已修（`f0ec494`）并补 3 条回归测试；文档一致性组 FAIL 11 个 blocking（证据不可复现 / 符号与消息名对不上 / 状态枚举漏 `connecting` / tech 状态机有代码里不存在的边）已全部改正；检视提到的非阻塞项（QQ `connected_at` 被周期心跳冲掉、`run_loop` 只捕 `Exception`、`start.py` 收尾可能被 `CancelledError` 跳过、`json.dumps` 缺 `default=str`、scheduler 长行）已随 `06ba779` 一并修复。
+**检视**：4 个 general 子 agent 并行检视（心跳语义 / server+ETL / 测试隔离 / 文档一致性）。心跳语义组 PASS；server+ETL 组 FAIL 1 个 blocking（`/ingest` 在别名文件损坏时零日志）已修（`f0ec494`）并补 3 条回归测试；测试隔离组 PASS（隔离实测零污染，3 条断言建议 + 隔离加固已全部落地）；文档一致性组 FAIL 11 个 blocking（证据不可复现 / 符号与消息名对不上 / 状态枚举漏 `connecting` / tech 状态机有代码里不存在的边）已全部改正；检视提到的非阻塞项（QQ `connected_at` 被周期心跳冲掉、`run_loop` 只捕 `Exception`、`start.py` 收尾可能被 `CancelledError` 跳过、`json.dumps` 缺 `default=str`、scheduler 长行）已随 `06ba779` 一并修复。
+
+**并发说明**：本轮实现期间 KG 抽取改动被并发提交（`e21005b`→`481537b`），`409c9bd` 顺带提交了我本地暂存区里的旧版文档章节，造成重复；`6b07476` 已用工作区正确版本去重（KG 内容一条未丢），架构图 `main` 心跳节点也随该并发提交入库。
 
 **偏差说明**：未做 ops CLI / 深度 `/health` / 日志保留策略（列 P1/P2 待办）；架构图 `HB` 节点放 `OUT` 子图（心跳跨四个组件，非 langTrack 专属）。
 

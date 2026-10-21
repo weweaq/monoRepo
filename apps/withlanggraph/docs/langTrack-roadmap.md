@@ -3330,7 +3330,7 @@ batterystats 实测 weiCheckApp 耗电 67.7 mAh，其中 GNSS 64.4 mAh（引擎�
 - 三个独立缺陷：① 长驻组件无存活信号（QQ / langTrack 服务端 / scheduler 挂了只能靠猜）；② `POST /ingest` 全链路无日志（失败只剩 uvicorn 默认输出，无 `batch_id`/`device_id` 上下文）；③ ETL 子进程超时被 kill 后父进程无归属日志、子进程无 run 级摘要（「这次 ETL 跑没跑、跑了多久、成没成」数不出来）。
 - 触发点：10-20 的 KG 抽取事故复盘时发现「日志只有 ETL、没有 server/心跳」，判断「进程活着」与「进程有产出」是两件事，必须各自可观测。
 
-### 已完成（12 个提交）
+### 已完成（14 个提交）
 - `fcdfb76` `feat(logging): Logger.exception 输出真实异常栈`：`jsonl_logger.Logger.exception(message, exc=...)` 派生 `error_type` / `error_message` / `stack_trace`（`traceback.format_exception`；**未显式传 `exc` 时**回退当前活动异常 `sys.exc_info()`，两者都没有则三字段为 `null`）；`Logger.error` 增 `error_message` 形参。
 - `ea66d2f` `feat(observability): 增加组件心跳文件模块`：新增 `src/gacore/heartbeat.py`——`Heartbeat`（原子写 `os.replace`、写失败不抛 + 60s 节流 WARNING、`beat(state=None)` 保留上一状态、`detail` 整体替换、`busy` 可放宽 `stale_after_sec`）+ `run_dir(root)`（`GACORE_RUN_DIR` 覆盖，相对路径按根解析）。
 - `98ebf17` `feat(scheduler): 心跳 + 优雅停机 + 崩溃回调 + 作业状态`：`run_loop` 加 `stop_event`（`threading.Event`——`asyncio` 取消不了 `to_thread` 里的线程，只能用事件唤醒）+ 作业执行期 `busy` 心跳（`stale_after_sec=1800`）+ 崩溃先 `stop(state="error")` 再 re-raise；新增 `on_scheduler_done(task, stop_event)` 回调（`start.py` 用 `functools.partial` 注册，区分「正常结束 / 崩溃 / 被取消」三条终态）；`Job finished` 日志补 `status` / `error_type` / `error_message`。
@@ -3343,6 +3343,8 @@ batterystats 实测 weiCheckApp 耗电 67.7 mAh，其中 GNSS 64.4 mAh（引擎�
 - `de64f29` `test(langTrack): 覆盖 ETL 超时归属分支`：补 `ETL timeout` 分支（`trigger` / `timeout_sec` / `duration_ms` / `stderr_tail` / `last_error`）。
 - `f0ec494` `fix(langTrack): 堵住 /ingest 零日志盲区`：检视发现「别名归一在 try 外抛错 → 整批 500 且零日志」；归一化移入 try、中间件按 `request.state.ingest_logged` 兜底补 `http request crashed`、别名文件根节点非对象时降级为「无别名」并告警、`ingest failed` 补 `client_device_id` / `duration_ms`、`max_event_ts` 容忍缺表、ETL 线程起不来时复位 `running`、子步失败记 `etl.step.failed`。
 - `06ba779` `fix(observability): 心跳线索保真 + 停机收尾健壮性`：QQ 周期心跳带上 `connected_at`（线索存 `QQApp._hb_detail` 活字典）、`run_loop` 崩溃改捕 `BaseException`（`SystemExit` 不再被写成 `stopped`）、`start.py` 收尾无条件执行（`CancelledError` 不再跳过 `heartbeat.stop()`）、心跳 `json.dumps(..., default=str)`、scheduler 长行折行、补 `stop_event` 唤醒路径测试。
+- `6b07476` `docs(langTrack): 修正可观测性文档事实并去掉并发提交带入的重复章节`：证据改为可复现口径、状态枚举补 `connecting`、状态机删掉代码里不存在的边、符号与消息名对齐；并清掉**并发提交**（KG 抽取的 `409c9bd` 等）从我本地暂存区带走的重复章节。
+- 本轮最后一笔 `test(...)`：落实测试隔离组的三条断言建议（不记 payload / 原子写无残留 / 写失败一条节流 WARNING）与隔离加固（别名文件 tmp 化、ETL 摘要按 `db_path` 过滤、临时日志目录会话末清理）。
 
 ### 实测验证
 - 新增/改动测试文件与用例数：`test_jsonl_logger_exception.py`(4) / `test_heartbeat.py`(8) / `test_scheduler_heartbeat.py`(5) + `test_scheduler_done_callback.py`(4) + `test_scheduler.py`（scheduler 三件套 89 passed） / `test_qq_heartbeat.py`(4) / `test_langTrack_server.py`(18) / `test_langTrack_etl_summary.py`(3) / `test_log_isolation.py`(2)；ETL 回归 `test_langTrack_etl_location.py` + `test_langTrack_location_rebuild.py` + `test_langTrack_contract.py` = 33 passed。
@@ -3353,7 +3355,7 @@ batterystats 实测 weiCheckApp 耗电 67.7 mAh，其中 GNSS 64.4 mAh（引擎�
 ### 检视结论（2026-10-21，4 个 general 子 agent 并行检视 + 复检）
 - **心跳语义组**：PASS（0 blocking）。指出的非阻塞项已全部落地：scheduler 长行折行、QQ `connected_at` 被周期心跳冲掉、`json.dumps` 缺 `default=str`、`run_loop` 只捕 `Exception`（`SystemExit` 会被写成 `stopped`）、`start.py` 收尾可能被 `CancelledError` 跳过、tech 文档状态机两条代码里不存在的边。
 - **server/ETL 日志组**：FAIL → 1 个 blocking：`/ingest` 在别名文件损坏时**一行日志都没有**（归一在 try 外 + 中间件对 `/ingest` 跳过）。已修（`f0ec494`）并补 3 条回归测试（`ingest failed` 仍只有一行、归一阶段崩溃仍留一行、别名文件损坏降级不 500）。组内建议项转 P1：`/etl/status` 会把 ETL 的 stderr 原文暴露到局域网、`stack_trace` 未做密钥脱敏、`geocode`/`route`/`poi` 的「失败」与「未执行」都记 `null`。
-- **测试隔离组**：见下节（结论随本记录同步）。
+- **测试隔离组**：PASS（0 blocking）。实测隔离干净：跑完 8 个目标文件后 `apps/withlanggraph/logs/**` 零差异、`data/run/` 从未创建、真实 `data/langTrack.db` mtime 未变；全仓 `uv run --all-packages pytest` 1582 passed / 5 skipped，conftest 的全局 `GACORE_LOG_ROOT` 没影响别的 app；两个 botpy 桩顺序互换跑都通过。指出的非阻塞项已全部落地：断言「日志里不出现事件 payload」、断言原子写不留临时文件、断言写失败只落一条节流 WARNING、测试不再读开发者真实 `data/device_aliases.json`、ETL 摘要用例按 `db_path` 过滤（不再靠 `[-1]` 抢最后一行）、ETL 超时用例只替换 server 模块用到的 `subprocess` 表面（不动 stdlib）、conftest 会话结束清理临时日志目录。
 - **文档一致性组**：FAIL → 11 个 blocking（状态枚举漏 `connecting`、写了不存在的 `periodic ETL timeout` 消息名、`_on_scheduler_done` 符号不存在、tech 状态机 `error --> stopped` 与代码矛盾、`stack_trace=str(...)` 计数过期、证据文件路径与行数不可复现、`d7b233f` 未进路书等）。全部已改：证据改为可复现口径（按 `module` 维度统计并标注时点），提交清单补齐到 12 个，符号名与消息名与代码逐字对齐。
 
 ### 偏差说明
@@ -3362,6 +3364,7 @@ batterystats 实测 weiCheckApp 耗电 67.7 mAh，其中 GNSS 64.4 mAh（引擎�
 - `Heartbeat` 的 `detail` 每次整体替换，意味着「上一次带了什么线索」不留痕——取舍是「细节由调用方每次自己带」（QQ 用 `QQApp._hb_detail` 活字典保证 `connected_at` 每拍都在），避免心跳文件无限膨胀。
 - `busy` 心跳把 `stale_after_sec` 放宽到 1800s：日报作业可能跑几分钟，不放宽会被误判成死进程。
 - 设计文档原本把状态枚举写成 6 个（漏 `connecting`），代码会写 `connecting`——按代码为准补齐。
+- **并发提交插曲**：本轮实现期间，KG 抽取的改动被并发提交（`e21005b`→`481537b`），其中 `409c9bd` 顺带把我本地暂存区里的旧版文档章节一并提交，造成 §9.29 / 本条记录在提交历史里出现重复；`6b07476` 已用工作区的正确版本去重（KG 内容一条未丢）。架构图新增的 `main` 心跳节点也随该并发提交入库（内容正确，归属记在别人名下）。
 
 ### 待办更新
 - [x] 组件心跳（`data/run/*.json`）+ 服务端 `/ingest` 日志 + ETL 运行摘要 + `Logger.exception`
@@ -3373,3 +3376,4 @@ batterystats 实测 weiCheckApp 耗电 67.7 mAh，其中 GNSS 64.4 mAh（引擎�
 - [ ] P2：日志保留策略（`logs/<day>/app.jsonl` 天级目录已具备，缺清理与压缩）
 - [ ] P2：心跳文件历史归档（当前只看「最后一次写入」，看不到抖动曲线）
 - [ ] P2：`apps/withlanggraph/data/run/` 目录 README（数据来源与生成方式，R11）
+- [ ] P2（存量）：`tests/test_review_server.py::TestPlacesPage::test_places_page_db_missing` 单例耗时 ~10.9s，违反「单测 >2s 即踩真实资源」的判读信号，本轮未触碰，另开条目排查

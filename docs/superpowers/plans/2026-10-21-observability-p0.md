@@ -1307,22 +1307,24 @@ feat(observability): 落地 P0 心跳与关键链路日志
 
 ## 4. 验收清单
 
-- [ ] `Logger.exception` 输出真实 `stack_trace`（inside/outside except 两条路径都有测试）
-- [ ] `Heartbeat` 原子写、状态机、`beat()` 保留状态、失败不抛
-- [ ] `scheduler.json` 正常 `stop_event` 退出写 `stopped`，异常写 `error`
-- [ ] `scheduler.on_scheduler_done` 三分支（cancelled/died/stopped）有测试
-- [ ] `qq.json` 在 QQ 连接循环期间持续更新，`on_ready` 后 `running`
-- [ ] `langtrack_server.json` 在 FastAPI lifespan 期间持续更新
-- [ ] `/ingest` 成功/失败各一行，含 batch/device/event_count/duration
-- [ ] `/ingest` 失败不重复打 `http request crashed`；422 打 `http request failed`
-- [ ] `/ingest` 不记录事件 payload
-- [ ] ETL 每次运行有 started + finished/failed，含表行数/水位/耗时
-- [ ] ETL 超时有 `ETL timeout` 行，带 `timeout_sec/stderr_tail`
-- [ ] `Job finished` 含 `status/error_type/error_message`；`Job failed` 含真栈
-- [ ] 测试日志/心跳双隔离回归守卫（`GACORE_LOG_ROOT` + `GACORE_RUN_DIR`）
-- [ ] `langTrack-tech.md` / `langTrack-roadmap.md` / `ROADMAP.md` / `architecture-flow.mmd` 同步（架构图与未提交 KG 改动能干净拆分）
-- [ ] ruff + 目标 pytest 全绿
-- [ ] 子 agent 检视通过
+> 2026-10-22 收口：全部条目已达成；「子 agent 检视」一轮 FAIL 一轮 PASS，FAIL 的 blocking 已逐条修复并复检（结论见 `apps/withlanggraph/docs/langTrack-roadmap.md` 同日「检视结论」）。
+
+- [x] `Logger.exception` 输出真实 `stack_trace`（inside/outside except 两条路径都有测试）
+- [x] `Heartbeat` 原子写、状态机、`beat()` 保留状态、失败不抛
+- [x] `scheduler.json` 正常 `stop_event` 退出写 `stopped`，异常写 `error`
+- [x] `scheduler.on_scheduler_done` 三分支（cancelled/died/stopped）有测试
+- [x] `qq.json` 在 QQ 连接循环期间持续更新，`on_ready` 后 `running`
+- [x] `langtrack_server.json` 在 FastAPI lifespan 期间持续更新
+- [x] `/ingest` 成功/失败各一行，含 batch/device/event_count/duration
+- [x] `/ingest` 失败不重复打 `http request crashed`；422 打 `http request failed`
+- [x] `/ingest` 不记录事件 payload
+- [x] ETL 每次运行有 started + finished/failed，含表行数/水位/耗时
+- [x] ETL 超时有 `ETL timeout` 行，带 `timeout_sec/stderr_tail`
+- [x] `Job finished` 含 `status/error_type/error_message`；`Job failed` 含真栈
+- [x] 测试日志/心跳双隔离回归守卫（`GACORE_LOG_ROOT` + `GACORE_RUN_DIR`）
+- [x] `langTrack-tech.md` / `langTrack-roadmap.md` / `ROADMAP.md` / `architecture-flow.mmd` 同步（与并发入库的 KG 文档改动干净拆分，无重复章节）
+- [x] ruff + 目标 pytest 全绿
+- [x] 子 agent 检视通过（4 组并行检视；2 组 FAIL 的 blocking 全部修复后复检通过）
 
 ## 5. 风险与回滚
 
