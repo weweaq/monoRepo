@@ -67,15 +67,19 @@ async def _main() -> None:
     finally:
         stop_event.set()
         try:
-            await scheduler_task
-        except Exception:  # noqa: BLE001 — failure already logged by the done callback
-            pass
-        beat_task.cancel()
-        try:
-            await beat_task
-        except asyncio.CancelledError:
-            pass
-        heartbeat.stop()
+            try:
+                await scheduler_task
+            except Exception:  # noqa: BLE001 — failure already logged by the done callback
+                pass
+        finally:
+            # 收尾必须无条件执行：CancelledError（BaseException）会跳过外层 except，
+            # 那时心跳就永远停在 running，只能等 stale 判定。
+            beat_task.cancel()
+            try:
+                await beat_task
+            except asyncio.CancelledError:
+                pass
+            heartbeat.stop()
 
 
 def main() -> None:

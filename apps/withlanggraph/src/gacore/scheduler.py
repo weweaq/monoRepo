@@ -1240,7 +1240,12 @@ def run_loop(
                     save_state(resolved_cfg, states)
                     jobs_run += 1
                     continue
-                logger.info("Job due, firing", job=job.name, schedule=job.schedule, now=now.isoformat(timespec="seconds"))
+                logger.info(
+                    "Job due, firing",
+                    job=job.name,
+                    schedule=job.schedule,
+                    now=now.isoformat(timespec="seconds"),
+                )
                 # run_job is synchronous and can take minutes; widen the staleness window
                 # so a long report run is not mistaken for a dead scheduler.
                 heartbeat.beat(
@@ -1266,7 +1271,9 @@ def run_loop(
                     stop_event.wait(poll_interval)
                 else:
                     time.sleep(poll_interval)
-    except Exception as exc:
+    except BaseException as exc:
+        # 用 BaseException：SystemExit 之类会让线程静默死亡，若只捕 Exception，
+        # finally 会把心跳写成 stopped —— 崩溃看起来像正常停机，正好错过告警。
         failed = True
         logger.exception("scheduler loop crashed", exc=exc, iterations=iterations, jobs_run=jobs_run)
         heartbeat.stop(

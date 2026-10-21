@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -76,4 +77,35 @@ def test_run_loop_stop_event_exits_and_writes_stopped(tmp_path: Path) -> None:
     stop_event.set()
     jobs_run = run_loop(cfg=cfg, poll_interval=1, stop_event=stop_event)
     assert jobs_run == 0
+    assert _read_hb(tmp_path)["state"] == "stopped"
+
+
+def test_stop_event_wakes_parked_scheduler_loop(tmp_path: Path) -> None:
+    """线程停在 `stop_event.wait(poll_interval)` 时，set() 必须立刻唤醒（不能等满轮询间隔）。
+
+    这是「优雅停机」最关键的一条：等满 30s 才退出等于没有优雅停机。
+    """
+    cfg = Config.for_tests(tmp_path)
+    stop_event = threading.Event()
+    hb_path = tmp_path / "data" / "run" / "scheduler.json"
+
+    thread = threading.Thread(
+        target=run_loop,
+        kwargs={"cfg": cfg, "poll_interval": 30, "stop_event": stop_event},
+        daemon=True,
+    )
+    thread.start()
+
+    # 等第一轮跑完（running 心跳已落盘，随后线程停在 wait(30)）
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        if hb_path.exists():
+            if json.loads(hb_path.read_text(encoding="utf-8")).get("state") == "running":
+                break
+        time.sleep(0.05)
+    assert hb_path.exists()
+
+    stop_event.set()
+    thread.join(timeout=5)
+    assert not thread.is_alive(), "stop_event must wake the parked loop immediately"
     assert _read_hb(tmp_path)["state"] == "stopped"

@@ -64,14 +64,15 @@ def _read(root: Path) -> dict:
 
 
 async def test_heartbeat_loop_keeps_last_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Periodic state-less beats must not flatten `reconnecting` back to `running`."""
+    """Periodic beats keep the state and re-carry the caller's detail (design §5.2)."""
     monkeypatch.setattr(qq, "DEFAULT_INTERVAL_SECONDS", 0.02)
     root = tmp_path / "run"
     hb = Heartbeat("qq", root=root)
+    detail: dict[str, object] = {"retry_in_sec": 5}
     hb.start()
-    hb.beat(state="reconnecting", retry_in_sec=5)
+    hb.beat(state="reconnecting", **detail)
 
-    task = asyncio.create_task(_heartbeat_loop(hb))
+    task = asyncio.create_task(_heartbeat_loop(hb, detail))
     await asyncio.sleep(0.1)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -80,9 +81,31 @@ async def test_heartbeat_loop_keeps_last_state(tmp_path: Path, monkeypatch: pyte
     data = _read(root)
     assert data["state"] == "reconnecting"
     assert data["seq"] >= 3  # start + reconnecting + at least one periodic beat
-    # Periodic beats carry no detail: they replace it with {} (design §5.2) but must
-    # never flatten the state they inherited.
-    assert data["detail"] == {}
+    # 周期心跳必须带上调用方的 detail：connected_at 这类线索不能被下一拍冲掉。
+    assert data["detail"] == {"retry_in_sec": 5}
+
+
+async def test_connected_at_survives_periodic_beats(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """on_ready 写入的 connected_at 不能被后续周期心跳清空。"""
+    monkeypatch.setattr(qq, "DEFAULT_INTERVAL_SECONDS", 0.02)
+    root = tmp_path / "run"
+    app = QQApp(MagicMock())
+    hb = Heartbeat("qq", root=root)
+    hb.start()
+    app._heartbeat = hb
+
+    bot = _make_bot_class(app)()
+    await bot.on_ready()
+
+    task = asyncio.create_task(_heartbeat_loop(hb, app._hb_detail))
+    await asyncio.sleep(0.1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    data = _read(root)
+    assert data["state"] == "running"
+    assert "connected_at" in data["detail"]
 
 
 async def test_on_ready_marks_heartbeat_running(tmp_path: Path) -> None:

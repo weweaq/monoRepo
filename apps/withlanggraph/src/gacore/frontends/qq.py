@@ -812,10 +812,14 @@ def _make_bot_class(app: QQApp):
 
             if app._heartbeat is not None:
 
-                app._heartbeat.beat(
-                    state="running",
-                    connected_at=datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+                # detail 每次写入整体替换：连接线索存 app 上，每次心跳都带上。
+                app._hb_detail["connected_at"] = datetime.now(timezone.utc).astimezone().isoformat(
+                    timespec="seconds"
                 )
+
+                app._hb_detail.pop("retry_in_sec", None)
+
+                app._heartbeat.beat(state="running", **app._hb_detail)
 
             logger.info(f"QQ bot ready: {name}")
 
@@ -843,15 +847,20 @@ def _make_bot_class(app: QQApp):
 
 
 
-async def _heartbeat_loop(heartbeat: Heartbeat) -> None:
+async def _heartbeat_loop(heartbeat: Heartbeat, detail: dict[str, object]) -> None:
 
-    """Periodic beat that keeps the last state (never flattens reconnecting→running)."""
+    """Periodic beat: keeps the last state and re-carries the caller's detail.
+
+    ``detail`` is the live dict owned by QQApp (mutated in place), so durable
+    clues such as ``connected_at`` survive every periodic write instead of
+    being wiped by the next beat.
+    """
 
     while True:
 
         await asyncio.sleep(DEFAULT_INTERVAL_SECONDS)
 
-        heartbeat.beat()
+        heartbeat.beat(**detail)
 
 
 
@@ -877,6 +886,10 @@ class QQApp:
 
         # Heartbeat handle bound in start(); on_ready and the reconnect loop update it.
         self._heartbeat: Heartbeat | None = None
+
+        # Durable heartbeat clues (connected_at / retry_in_sec). detail is replaced
+        # wholesale on every write, so the app owns them and re-carries them.
+        self._hb_detail: dict[str, object] = {"launcher": "qq"}
 
         self._running_tasks: dict[str, asyncio.Task] = {}  # user_id -> running agent task
 
@@ -2194,11 +2207,13 @@ class QQApp:
 
         self._heartbeat = heartbeat
 
+        self._hb_detail = {"launcher": "qq"}
+
         heartbeat.start(launcher="qq")
 
-        heartbeat.beat(state="connecting", launcher="qq")
+        heartbeat.beat(state="connecting", **self._hb_detail)
 
-        beat_task = asyncio.create_task(_heartbeat_loop(heartbeat))
+        beat_task = asyncio.create_task(_heartbeat_loop(heartbeat, self._hb_detail))
 
         delay = _RECONNECT_INITIAL
 
@@ -2226,7 +2241,9 @@ class QQApp:
 
                 # until on_ready fires again, so record the backoff window.
 
-                heartbeat.beat(state="reconnecting", retry_in_sec=delay)
+                self._hb_detail["retry_in_sec"] = delay
+
+                heartbeat.beat(state="reconnecting", **self._hb_detail)
 
                 logger.warning(f"QQ reconnect in {delay}s...")
 

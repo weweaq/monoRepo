@@ -127,7 +127,7 @@ class Heartbeat:
             tmp = self._root / f".{self._component}.{self._pid}.{self._instance_id}.{self._seq}.tmp"
             try:
                 self._root.mkdir(parents=True, exist_ok=True)
-                tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+                tmp.write_text(json.dumps(payload, ensure_ascii=False, default=str), encoding="utf-8")
                 os.replace(tmp, self._path)
             except Exception as exc:  # noqa: BLE001 - heartbeat must never break business
                 try:
