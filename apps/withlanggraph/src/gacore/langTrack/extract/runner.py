@@ -26,6 +26,7 @@ import re
 import secrets
 import sqlite3
 import time
+import traceback
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -45,7 +46,7 @@ from gacore.langTrack.extract.contract import (
     retryable_error,
     with_no_question_rule,
 )
-from gacore.langTrack.extract.intervals import reclose_day
+from gacore.langTrack.extract.intervals import reclose_day, reclose_intervals
 from gacore.langTrack.extract.material import Material, load_material, material_stats
 from gacore.langTrack.extract.resolve import resolve_entities
 from gacore.langTrack.extract.schema import migrate_extract_tables
@@ -152,6 +153,17 @@ def _lookup_run(conn: sqlite3.Connection, day: str, raw_hash: str, prompt_ver: s
     return (str(row[0]), str(row[1])) if row else None
 
 
+def _load_stats(raw: Any) -> dict[str, Any]:
+    """解析 ``kg_runs.channel_stats``；历史脏数据（非 JSON/非 dict）一律当空。"""
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
 def _content_of(response: Any) -> str:
     content = getattr(response, "content", response)
     if isinstance(content, str):
@@ -196,10 +208,22 @@ def _log_channel(outcome: ChannelOutcome) -> None:
     fields: dict[str, Any] = {"status": outcome.status, "rows": outcome.rows, **outcome.extra}
     if outcome.error:
         fields["error"] = outcome.error
-    if outcome.status == "ok":
+    if outcome.status in ("ok", "skipped"):
         _LOG.info("kg_extract_channel", channel=outcome.key, **fields)
     else:
-        _LOG.warning("kg_extract_channel", channel=outcome.key, **fields)
+        _LOG.error("kg_extract_channel", channel=outcome.key, **fields)
+
+
+def _clip(text: object, limit: int = 500) -> str:
+    """单行化并按字符上限截断；用于错误消息，避免把上游整段响应写进日志。"""
+    flat = " ".join(str(text).split())
+    return flat if len(flat) <= limit else flat[:limit] + "…"
+
+
+def _traceback_text(exc: BaseException, limit: int = 4000) -> str:
+    """完整调用栈（截断到 limit）；失败尝试必须能在日志里定位到源码行。"""
+    text = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    return text if len(text) <= limit else text[:limit] + "\n…(truncated)"
 
 
 def _log_attempt(
@@ -214,8 +238,9 @@ def _log_attempt(
     violation: str = "",
     error: str = "",
     action: str = "",
+    exc: BaseException | None = None,
 ) -> None:
-    """单次 LLM 调用的审计行：只记指纹/长度/用量，不记原文。"""
+    """单次 LLM 调用的审计行：只记指纹/长度/用量/错误上下文，不记原始素材。"""
     fields: dict[str, Any] = {
         **(base or {}),
         "channel": channel,
@@ -239,19 +264,134 @@ def _log_attempt(
         fields["violation"] = violation
     if error:
         fields["error"] = error
+    if exc is not None:
+        fields["error_type"] = type(exc).__name__
+        fields["error_message"] = _clip(exc)
+        fields["stack_trace"] = _traceback_text(exc)
+        fields["context"] = {
+            "channel": channel,
+            "attempt": attempt,
+            "day": (base or {}).get("day"),
+            "run_id": (base or {}).get("run_id"),
+        }
     if result == "ok":
         _LOG.info("kg_extract_attempt", **fields)
+    elif action == "abort":
+        _LOG.error("kg_extract_attempt", **fields)
     else:
         _LOG.warning("kg_extract_attempt", **fields)
 
 
 def _exc_summary(exc: BaseException) -> str:
-    """异常摘要：只留类型/状态码，避免把上游响应体写进日志和 channel_stats。"""
+    """异常摘要：类型 + 状态码 + 消息，避免把上游整段响应体写进日志和 channel_stats。"""
     status = getattr(exc, "status_code", None)
     if status is None:
         status = getattr(getattr(exc, "response", None), "status_code", None)
     name = type(exc).__name__
-    return f"{name} status={status}" if status else name
+    head = f"{name} status={status}" if status else name
+    message = _clip(exc, 300)
+    return f"{head}: {message}" if message else head
+
+
+_CHANNEL_ROW_TABLES: Final = (
+    "kg_edges",
+    "kg_relations",
+    "kg_emotions",
+    "kg_patterns",
+    "kg_worldview",
+)
+
+
+def _clear_channel_rows(conn: sqlite3.Connection, day: str, key: str) -> int:
+    """删除本通道当日的旧行，让重跑是"替换"而非"叠加"。
+
+    归属按各表的 ``src`` 列判定（events/todos→kg_edges，relations→kg_relations，
+    emotions/patterns/worldview 各自一表）。``kg_nodes`` 是跨日共享的实体表，不能按日
+    删除，故不在清单内。删除与后续插入共用同一连接的事务：``spec.handle`` 提交时一起
+    生效，解析/落库失败则一起回滚，不会出现"旧的删了、新的没写"。
+    """
+    total = 0
+    for table in _CHANNEL_ROW_TABLES:
+        try:
+            total += conn.execute(
+                f"DELETE FROM {table} WHERE day = ? AND src = ?", (day, key)  # noqa: S608 - 表名为常量白名单
+            ).rowcount
+        except sqlite3.OperationalError as exc:
+            # 单元测试常见：调用方自带没有 kg_* 表的连接。生产路径先跑 migrate，表必然存在。
+            if "no such table" not in str(exc):
+                raise
+    return total
+
+
+def _snapshot_channel_rows(
+    conn: sqlite3.Connection, day: str, key: str
+) -> dict[str, list[tuple[Any, ...]]]:
+    """备份本通道当日旧行；新结果 0 行时原样恢复，避免退化输出把上一版数据删空。"""
+    snapshot: dict[str, list[tuple[Any, ...]]] = {}
+    for table in _CHANNEL_ROW_TABLES:
+        try:
+            rows = conn.execute(
+                f"SELECT * FROM {table} WHERE day = ? AND src = ?", (day, key)  # noqa: S608
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc):
+                raise
+            continue
+        if rows:
+            snapshot[table] = [tuple(row) for row in rows]
+    return snapshot
+
+
+def _restore_channel_rows(
+    conn: sqlite3.Connection, snapshot: dict[str, list[tuple[Any, ...]]]
+) -> int:
+    """把快照原样写回（``INSERT OR IGNORE``）；返回恢复行数。"""
+    restored = 0
+    for table, rows in snapshot.items():
+        if not rows:
+            continue
+        columns = [row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+        if not columns:
+            continue
+        placeholders = ",".join("?" * len(columns))
+        restored += conn.executemany(
+            f"INSERT OR IGNORE INTO {table} ({','.join(columns)}) VALUES ({placeholders})",  # noqa: S608
+            rows,
+        ).rowcount
+    return restored
+
+
+def _count_channel_rows(conn: sqlite3.Connection, day: str, key: str) -> int:
+    """本通道当日记录表实际行数（不含 ``kg_nodes``，节点写入不代表有可用记录）。"""
+    total = 0
+    for table in _CHANNEL_ROW_TABLES:
+        try:
+            total += conn.execute(
+                f"SELECT count(*) FROM {table} WHERE day = ? AND src = ?", (day, key)  # noqa: S608
+            ).fetchone()[0]
+        except sqlite3.OperationalError as exc:
+            if "no such table" not in str(exc):
+                raise
+    return total
+
+
+def _channel_triples(conn: sqlite3.Connection, day: str, key: str) -> set[tuple[str, str, str]]:
+    """本通道当日边涉及的 ``(from, to, relation)`` 组，用于替换后精确闭合区间。"""
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT from_node, to_node, relation FROM kg_edges WHERE day = ? AND src = ?",
+            (day, key),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc):
+            raise
+        return set()
+    return {(str(from_node), str(to_node), str(relation)) for from_node, to_node, relation in rows}
+
+
+def _payload_has_records(payload: dict[str, Any]) -> bool:
+    """通道 payload 是否至少带一个非空顶层列表（6 个通道的记录都挂在列表上）。"""
+    return any(isinstance(value, list) and value for value in payload.values())
 
 
 async def _extract_channel(
@@ -272,6 +412,7 @@ async def _extract_channel(
     if not material_text.strip():
         outcome.status = "skipped"
         outcome.error = "该通道素材为空"
+        _log_channel(outcome)
         return outcome
     started = time.perf_counter()
     attempts = 0
@@ -295,6 +436,15 @@ async def _extract_channel(
             attempts += 1
             response = None
             attempt_started = time.perf_counter()
+            _LOG.debug(
+                "kg_extract_llm_call",
+                channel=spec.key,
+                attempt=attempts,
+                prompt_chars=len(material_text),
+                system_chars=len(system_prompt),
+                provider=audit_base.get("provider", ""),
+                model=audit_base.get("model", ""),
+            )
             try:
                 response = await llm.ainvoke(messages)
             except Exception as exc:
@@ -312,8 +462,9 @@ async def _extract_channel(
                     "",
                     elapsed_ms,
                     base=audit_base,
-                    error=type(exc).__name__,
+                    error=_exc_summary(exc),
                     action="retry" if will_retry else "abort",
+                    exc=exc,
                 )
                 if will_retry:
                     await asyncio.sleep(min(2.0, 0.5 * 2 ** (attempts - 1)))
@@ -338,7 +489,9 @@ async def _extract_channel(
                     base=audit_base,
                     response=response,
                     violation=reason,
+                    error=last_error,
                     action="retry" if will_retry else "abort",
+                    exc=exc,
                 )
                 if not will_retry:
                     break
@@ -381,9 +534,62 @@ async def _extract_channel(
             outcome.status = "failed"
             outcome.error = f"LLM 输出不可用（{detail}）"
         else:
-            written, extra = spec.handle(conn, ctx, payload)
-            outcome.rows = written
-            outcome.extra.update(extra)
+            if not _payload_has_records(payload):
+                # 空/退化 payload 不删旧行：否则一次 `{}` 就能把当日该通道清空，
+                # 且 kg_runs 仍记 ok，后续调度会 skip，数据永久丢失。
+                outcome.extra["empty_payload"] = True
+                outcome.extra["replaced_rows"] = 0
+                _LOG.warning(
+                    "kg_extract_empty_payload",
+                    channel=spec.key,
+                    day=ctx.day,
+                    run_id=ctx.run_id,
+                    hint="payload has no records; kept previous day rows",
+                )
+            else:
+                old_triples = _channel_triples(conn, ctx.day, spec.key)
+                snapshot = _snapshot_channel_rows(conn, ctx.day, spec.key)
+                with conn:
+                    replaced = _clear_channel_rows(conn, ctx.day, spec.key)
+                    written, extra = spec.handle(conn, ctx, payload)
+                    remaining = _count_channel_rows(conn, ctx.day, spec.key)
+                    if replaced and remaining == 0:
+                        # 记录表 0 行（payload 只给节点、或记录全被 handle 丢弃）：恢复旧行，不做净删除。
+                        restored = _restore_channel_rows(conn, snapshot)
+                        replaced = 0
+                        extra["kept_previous_rows"] = True
+                        extra["restored_rows"] = restored
+                        _LOG.warning(
+                            "kg_extract_empty_result",
+                            channel=spec.key,
+                            day=ctx.day,
+                            run_id=ctx.run_id,
+                            restored_rows=restored,
+                            hint="no record rows written; restored previous day rows",
+                        )
+                outcome.rows = written
+                outcome.extra.update(extra)
+                outcome.extra["replaced_rows"] = replaced
+                if replaced:
+                    # 被替换掉的边可能不是前一日（中间断档），按旧 triple 精确重算 valid_to。
+                    removed = old_triples - _channel_triples(conn, ctx.day, spec.key)
+                    reclosed = 0
+                    for triple in sorted(removed):
+                        try:
+                            reclose_intervals(conn, *triple)
+                            reclosed += 1
+                        except Exception as exc:  # noqa: BLE001 - 闭合失败只告警，不翻转已落库通道
+                            _LOG.warning(
+                                "kg_extract_reclose_failed",
+                                channel=spec.key,
+                                day=ctx.day,
+                                run_id=ctx.run_id,
+                                triple=list(triple),
+                                error_type=type(exc).__name__,
+                                error_message=_clip(exc),
+                            )
+                    if removed:
+                        outcome.extra["reclosed_triples"] = reclosed
     except Exception as exc:  # noqa: BLE001 - 失败隔离：单通道异常不拖垮整次运行
         outcome.status = "failed"
         detail = _exc_summary(exc)
@@ -392,6 +598,16 @@ async def _extract_channel(
         if reasons:
             detail += f" | reasons={','.join(reasons)}"
         outcome.error = detail
+        outcome.extra["error_type"] = type(exc).__name__
+        outcome.extra["error_message"] = _clip(exc)
+        _LOG.error(
+            "kg_extract_channel_error",
+            channel=spec.key,
+            error_type=type(exc).__name__,
+            error_message=_clip(exc),
+            stack_trace=_traceback_text(exc),
+            context={"channel": spec.key, "day": ctx.day, "run_id": ctx.run_id, "attempts": attempts},
+        )
     if reasons:
         outcome.extra["failure_reasons"] = reasons
     _probe(response, outcome, started, attempts)
@@ -430,8 +646,30 @@ async def _extract_channel_guarded(
             _extract_channel(spec, llm, prompt, material_text, conn, ctx),
             timeout=timeout,
         )
-    except TimeoutError:
-        return ChannelOutcome(key=spec.key, status="failed", error=f"通道超时：{timeout:g}s 内未返回")
+    except TimeoutError as exc:
+        message = f"通道超时：{timeout:g}s 内未返回"
+        outcome = ChannelOutcome(key=spec.key, status="failed", error=message)
+        outcome.extra = {
+            "prompt_chars": len(material_text),
+            "timeout_s": timeout,
+            "error_type": type(exc).__name__,
+            "error_message": message,
+        }
+        _LOG.error(
+            "kg_extract_channel_error",
+            channel=spec.key,
+            error_type=type(exc).__name__,
+            error_message=message,
+            stack_trace=_traceback_text(exc),
+            context={
+                "channel": spec.key,
+                "day": ctx.day,
+                "run_id": ctx.run_id,
+                "timeout_s": timeout,
+            },
+        )
+        _log_channel(outcome)
+        return outcome
 
 
 async def _run_channels(
@@ -498,8 +736,18 @@ def run_extract(
     specs = _select_channels(only)
     material = load_material(day, resolved)
     material_chars = len(material.text)
+    material_info = material_stats(material)
+    run_started = time.perf_counter()
 
     if dry_run:
+        _LOG.info(
+            "kg_extract_dry_run",
+            day=day,
+            channels=[spec.key for spec in specs],
+            material_chars=material_chars,
+            raw_hash=material.raw_hash,
+            by_source_chars=material_info.get("by_source_chars"),
+        )
         return RunResult(
             run_id="",
             day=day,
@@ -515,14 +763,29 @@ def run_extract(
     try:
         migrate_extract_tables(conn)
         existing = _lookup_run(conn, day, material.raw_hash, PROMPT_VER)
+        previous_stats: dict[str, Any] = {}
+        if existing:
+            stats_row = conn.execute(
+                "SELECT channel_stats FROM kg_runs WHERE run_id = ?", (existing[0],)
+            ).fetchone()
+            previous_stats = _load_stats(stats_row[0] if stats_row else None)
         if existing and existing[1] == _OK_STATUS and not force:
+            _LOG.info(
+                "kg_extract_run_skip",
+                day=day,
+                run_id=existing[0],
+                reason="same_material_ok",
+                material_chars=material_chars,
+                raw_hash=material.raw_hash,
+                hint="use --force to rerun",
+            )
             return RunResult(
                 run_id=existing[0],
                 day=day,
                 status="skipped",
                 raw_hash=material.raw_hash,
                 material_chars=material_chars,
-                channels=json.loads(
+                channels=_load_stats(
                     conn.execute(
                         "SELECT channel_stats FROM kg_runs WHERE run_id = ?", (existing[0],)
                     ).fetchone()[0]
@@ -533,7 +796,7 @@ def run_extract(
             if existing:
                 conn.execute(
                     "UPDATE kg_runs SET status='running', started_at=?, finished_at=NULL, "
-                    "channel_stats='{}', updated_at=datetime('now','+8 hours') WHERE run_id=?",
+                    "updated_at=datetime('now','+8 hours') WHERE run_id=?",
                     (_now_stamp(), run_id),
                 )
             else:
@@ -544,30 +807,68 @@ def run_extract(
                 )
         ctx = ExtractContext(day=day, run_id=run_id, prompt_ver=PROMPT_VER)
         prompts = {spec.key: load_prompt(resolved, spec.prompt) for spec in specs}
-        outcomes = asyncio.run(
-            _run_channels(specs, _resolve_llm(llm), prompts, material, conn, ctx)
+        llm_client = _resolve_llm(llm)
+        _LOG.info(
+            "kg_extract_run_start",
+            day=day,
+            run_id=run_id,
+            force=force,
+            channels=[spec.key for spec in specs],
+            material_chars=material_chars,
+            raw_hash=material.raw_hash,
+            by_source_chars=material_info.get("by_source_chars"),
+            provider=str(getattr(llm_client, "_llm_type", "") or ""),
+            model=str(getattr(llm_client, "model_name", "") or getattr(llm_client, "model", "") or ""),
+            db=str(db),
+            channel_timeout=_channel_timeout(),
+            llm_timeout=_extract_llm_timeout(),
         )
+        outcomes = asyncio.run(_run_channels(specs, llm_client, prompts, material, conn, ctx))
         status = _overall_status(outcomes)
-        channel_stats: dict[str, Any] = {"_material": material_stats(material)}
+        selected = {o.key for o in outcomes}
+        carried = {
+            key: value
+            for key, value in previous_stats.items()
+            if not key.startswith("_") and key not in selected and isinstance(value, dict)
+        }
+        channel_stats: dict[str, Any] = {"_material": material_info, **carried}
         channel_stats.update({o.key: o.as_dict() for o in outcomes})
+        if status in (_OK_STATUS, "skipped") and any(
+            value.get("status") == "failed" for value in carried.values()
+        ):
+            # `--only` 只重算选中通道；未选中且历史失败的通道仍让整次保持 partial，避免被"修好"。
+            status = "partial"
         if sum(o.rows for o in outcomes) > 0:
             post = _postprocess(conn, day, run_id)
             channel_stats["_postprocess"] = post
             if post["status"] == "failed" and status == _OK_STATUS:
                 status = "partial"
+        total_rows = sum(o.rows for o in outcomes)
         with conn:
             conn.execute(
                 "UPDATE kg_runs SET status=?, channel_stats=?, finished_at=?, "
                 "updated_at=datetime('now','+8 hours') WHERE run_id=?",
                 (status, json.dumps(channel_stats, ensure_ascii=False), _now_stamp(), run_id),
             )
+        _LOG.info(
+            "kg_extract_run_end",
+            day=day,
+            run_id=run_id,
+            status=status,
+            rows=total_rows,
+            elapsed_ms=int((time.perf_counter() - run_started) * 1000),
+            material_chars=material_chars,
+            channel_status={o.key: o.status for o in outcomes},
+            failed=[o.key for o in outcomes if o.status == "failed"],
+            replaced_rows=sum(int(o.extra.get("replaced_rows", 0) or 0) for o in outcomes),
+        )
         return RunResult(
             run_id=run_id,
             day=day,
             status=status,
             raw_hash=material.raw_hash,
             material_chars=material_chars,
-            rows=sum(o.rows for o in outcomes),
+            rows=total_rows,
             channels=channel_stats,
         )
     finally:

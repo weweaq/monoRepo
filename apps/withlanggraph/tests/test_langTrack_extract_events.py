@@ -170,6 +170,267 @@ def test_edge_id_is_content_derived(tmp_path):
     assert _query(db, "SELECT edge_id FROM kg_edges ORDER BY edge_id") == first
 
 
+def test_force_rerun_replaces_this_channels_rows_only(tmp_path):
+    """重跑是"替换"不是"叠加"：只清本通道当日旧行，其他通道的行原样保留。"""
+    cfg, db = _setup(tmp_path)
+    before = {
+        "nodes": PAYLOAD["nodes"],
+        "edges": [{**PAYLOAD["edges"][0], "assertion_text": "重跑前的断言"}],
+    }
+    after = {
+        "nodes": PAYLOAD["nodes"],
+        "edges": [{**PAYLOAD["edges"][0], "assertion_text": "重跑后的断言"}],
+    }
+    run_extract(
+        DAY, cfg, db_path=db, only=["events"],
+        llm=FakeLLM([json.dumps(before, ensure_ascii=False)]),
+    )
+    conn = sqlite3.connect(db)
+    with conn:
+        conn.execute(
+            "INSERT INTO kg_patterns (pattern_id, subject, pattern, confidence, day, src, run_id)"
+            " VALUES ('p_other','person_zhangsan','另一通道的行',0.5,?,'patterns','r_other')",
+            (DAY,),
+        )
+        # 同一张 kg_edges 表里属于 todos 通道的行：events 重跑不能误删
+        conn.execute(
+            "INSERT INTO kg_edges (edge_id, from_node, to_node, relation, edge_level, day, src, run_id)"
+            " VALUES ('e_todos','person_zhangsan','obs_other','has_todo','L1',?,'todos','r_other')",
+            (DAY,),
+        )
+    conn.close()
+
+    run_extract(
+        DAY, cfg, db_path=db, force=True, only=["events"],
+        llm=FakeLLM([json.dumps(after, ensure_ascii=False)]),
+    )
+
+    assertions = [
+        row[0]
+        for row in _query(db, "SELECT assertion_text FROM kg_edges WHERE src='events' ORDER BY edge_id")
+    ]
+    assert assertions == ["重跑后的断言"]
+    assert _query(db, "SELECT edge_id FROM kg_edges WHERE src='todos'") == [("e_todos",)]
+    assert _query(db, "SELECT count(*) FROM kg_patterns") == [(1,)]
+
+
+def test_empty_payload_keeps_previous_rows(tmp_path):
+    """`{}` 这类退化输出不能把当日该通道清空（kg_runs 仍 ok，后续调度会 skip）。"""
+    cfg, db = _setup(tmp_path)
+    before = {
+        "nodes": PAYLOAD["nodes"],
+        "edges": [{**PAYLOAD["edges"][0], "assertion_text": "保住的断言"}],
+    }
+    run_extract(
+        DAY, cfg, db_path=db, only=["events"],
+        llm=FakeLLM([json.dumps(before, ensure_ascii=False)]),
+    )
+
+    result = run_extract(DAY, cfg, db_path=db, force=True, only=["events"], llm=FakeLLM(["{}"]))
+
+    assert result.channels["events"]["status"] == "ok"
+    assert result.channels["events"]["empty_payload"] is True
+    assert result.channels["events"]["rows"] == 0
+    assert [row[0] for row in _query(db, "SELECT assertion_text FROM kg_edges")] == ["保住的断言"]
+
+
+def test_nodes_only_payload_keeps_previous_rows(tmp_path):
+    """payload 只给 nodes、漏 edges：节点写入不算“有记录”，旧边必须恢复。"""
+    cfg, db = _setup(tmp_path)
+    before = {
+        "nodes": PAYLOAD["nodes"],
+        "edges": [{**PAYLOAD["edges"][0], "assertion_text": "节点-only 也要保住"}],
+    }
+    run_extract(
+        DAY, cfg, db_path=db, only=["events"],
+        llm=FakeLLM([json.dumps(before, ensure_ascii=False)]),
+    )
+
+    result = run_extract(
+        DAY, cfg, db_path=db, force=True, only=["events"],
+        llm=FakeLLM([json.dumps({"nodes": [{"node_id": "person_new"}], "edges": []})]),
+    )
+
+    assert result.channels["events"]["kept_previous_rows"] is True
+    assert result.channels["events"]["restored_rows"] == 1
+    assert [row[0] for row in _query(db, "SELECT assertion_text FROM kg_edges")] == [
+        "节点-only 也要保住"
+    ]
+
+
+def test_only_rerun_preserves_other_channel_stats(tmp_path):
+    """`--only events` 不能抹掉其他通道的体检字段；历史 failed 仍让整次保持 partial。"""
+    cfg, db = _setup(tmp_path)
+    run_extract(
+        DAY, cfg, db_path=db, only=["events"],
+        llm=FakeLLM([json.dumps(PAYLOAD, ensure_ascii=False)]),
+    )
+    conn = sqlite3.connect(db)
+    with conn:
+        row = conn.execute(
+            "SELECT run_id, channel_stats FROM kg_runs WHERE day = ?", (DAY,)
+        ).fetchone()
+        stats = json.loads(row[1])
+        stats["emotions"] = {"status": "failed", "error": "boom"}
+        conn.execute(
+            "UPDATE kg_runs SET channel_stats = ? WHERE run_id = ?",
+            (json.dumps(stats, ensure_ascii=False), row[0]),
+        )
+    conn.close()
+
+    result = run_extract(
+        DAY, cfg, db_path=db, force=True, only=["events"],
+        llm=FakeLLM([json.dumps(PAYLOAD, ensure_ascii=False)]),
+    )
+
+    assert result.status == "partial"
+    assert result.channels["emotions"]["status"] == "failed"
+    assert result.channels["events"]["status"] == "ok"
+
+
+def test_replaced_triple_recloses_earlier_day(tmp_path):
+    """替换掉某条边后，更早日期指向它的 valid_to 必须清空（不能只闭合前一日）。"""
+    cfg, db = _setup(tmp_path)
+    earlier = "2026-10-13"
+    write_pack_detail(
+        cfg, earlier, "_CHAT", "〔CHAT〕", "ok",
+        "- 10-13 讨论相机", "pack 文本", "进包文本",
+    )
+    base_edge = {
+        "from": "person_zhangsan",
+        "to": "theme_camera",
+        "relation": "prefers",
+        "edge_level": "L1",
+        "assertion_text": "喜欢相机",
+    }
+    run_extract(
+        earlier, cfg, db_path=db, only=["events"],
+        llm=FakeLLM([json.dumps({"nodes": [], "edges": [{**base_edge, "event_time": "2026-10-13T09:00"}]})]),
+    )
+    run_extract(
+        DAY, cfg, db_path=db, only=["events"],
+        llm=FakeLLM([json.dumps({"nodes": [], "edges": [{**base_edge, "event_time": "2026-10-16T09:00"}]})]),
+    )
+    assert _query(db, f"SELECT valid_to FROM kg_edges WHERE day='{earlier}'") == [
+        ("2026-10-16T09:00",)
+    ]
+
+    result = run_extract(
+        DAY, cfg, db_path=db, force=True, only=["events"],
+        llm=FakeLLM([json.dumps({"nodes": [], "edges": [{
+            **base_edge,
+            "to": "theme_laptop",
+            "assertion_text": "换成笔电",
+            "event_time": "2026-10-16T12:00",
+        }]})]),
+    )
+
+    assert result.channels["events"]["reclosed_triples"] == 1
+    assert _query(db, f"SELECT valid_to FROM kg_edges WHERE day='{earlier}'") == [(None,)]
+
+
+def test_zero_row_handler_restores_previous_rows(tmp_path, monkeypatch):
+    """payload 非空但 handle 一行没写（记录全被丢弃）→ 恢复旧行，不做净删除。"""
+    cfg, db = _setup(tmp_path)
+    run_extract(
+        DAY, cfg, db_path=db, only=["events"],
+        llm=FakeLLM([json.dumps(PAYLOAD, ensure_ascii=False)]),
+    )
+    conn = sqlite3.connect(db)
+    with conn:
+        conn.execute(
+            "INSERT INTO kg_edges (edge_id, from_node, to_node, relation, edge_level, day, src, run_id)"
+            " VALUES ('e_old','person_zhangsan','obs_old','has_todo','L1',?,'zzz_probe','r_old')",
+            (DAY,),
+        )
+    conn.close()
+
+    prompt_dir = cfg.root / "config" / "kg_prompts"
+    (prompt_dir / "zzz@v1.md").write_text("ZERO", encoding="utf-8")
+    probe = ChannelSpec(
+        key="zzz_probe",
+        prompt="zzz@v1.md",
+        sources=("_CHAT",),
+        handle=lambda _conn, _ctx, _payload: (0, {"dropped": 1}),
+    )
+    monkeypatch.setattr(runner, "CHANNELS", (*runner.CHANNELS, probe))
+
+    result = run_extract(
+        DAY, cfg, db_path=db, force=True, llm=FakeLLM(['{"items":[{"x":1}]}']), only=["zzz_probe"]
+    )
+
+    assert result.channels["zzz_probe"]["status"] == "ok"
+    assert result.channels["zzz_probe"]["kept_previous_rows"] is True
+    assert result.channels["zzz_probe"]["restored_rows"] == 1
+    assert _query(db, "SELECT edge_id FROM kg_edges WHERE src='zzz_probe'") == [("e_old",)]
+
+
+def test_handle_failure_rolls_back_row_replacement(tmp_path, monkeypatch):
+    """handle 抛异常时，删除与插入一起回滚，旧行不能丢。"""
+    cfg, db = _setup(tmp_path)
+    run_extract(
+        DAY, cfg, db_path=db, only=["events"],
+        llm=FakeLLM([json.dumps(PAYLOAD, ensure_ascii=False)]),
+    )
+    before = _query(db, "SELECT edge_id FROM kg_edges ORDER BY edge_id")
+
+    prompt_dir = cfg.root / "config" / "kg_prompts"
+    (prompt_dir / "boom@v1.md").write_text("BOOM", encoding="utf-8")
+
+    def _boom(_conn, _ctx, _payload):
+        raise RuntimeError("handler exploded")
+
+    probe = ChannelSpec(key="events", prompt="boom@v1.md", sources=("_CHAT",), handle=_boom)
+    monkeypatch.setattr(runner, "CHANNELS", tuple(probe if s.key == "events" else s for s in runner.CHANNELS))
+
+    result = run_extract(
+        DAY, cfg, db_path=db, force=True, llm=FakeLLM([json.dumps(PAYLOAD, ensure_ascii=False)]), only=["events"]
+    )
+
+    assert result.channels["events"]["status"] == "failed"
+    assert "handler exploded" in result.channels["events"]["error"]
+    assert _query(db, "SELECT edge_id FROM kg_edges ORDER BY edge_id") == before
+
+
+def test_run_extract_logs_start_end_and_material_breakdown(tmp_path, monkeypatch):
+    """一次运行必须有 run_start / run_end 日志，回答"跑了什么、素材从哪来、结果如何"。"""
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    class Capture:
+        def debug(self, event: str, **fields: Any) -> None:
+            events.append((event, fields))
+
+        def info(self, event: str, **fields: Any) -> None:
+            events.append((event, fields))
+
+        def warning(self, event: str, **fields: Any) -> None:
+            events.append((event, fields))
+
+        def error(self, event: str, **fields: Any) -> None:
+            events.append((event, fields))
+
+    monkeypatch.setattr(runner, "_LOG", Capture())
+    cfg, db = _setup(tmp_path)
+
+    result = run_extract(
+        DAY, cfg, db_path=db, only=["events"],
+        llm=FakeLLM([json.dumps(PAYLOAD, ensure_ascii=False)]),
+    )
+
+    start = next(fields for event, fields in events if event == "kg_extract_run_start")
+    end = next(fields for event, fields in events if event == "kg_extract_run_end")
+    assert start["day"] == DAY
+    assert start["run_id"] == result.run_id
+    assert start["channels"] == ["events"]
+    assert start["material_chars"] > 0
+    assert start["by_source_chars"]["_CHAT"] > 0
+    assert start["raw_hash"] == result.raw_hash
+    assert end["status"] == "ok"
+    assert end["rows"] == result.rows
+    assert end["channel_status"] == {"events": "ok"}
+    assert end["elapsed_ms"] >= 0
+
+
 def test_rerun_same_material_is_skipped(tmp_path):
     cfg, db = _setup(tmp_path)
     first = run_extract(DAY, cfg, db_path=db, llm=FakeLLM([json.dumps(PAYLOAD, ensure_ascii=False)]))
@@ -239,11 +500,29 @@ def test_hanging_channel_times_out_without_blocking_others(tmp_path, monkeypatch
     """单通道 LLM 永不返回 → 该通道记 failed 超时，其余通道照常落库（整次 partial）。
 
     这是挂死事故的回归护栏：没有超时兜底时 asyncio.gather 会无限等待，整轮抽取卡死。
+    超时也必须留下通道级日志（协程被取消，_extract_channel 自己的收尾日志不会执行）。
     """
     cfg, db = _setup(tmp_path)
     monkeypatch.setenv("KG_EXTRACT_CHANNEL_TIMEOUT", "0.05")
     prompt_dir = cfg.root / "config" / "kg_prompts"
     (prompt_dir / "zzz@v1.md").write_text("HANG", encoding="utf-8")
+
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    class Capture:
+        def debug(self, event: str, **fields: Any) -> None:
+            events.append((event, fields))
+
+        def info(self, event: str, **fields: Any) -> None:
+            events.append((event, fields))
+
+        def warning(self, event: str, **fields: Any) -> None:
+            events.append((event, fields))
+
+        def error(self, event: str, **fields: Any) -> None:
+            events.append((event, fields))
+
+    monkeypatch.setattr(runner, "_LOG", Capture())
 
     class _SelectiveLLM:
         async def ainvoke(self, messages: list[Any]) -> _Resp:
@@ -260,6 +539,21 @@ def test_hanging_channel_times_out_without_blocking_others(tmp_path, monkeypatch
     assert "超时" in result.channels["zzz_probe"]["error"]
     assert result.channels["events"]["status"] == "ok"
     assert result.status == "partial"
+
+    timed_out = [
+        fields for event, fields in events
+        if event == "kg_extract_channel" and fields.get("channel") == "zzz_probe"
+    ]
+    assert len(timed_out) == 1
+    assert timed_out[0]["status"] == "failed"
+    assert timed_out[0]["timeout_s"] == 0.05
+    assert timed_out[0]["prompt_chars"] > 0
+    assert timed_out[0]["error_type"] == "TimeoutError"
+    assert "超时" in timed_out[0]["error_message"]
+    assert any(
+        event == "kg_extract_channel_error" and fields.get("channel") == "zzz_probe"
+        for event, fields in events
+    )
 
 
 def test_unknown_channel_key_is_rejected(tmp_path):

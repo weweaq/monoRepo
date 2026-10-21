@@ -14,7 +14,7 @@ import gacore.langTrack.extract.runner as runner
 from gacore.langTrack.extract.contract import NO_QUESTION_RULE
 from gacore.langTrack.extract.runner import _extract_channel, _resolve_llm
 from gacore.langTrack.extract.types import ChannelSpec, ExtractContext
-from gacore.opencode_llm import OpencodeProviderError
+from gacore.opencode_llm import OpencodeEmptyResponse, OpencodeProviderError
 
 
 @pytest.fixture(autouse=True)
@@ -64,7 +64,7 @@ def _run(llm: FakeLLM):
 
 
 def test_opencode_question_is_retried_with_corrective_message() -> None:
-    llm = FakeLLM(["你要哪个方案？", '{"nodes": []}'])
+    llm = FakeLLM(["你要哪个方案？", '{"nodes": [{"node_id": "n1"}]}'])
 
     outcome = _run(llm)
 
@@ -181,6 +181,56 @@ def test_opencode_retries_in_band_5xx() -> None:
     assert outcome.extra["failure_reasons"] == ["transport:OpencodeProviderError"]
 
 
+def test_opencode_retries_empty_response() -> None:
+    """Empty assistant text is a transient free-tier flake, not a terminal failure."""
+    llm = FakeLLM([OpencodeEmptyResponse("stop", 0), '{"nodes": []}'])
+
+    outcome = _run(llm)
+
+    assert outcome.status == "ok"
+    assert outcome.extra["attempts"] == 2
+    assert outcome.extra["failure_reasons"] == ["transport:OpencodeEmptyResponse"]
+
+
+def test_transport_abort_logs_error_message_and_stack(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failed call must leave enough in app.jsonl to root-cause it without rerunning."""
+    events: list[tuple[str, dict[str, Any]]] = []
+
+    class Capture:
+        def debug(self, event: str, **fields: Any) -> None:
+            events.append((event, fields))
+
+        def info(self, event: str, **fields: Any) -> None:
+            events.append((event, fields))
+
+        def warning(self, event: str, **fields: Any) -> None:
+            events.append((event, fields))
+
+        def error(self, event: str, **fields: Any) -> None:
+            events.append((event, fields))
+
+    monkeypatch.setattr(runner, "_LOG", Capture())
+    llm = FakeLLM([RuntimeError("provider returned empty body")])
+
+    outcome = _run(llm)
+
+    assert outcome.status == "failed"
+    assert "RuntimeError" in outcome.error
+    assert "provider returned empty body" in outcome.error
+
+    attempt = next(fields for event, fields in events if event == "kg_extract_attempt")
+    assert attempt["action"] == "abort"
+    assert attempt["error_type"] == "RuntimeError"
+    assert attempt["error_message"] == "provider returned empty body"
+    assert "provider returned empty body" in attempt["stack_trace"]
+    assert attempt["context"]["channel"] == "test"
+
+    channel = next(fields for event, fields in events if event == "kg_extract_channel")
+    assert channel["status"] == "failed"
+    assert channel["error_type"] == "RuntimeError"
+    assert channel["error_message"] == "provider returned empty body"
+
+
 def test_opencode_does_not_retry_timeout() -> None:
     request = httpx.Request("POST", "http://opencode.test/session")
     llm = FakeLLM([httpx.ReadTimeout("slow", request=request)])
@@ -220,10 +270,16 @@ def test_per_attempt_audit_records_action_and_base(monkeypatch: pytest.MonkeyPat
     events: list[tuple[str, dict[str, Any]]] = []
 
     class Capture:
+        def debug(self, event: str, **fields: Any) -> None:
+            events.append((event, fields))
+
         def info(self, event: str, **fields: Any) -> None:
             events.append((event, fields))
 
         def warning(self, event: str, **fields: Any) -> None:
+            events.append((event, fields))
+
+        def error(self, event: str, **fields: Any) -> None:
             events.append((event, fields))
 
     monkeypatch.setattr(runner, "_LOG", Capture())
