@@ -20,6 +20,9 @@ from typing import Any, Final
 
 from gacore.config import Config
 from gacore.daily_info_pack import build_info_pack_report
+from gacore.jsonl_logger import get_logger
+
+_LOG = get_logger("langTrack.extract.material")
 
 # 测试注入点：monkeypatch 本名即可让 load_material 不触碰真实 12 源取数。
 _BUILD_REPORT_FN = build_info_pack_report
@@ -94,9 +97,18 @@ def _build_fresh(day: str, cfg: Config) -> dict[str, str]:
 
 def load_material(day: str, cfg: Config) -> Material:
     """装配当日素材；raw_hash 对"按源名排序后的拼装文本"取 sha256，同素材恒等。"""
-    by_source = _read_pack_detail(cfg, day) or _build_fresh(day, cfg)
+    detail = _read_pack_detail(cfg, day)
+    by_source = detail or _build_fresh(day, cfg)
     text = "\n\n".join(f"## {k}\n{v}" for k, v in sorted(by_source.items()))
     raw_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    _LOG.debug(
+        "kg_material_loaded",
+        day=day,
+        origin="pack_detail" if detail else "fresh_build",
+        sources=sorted(by_source),
+        chars=len(text),
+        by_source_chars={k: len(v) for k, v in sorted(by_source.items())},
+    )
     return Material(day=day, by_source=by_source, text=text, raw_hash=raw_hash)
 
 

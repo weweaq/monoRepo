@@ -130,3 +130,45 @@ def test_material_stats_reports_sources(tmp_path):
 
     assert stats["sources"] == ["_CHAT"]
     assert stats["chars"] > 0
+
+
+def test_load_material_logs_origin_and_source_sizes(tmp_path, monkeypatch):
+    """素材从哪来、各源多大要能进 app.jsonl——`_FILES` 25,806→424 的漂移靠这行定位。"""
+    cfg = _cfg(tmp_path)
+    _write_detail(cfg, "_CHAT", "- 一行")
+    events: list[tuple[str, dict]] = []
+
+    class Capture:
+        def debug(self, event: str, **fields) -> None:
+            events.append((event, fields))
+
+        def info(self, event: str, **fields) -> None:
+            events.append((event, fields))
+
+        def warning(self, event: str, **fields) -> None:
+            events.append((event, fields))
+
+        def error(self, event: str, **fields) -> None:
+            events.append((event, fields))
+
+    monkeypatch.setattr(mat, "_LOG", Capture())
+
+    mat.load_material(DAY, cfg)
+    line = next(fields for event, fields in events if event == "kg_material_loaded")
+    assert line["origin"] == "pack_detail"
+    assert line["sources"] == ["_CHAT"]
+    assert line["chars"] > 0
+    assert line["by_source_chars"].keys() == {"_CHAT"}
+    assert 0 < line["by_source_chars"]["_CHAT"] < line["chars"]
+
+    import shutil
+
+    shutil.rmtree(mat.pack_detail_dir(cfg, DAY))
+    monkeypatch.setattr(
+        mat, "_BUILD_REPORT_FN", lambda _day, _cfg: ("pack", [{"key": "_GIT", "detail_body": "git 详情"}])
+    )
+    events.clear()
+    mat.load_material(DAY, cfg)
+    line = next(fields for event, fields in events if event == "kg_material_loaded")
+    assert line["origin"] == "fresh_build"
+    assert line["sources"] == ["_GIT"]
