@@ -46,6 +46,19 @@ from gacore.frontends.qq import QQApp, _heartbeat_loop, _make_bot_class  # noqa:
 from gacore.heartbeat import Heartbeat  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _complete_botpy_fake(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the botpy stub used by the module under test to a complete one.
+
+    ``test_qq.py`` installs its own ``botpy`` stub (no ``Client``) into
+    ``sys.modules``; whichever stub is active when ``gacore.frontends.qq`` gets
+    imported becomes the module-global ``qq.botpy``. Building a bot class
+    (``_make_bot_class``) needs ``botpy.Client``, so patch it explicitly
+    instead of depending on collection order.
+    """
+    monkeypatch.setattr(qq, "botpy", _fake_botpy)
+
+
 def _read(root: Path) -> dict:
     return json.loads((root / "qq.json").read_text(encoding="utf-8"))
 
