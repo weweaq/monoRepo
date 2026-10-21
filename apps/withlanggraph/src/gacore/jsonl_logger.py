@@ -21,6 +21,7 @@ import logging
 import os
 import sys
 import threading
+import traceback
 import uuid
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
@@ -160,15 +161,58 @@ class Logger:
         message: str,
         *,
         error_type: str | None = None,
+        error_message: str | None = None,
         stack_trace: str | None = None,
         context: Mapping[str, object] | None = None,
         **fields: object,
     ) -> None:
-        """Emit an ERROR line carrying error_type, stack_trace and context alongside any fields."""
+        """Emit an ERROR line carrying error_type, error_message, stack_trace and context."""
         self._emit(
             logging.ERROR,
             message,
-            {"error_type": error_type, "stack_trace": stack_trace, "context": context, **fields},
+            {
+                "error_type": error_type,
+                "error_message": error_message,
+                "stack_trace": stack_trace,
+                "context": context,
+                **fields,
+            },
+        )
+
+    def exception(
+        self,
+        message: str,
+        *,
+        exc: BaseException | None = None,
+        error_type: str | None = None,
+        context: Mapping[str, object] | None = None,
+        **fields: object,
+    ) -> None:
+        """Emit an ERROR line with a real traceback for an exception.
+
+        ``exc`` defaults to the exception currently being handled (``sys.exc_info()``).
+        Use this instead of ``error(..., stack_trace=str(e))`` so triage sees the stack.
+        """
+        target = exc if exc is not None else sys.exc_info()[1]
+        if target is not None:
+            error_type = error_type or type(target).__name__
+            error_message = str(target)
+            stack_trace = "".join(
+                traceback.format_exception(type(target), target, target.__traceback__)
+            )
+        else:
+            error_message = None
+            stack_trace = None
+        self._emit(
+            logging.ERROR,
+            message,
+            {
+                "error_type": error_type,
+                "error_message": error_message,
+                "stack_trace": stack_trace,
+                "context": context,
+                **fields,
+            },
         )
 
     def _emit(self, level: int, message: str, fields: Mapping[str, object]) -> None:
