@@ -257,6 +257,63 @@ def test_ingest_failure_logs_once(tmp_path, monkeypatch):
     assert crashed == []
     assert "Traceback (most recent call last)" in failed[-1]["stack_trace"]
     assert failed[-1]["error_type"] == "RuntimeError"
+    assert failed[-1]["client_device_id"] == "dev1"
+    assert "duration_ms" in failed[-1]
+    storage.close()
+
+
+def test_ingest_failure_before_storage_still_logs_once(tmp_path, monkeypatch):
+    """设备归一化阶段就崩时同样要留下一行（老坑：try 之外抛异常 → 整批零日志）。"""
+    monkeypatch.setattr(server_mod, "_ETL_INTERVAL_SECONDS", 3600)
+    monkeypatch.setattr(server_mod, "_ETL_TIMEOUT_SECONDS", 3600)
+
+    def boom(device_id: str) -> str:
+        raise RuntimeError("alias boom")
+
+    monkeypatch.setattr(server_mod, "canonical_device_id", boom)
+    storage = Storage(tmp_path / "langTrack.db")
+    app = create_app(storage, heartbeat_dir=tmp_path / "run")
+    payload = {
+        "device_id": "dev1", "batch_id": "log-alias-boom", "client_ts": 1000,
+        "events": [{"type": "usage", "ts": 1000, "data": {"pkg": "com.x"}}],
+    }
+    with TestClient(app, raise_server_exceptions=False) as c:
+        r = c.post("/ingest", json=payload)
+    assert r.status_code == 500
+
+    logs = _read_jsonl_logs()
+    failed = [x for x in logs if x.get("message") == "ingest failed" and x.get("batch_id") == "log-alias-boom"]
+    crashed = [x for x in logs if x.get("message") == "http request crashed" and x.get("path") == "/ingest"]
+    assert len(failed) == 1
+    assert crashed == []
+    assert failed[-1]["error_type"] == "RuntimeError"
+    storage.close()
+
+
+def test_ingest_broken_alias_file_degrades_gracefully(tmp_path, monkeypatch):
+    """别名文件被写坏（根节点不是对象）时降级为“无别名”，不能让整批 500 或零日志。"""
+    from gacore.langTrack import etl as _etl
+
+    monkeypatch.setattr(server_mod, "_ETL_INTERVAL_SECONDS", 3600)
+    monkeypatch.setattr(server_mod, "_ETL_TIMEOUT_SECONDS", 3600)
+    alias_file = tmp_path / "device_aliases.json"
+    alias_file.write_text('["broken"]', encoding="utf-8")
+    monkeypatch.setattr(_etl, "DEVICE_ALIASES_PATH", alias_file)
+
+    storage = Storage(tmp_path / "langTrack.db")
+    app = create_app(storage, heartbeat_dir=tmp_path / "run")
+    payload = {
+        "device_id": "dev1", "batch_id": "log-alias-broken", "client_ts": 1000,
+        "events": [{"type": "usage", "ts": 1000, "data": {"pkg": "com.x"}}],
+    }
+    with TestClient(app) as c:
+        r = c.post("/ingest", json=payload)
+    assert r.status_code == 200
+    assert r.json()["inserted"] == 1
+
+    logs = _read_jsonl_logs()
+    hit = [x for x in logs if x.get("message") == "ingest completed" and x.get("batch_id") == "log-alias-broken"]
+    assert len(hit) == 1
     storage.close()
 
 

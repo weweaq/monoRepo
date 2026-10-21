@@ -12,7 +12,7 @@ import time
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse
 
 from gacore.heartbeat import DEFAULT_INTERVAL_SECONDS, Heartbeat, run_dir
@@ -131,7 +131,15 @@ def _try_start_etl(trigger: str = "manual") -> bool:
                 _ETL_STATE["last_trigger"] = trigger
                 _ETL_STATE["last_duration_ms"] = round((time.perf_counter() - started) * 1000, 1)
 
-    threading.Thread(target=_task, daemon=True, name="langTrack-etl-manual").start()
+    try:
+        threading.Thread(target=_task, daemon=True, name="langTrack-etl-manual").start()
+    except Exception as exc:
+        # 线程起不来（如线程资源耗尽）：必须把 running 复位，否则 ETL 永远显示 busy。
+        with _ETL_STATE_LOCK:
+            _ETL_STATE["running"] = False
+            _ETL_STATE["last_error"] = f"thread start failed: {type(exc).__name__}: {exc}"
+        logger.exception("ETL thread start failed", exc=exc, trigger=trigger)
+        return False
     return True
 
 
@@ -186,8 +194,10 @@ def create_app(storage: Storage, *, heartbeat_dir: Path | None = None) -> FastAP
         try:
             response = await call_next(request)
         except Exception as exc:
-            # /ingest 的异常由路由内的 `ingest failed` 归属，避免一行错误两份 ERROR。
-            if request.url.path != "/ingest":
+            # /ingest 的异常由路由内的 `ingest failed` 归属，避免一行错误两份 ERROR；
+            # 但若路由没来得及归属（ingest_logged 未置位），这里必须补一行，否则该批次无日志。
+            ingest_logged = getattr(request.state, "ingest_logged", False)
+            if request.url.path != "/ingest" or not ingest_logged:
                 logger.exception(
                     "http request crashed",
                     exc=exc,
@@ -274,13 +284,14 @@ def create_app(storage: Storage, *, heartbeat_dir: Path | None = None) -> FastAP
             conn.close()
 
     @app.post("/ingest")
-    def ingest(req: IngestRequest) -> dict:
+    def ingest(req: IngestRequest, request: Request) -> dict:
         started = time.perf_counter()
         received_at = int(time.time() * 1000)
         client_device_id = req.device_id
-        # 入库即归一别名设备（Task 12b）：原始层只存主设备，ETL 归并仅兜底历史行
-        device_id = canonical_device_id(client_device_id)
+        device_id = client_device_id
         try:
+            # 入库即归一别名设备（Task 12b）：原始层只存主设备，ETL 归并仅兜底历史行
+            device_id = canonical_device_id(client_device_id)
             storage.upsert_device(device_id, req.client_ts)
             inserted = storage.ingest_batch(
                 req.batch_id,
@@ -289,12 +300,16 @@ def create_app(storage: Storage, *, heartbeat_dir: Path | None = None) -> FastAP
                 [(ev.ts, ev.type, ev.data) for ev in req.events],
             )
         except Exception as exc:
+            # 先置位再落日志：中间件据此判断这批是否已归属，避免同一错误两份 ERROR。
+            request.state.ingest_logged = True
             logger.exception(
                 "ingest failed",
                 exc=exc,
                 batch_id=req.batch_id,
                 device_id=device_id,
+                client_device_id=client_device_id,
                 event_count=len(req.events),
+                duration_ms=round((time.perf_counter() - started) * 1000, 1),
             )
             raise
         logger.info(

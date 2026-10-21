@@ -1706,7 +1706,14 @@ def _load_device_aliases() -> dict[str, str]:
 
         return {}
 
-    return {str(k).strip(): str(v).strip() for k, v in (data or {}).items() if k and v}
+    # 文件是手改的：根节点不是对象时按“无别名”处理，绝不让 /ingest 每批 500。
+    if not isinstance(data, dict):
+
+        logger.warning("device_aliases.json root is not an object; ignored", alias_path=str(DEVICE_ALIASES_PATH))
+
+        return {}
+
+    return {str(k).strip(): str(v).strip() for k, v in data.items() if k and v}
 
 
 
@@ -2620,6 +2627,8 @@ def _run_impl(db_path: Path = DB_PATH, device_id: str | None = None, run_geocode
 
             print(f"[etl] 增量 regeo 编码失败(不影响 ETL): {e}")
 
+            logger.warning("etl.step.failed", step="geocode", error_type=type(e).__name__, error_message=str(e))
+
     # L3：增量路径规划补路（仅未编码新移动段，单次上限节流；失败跳过不阻塞）
 
     if run_route:
@@ -2639,6 +2648,8 @@ def _run_impl(db_path: Path = DB_PATH, device_id: str | None = None, run_geocode
         except Exception as e:
 
             print(f"[etl] 增量补路失败(不影响 ETL): {e}")
+
+            logger.warning("etl.step.failed", step="route", error_type=type(e).__name__, error_message=str(e))
 
     # L3：路线变化事件（复用 anomalies 叙事表，依赖 trips 已完成补路）
 
@@ -2681,6 +2692,8 @@ def _run_impl(db_path: Path = DB_PATH, device_id: str | None = None, run_geocode
         except Exception as e:
             print(f"[etl] 沿途 POI 编码失败(不影响 ETL): {e}")
 
+            logger.warning("etl.step.failed", step="poi", error_type=type(e).__name__, error_message=str(e))
+
     # A① 契约覆盖校验：期望事件类型 vs 实际到达（全量重建，写在最后）
     conn = sqlite3.connect(db_path)
     n_cov = build_contract_coverage(conn)
@@ -2700,7 +2713,10 @@ def _run_impl(db_path: Path = DB_PATH, device_id: str | None = None, run_geocode
     try:
         table_counts = _collect_table_counts(conn)
         watermarks = _read_watermarks(conn)
-        max_event_ts = conn.execute("SELECT MAX(ts) FROM events").fetchone()[0]
+        try:
+            max_event_ts = conn.execute("SELECT MAX(ts) FROM events").fetchone()[0]
+        except sqlite3.OperationalError:
+            max_event_ts = None
     finally:
         conn.close()
 
