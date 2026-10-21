@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -280,3 +281,23 @@ def test_lifespan_writes_server_heartbeat(tmp_path, monkeypatch):
     data = json.loads((tmp_path / "run" / "langtrack_server.json").read_text(encoding="utf-8"))
     assert data["state"] == "stopped"
     storage.close()
+
+
+def test_etl_timeout_logs_attribution(tmp_path, monkeypatch):
+    """ETL 子进程超时被 kill：父进程留下权威的 `ETL timeout` 行（trigger/timeout_sec/stderr_tail）。"""
+    monkeypatch.setattr(server_mod, "_ETL_TIMEOUT_SECONDS", 7)
+
+    def raise_timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(cmd="etl", timeout=7, output=b"", stderr=b"boom stderr")
+
+    monkeypatch.setattr("gacore.langTrack.server.subprocess.run", raise_timeout)
+    assert server_mod._run_etl_once(trigger="periodic") is False
+
+    hit = [x for x in _read_jsonl_logs() if x.get("message") == "ETL timeout"]
+    assert hit, "expected an `ETL timeout` line"
+    last = hit[-1]
+    assert last["trigger"] == "periodic"
+    assert last["timeout_sec"] == 7
+    assert last["duration_ms"] >= 0
+    assert "boom stderr" in last["stderr_tail"]
+    assert "timeout" in (server_mod._ETL_STATE["last_error"] or "")
