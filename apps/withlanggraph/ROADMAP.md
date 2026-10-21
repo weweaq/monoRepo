@@ -1590,3 +1590,25 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 **偏差说明**：未做 ops CLI / 深度 `/health` / 日志保留策略（列 P1/P2 待办）；架构图 `HB` 节点放 `OUT` 子图（心跳跨四个组件，非 langTrack 专属）。
 
 **待办**：P1 ops CLI（一条命令汇总四个心跳 + 最近 ETL 状态）；P1 `/health` 深度页（心跳新鲜度 / ETL 结果 / ingest 失败）；P1 `/etl/status` 不把 ETL stderr 原文暴露到局域网；P1 `stack_trace` 密钥脱敏；P2 日志保留与心跳历史归档；P2 `data/run/` 目录 README（R11）。详见 `docs/langTrack-roadmap.md` 与 `docs/observability-design.md`。
+
+## [2026-10-21] 可观测性 P0：组件心跳 + 服务端/ETL 日志补齐
+
+**背景**：当日 `apps/withlanggraph/logs/2026-10-21/app.jsonl` 里 `module=langTrack.server` **0 行**（该文件当日 422 行：`langTrack.extract` 296 / `langTrack.etl` 49 / `scheduler` 9），四个长驻组件（main / scheduler / qq / langtrack_server）零存活信号——「进程死了」与「活着但没产出」无法区分；ETL 子进程超时被 kill 时父进程也无归属日志。详见 `docs/langTrack-roadmap.md` 同日记录。
+
+**已完成**（12 个提交，`fcdfb76`→`06ba779`，逐条见 `docs/langTrack-roadmap.md` 同日记录）：
+- `src/gacore/heartbeat.py`（新增）：`Heartbeat` 原子写组件心跳 JSON（`data/run/<component>.json`，`GACORE_RUN_DIR` 可覆盖）；写失败不抛（60s 节流 WARNING）；`beat(state=None)` 保留上一状态。
+- `src/gacore/jsonl_logger.py`：`Logger.exception` 输出真实栈（`error_type` / `error_message` / `stack_trace`）。
+- `src/gacore/scheduler.py`：`run_loop` 支持 `stop_event` 优雅停机 + `busy` 心跳 + 崩溃 `stop(state="error")`（捕 `BaseException`）+ `on_scheduler_done` 回调；`Job finished` 补 `status` / `error_type` / `error_message`。
+- `src/gacore/frontends/qq.py`：`connecting` / `reconnecting(retry_in_sec)` / `running(connected_at)` 三态心跳（`connected_at` 存 `QQApp._hb_detail`，每拍都带）；重连异常改用 `logger.exception`。
+- `src/gacore/langTrack/server.py`：日志出口换 `jsonl_logger`；`/ingest` 记 `ingest completed` / `ingest failed`（带真栈，恒写 `client_device_id` / `duration_ms`）；中间件记 `http request failed` / `http request crashed`（`/ingest` 按 `request.state.ingest_logged` 兜底，杜绝零日志批次）；ETL 子进程归属 `periodic ETL finished|failed` / `ETL timeout` / `periodic ETL crashed`（`trigger` 区分 manual / periodic）；lifespan 起 `langtrack_server` 心跳。
+- `src/gacore/langTrack/etl.py`：`etl.run.started|finished|failed|interrupted` 四行运行摘要 + metrics（表计数 / 水位线 / 耗时）+ 子步失败 `etl.step.failed`。
+- `start.py`：main 心跳 + scheduler 结束回调 + 优雅停机（收尾无条件执行）。
+- 测试：`test_heartbeat.py` / `test_scheduler_heartbeat.py` / `test_scheduler_done_callback.py` / `test_qq_heartbeat.py` / `test_jsonl_logger_exception.py` / `test_langTrack_etl_summary.py` / `test_log_isolation.py`（新增），`test_scheduler.py` / `test_scheduler_extract_job.py` / `test_langTrack_server.py`（改造）。
+
+**实测**：单文件与组合测试全绿（scheduler 三件套 89、ETL 回归 33、server 18、qq 4、heartbeat 8、etl summary 3、isolation 2、logger exception 4）；`ruff check apps packages tests` 全绿；端到端冒烟（临时库 + 临时心跳目录 + 临时日志根）：ETL 失败打出 `etl.run.failed` 真 traceback、成功打出 `etl.run.finished`（`status=ok` + 全 metrics）；server `/ingest` → `{"inserted":1}`、`/health` → ok、`data/run/langtrack_server.json` 落盘（`state=running`）、日志出 `ingest completed`；强杀后心跳停更（stale 生效）；全量 `uv run pytest apps/withlanggraph/tests -q` 全绿。
+
+**检视**：4 个 general 子 agent 并行检视（心跳语义 / server+ETL / 测试隔离 / 文档一致性）。心跳语义组 PASS；server+ETL 组 FAIL 1 个 blocking（`/ingest` 在别名文件损坏时零日志）已修（`f0ec494`）并补 3 条回归测试；文档一致性组 FAIL 11 个 blocking（证据不可复现 / 符号与消息名对不上 / 状态枚举漏 `connecting` / tech 状态机有代码里不存在的边）已全部改正；检视提到的非阻塞项（QQ `connected_at` 被周期心跳冲掉、`run_loop` 只捕 `Exception`、`start.py` 收尾可能被 `CancelledError` 跳过、`json.dumps` 缺 `default=str`、scheduler 长行）已随 `06ba779` 一并修复。
+
+**偏差说明**：未做 ops CLI / 深度 `/health` / 日志保留策略（列 P1/P2 待办）；架构图 `HB` 节点放 `OUT` 子图（心跳跨四个组件，非 langTrack 专属）。
+
+**待办**：P1 ops CLI（一条命令汇总四个心跳 + 最近 ETL 状态）；P1 `/health` 深度页（心跳新鲜度 / ETL 结果 / ingest 失败）；P1 `/etl/status` 不把 ETL stderr 原文暴露到局域网；P1 `stack_trace` 密钥脱敏；P2 日志保留与心跳历史归档；P2 `data/run/` 目录 README（R11）。详见 `docs/langTrack-roadmap.md` 与 `docs/observability-design.md`。

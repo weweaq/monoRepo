@@ -41,6 +41,10 @@ apps/withlanggraph/gacore.log.err
 Thumbs.db
 .DS_Store
 
+# 仓库体检 / SRE 运维报告（按日期持续产出的归档记录，不入库）
+apps/withlanggraph/docs/dailyCheck/
+docs/sre/
+
 # TRAE html-share 运行时共享资源（生成产物，非源码）
 .trae-html-share-packages/
 **_shared/
