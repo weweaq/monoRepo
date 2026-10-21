@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import types
 from pathlib import Path
 
 import pytest
@@ -22,6 +23,16 @@ def _read_jsonl_logs() -> list[dict]:
             if line.strip():
                 out.append(json.loads(line))
     return out
+
+
+@pytest.fixture(autouse=True)
+def _isolated_device_aliases(tmp_path, monkeypatch):
+    """Never read the developer's real data/device_aliases.json (machine-state coupling)."""
+    from gacore.langTrack import etl as _etl
+
+    alias_file = tmp_path / "device_aliases.json"
+    alias_file.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(_etl, "DEVICE_ALIASES_PATH", alias_file)
 
 
 @pytest.fixture
@@ -208,6 +219,8 @@ def test_ingest_emits_completed_log(client):
     assert hit[0]["deduplicated"] is False
     assert hit[0]["client_device_id"] is None
     assert "duration_ms" in hit[0]
+    # 不记事件 payload：只有条数与 ID，正文（com.x）绝不能进日志。
+    assert "com.x" not in json.dumps(hit[0], ensure_ascii=False)
 
 
 def test_ingest_alias_logs_client_device_id(client, tmp_path, monkeypatch):
@@ -347,7 +360,16 @@ def test_etl_timeout_logs_attribution(tmp_path, monkeypatch):
     def raise_timeout(*args, **kwargs):
         raise subprocess.TimeoutExpired(cmd="etl", timeout=7, output=b"", stderr=b"boom stderr")
 
-    monkeypatch.setattr("gacore.langTrack.server.subprocess.run", raise_timeout)
+    # 只替换 server 模块用到的 subprocess 表面，不动 stdlib 模块本身。
+    monkeypatch.setattr(
+        server_mod,
+        "subprocess",
+        types.SimpleNamespace(
+            run=raise_timeout,
+            CREATE_NO_WINDOW=subprocess.CREATE_NO_WINDOW,
+            TimeoutExpired=subprocess.TimeoutExpired,
+        ),
+    )
     assert server_mod._run_etl_once(trigger="periodic") is False
 
     hit = [x for x in _read_jsonl_logs() if x.get("message") == "ETL timeout"]

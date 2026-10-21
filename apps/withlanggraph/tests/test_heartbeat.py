@@ -45,6 +45,9 @@ def test_start_beat_stop_writes_contract(tmp_path: Path) -> None:
     fourth = _read(root)
     assert fourth["state"] == "stopped"
 
+    # Atomic write: the temp file must never be left behind.
+    assert list(root.glob(".*.tmp")) == []
+
 
 def test_default_stale_after_has_floor_of_60(tmp_path: Path) -> None:
     hb = Heartbeat("main", root=tmp_path / "run", interval_sec=10)
@@ -70,6 +73,32 @@ def test_write_failure_does_not_raise(tmp_path: Path) -> None:
     hb.start()
     hb.beat(state="running")
     hb.stop()  # none of these may raise
+
+
+def test_write_failure_logs_one_throttled_warning(tmp_path: Path, monkeypatch) -> None:
+    """写失败要落一条 WARNING（含 error_type/error_message），且 60s 内只记一次。"""
+    from gacore import heartbeat as heartbeat_mod
+
+    emitted: list[dict] = []
+
+    class _Capture:
+        def warning(self, message: str, **fields: object) -> None:
+            emitted.append({"message": message, **fields})
+
+    monkeypatch.setattr(heartbeat_mod, "logger", _Capture())
+
+    blocker = tmp_path / "run"
+    blocker.write_text("not a directory", encoding="utf-8")
+    hb = Heartbeat("scheduler", root=blocker)
+    hb.start()
+    hb.beat(state="running")
+    hb.stop()  # 三次失败，但节流后只应有一条 WARNING
+
+    assert len(emitted) == 1
+    assert emitted[0]["message"] == "heartbeat write failed"
+    assert emitted[0]["component"] == "scheduler"
+    assert emitted[0]["error_type"]
+    assert emitted[0]["error_message"]
 
 
 def test_run_dir_env_override(tmp_path: Path, monkeypatch) -> None:

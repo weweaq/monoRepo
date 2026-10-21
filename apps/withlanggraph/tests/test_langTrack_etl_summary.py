@@ -25,7 +25,12 @@ def _read_logs() -> list[dict]:
 def test_run_logs_started_and_finished(tmp_path, monkeypatch):
     monkeypatch.setattr(etl, "_run_impl", lambda *a, **k: {"events": 3, "sessions": 1})
     etl.run(db_path=tmp_path / "x.db", run_geocode=False, run_route=False, run_poi=False)
-    logs = [x for x in _read_logs() if x.get("module") == "langTrack.etl"]
+    # 只看本次 db 的行：共享日志目录里别的用例也会写 etl.run.*。
+    logs = [
+        x
+        for x in _read_logs()
+        if x.get("module") == "langTrack.etl" and x.get("db_path") == str(tmp_path / "x.db")
+    ]
     started = [x for x in logs if x["message"] == "etl.run.started"][-1]
     finished = [x for x in logs if x["message"] == "etl.run.finished"][-1]
     assert started["run_id"] == finished["run_id"]
@@ -42,7 +47,11 @@ def test_run_logs_failure_with_traceback(tmp_path, monkeypatch):
     monkeypatch.setattr(etl, "_run_impl", boom)
     with pytest.raises(RuntimeError):
         etl.run(db_path=tmp_path / "x.db")
-    failed = [x for x in _read_logs() if x["message"] == "etl.run.failed"][-1]
+    failed = [
+        x
+        for x in _read_logs()
+        if x["message"] == "etl.run.failed" and x.get("db_path") == str(tmp_path / "x.db")
+    ][-1]
     assert failed["error_type"] == "RuntimeError"
     assert failed["error_message"] == "boom"
     assert "Traceback (most recent call last)" in failed["stack_trace"]

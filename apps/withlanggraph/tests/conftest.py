@@ -12,6 +12,7 @@ internally, so the fakes must accept (and ignore) that call and keep returning t
 from __future__ import annotations
 
 import os
+import shutil
 import tempfile
 import uuid
 from collections.abc import Callable
@@ -39,6 +40,14 @@ from gacore import jsonl_logger as _jsonl_logger  # noqa: E402
 
 # 若在 conftest 生效前已有模块按旧环境建过 sink，显式重置成按测试根目录重建。
 _jsonl_logger._sink = None
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _cleanup_test_log_root():
+    """会话结束后删掉临时日志目录，别在 %TEMP% 里越堆越多。"""
+    root = os.environ["GACORE_LOG_ROOT"]
+    yield
+    shutil.rmtree(root, ignore_errors=True)
 
 
 class BindableFakeMessagesListChatModel(FakeMessagesListChatModel):
