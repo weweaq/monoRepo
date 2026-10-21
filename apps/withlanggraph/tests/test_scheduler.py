@@ -46,6 +46,25 @@ def _no_real_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("gacore.scheduler._sync_episodic", lambda cfg, for_day: None)
 
 
+def _capture_scheduler_logs(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    """Capture scheduler log records (message + fields) through a real Logger.
+
+    Patching `Logger._emit` (not `logger.info`) keeps the real field derivation —
+    `exception()` still builds `stack_trace` from the traceback, which is what the
+    assertions need to see.
+    """
+    from gacore.jsonl_logger import Logger
+
+    captured: list[dict] = []
+
+    def _fake_emit(self: Logger, level: int, message: str, fields: dict) -> None:
+        captured.append({"message": message, **fields})
+
+    monkeypatch.setattr(Logger, "_emit", _fake_emit)
+    monkeypatch.setattr("gacore.scheduler.logger", Logger("test_scheduler_capture"))
+    return captured
+
+
 def test_daily_job_success_syncs_episodic(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """日报类 job 成功后会把当日 daily note 同步进 episodic 向量表（接线不回退）。"""
     cfg = Config.for_tests(tmp_path)
@@ -444,6 +463,42 @@ class TestRunJob:
         assert result.exit_reason == "AGENT_ERROR"
         assert "LLM exploded" in (result.error or "")
         assert result.output_path is not None
+
+    def test_job_finished_reports_status_and_error_fields(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Given a successful job, When run_job, Then Job finished carries status/error fields."""
+        events = _capture_scheduler_logs(monkeypatch)
+        cfg = Config.for_tests(tmp_path)
+        job = Job(name="demo", schedule="09:00", prompt="p")
+        result = run_job(job, cfg, graph_runner=lambda *a: "CURRENT_TASK_DONE")
+        assert result.error is None
+        finished = [f for f in events if f["message"] == "Job finished"][-1]
+        assert finished["status"] == "ok"
+        assert finished["error_type"] is None
+        assert finished["error_message"] is None
+
+    def test_job_failed_logs_real_traceback_and_error_fields(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Given a runner that raises, When run_job, Then Job failed carries a real traceback."""
+        events = _capture_scheduler_logs(monkeypatch)
+        cfg = Config.for_tests(tmp_path)
+        job = Job(name="demo", schedule="09:00", prompt="p")
+
+        def exploding_runner(prompt: str, cfg: Config, max_turns: int) -> str | None:
+            raise RuntimeError("boom")
+
+        result = run_job(job, cfg, graph_runner=exploding_runner)
+        assert result.error is not None
+        failed = [f for f in events if f["message"] == "Job failed"][-1]
+        assert "Traceback (most recent call last)" in failed["stack_trace"]
+        assert failed["error_type"] == "RuntimeError"
+        assert failed["error_message"] == "boom"
+        finished = [f for f in events if f["message"] == "Job finished"][-1]
+        assert finished["status"] == "error"
+        assert finished["error_type"] == "RuntimeError"
+        assert finished["error_message"] == "boom"
 
     def test_run_job_writes_daily_note_bullet(self, tmp_path: Path) -> None:
         """Given a successful job, When run_job, Then a bullet is appended to today's daily note."""

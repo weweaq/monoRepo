@@ -18,6 +18,7 @@ from gacore.config import Config
 from gacore.langTrack.extract import RunResult
 from gacore.scheduler import (
     Job,
+    ScheduleResult,
     _log_extract_failure,
     load_jobs,
     load_state,
@@ -94,6 +95,10 @@ class _RecordingLogger:
 
     def error(self, msg: str, **kw: object) -> None:
         self._record("error", msg, **kw)
+
+    def exception(self, msg: str, *, exc: BaseException | None = None, **kw: object) -> None:
+        derived = {} if exc is None else {"error_type": type(exc).__name__, "error_message": str(exc)}
+        self._record("error", msg, exc=exc, **derived, **kw)
 
     def warning(self, msg: str, **kw: object) -> None:
         self._record("warning", msg, **kw)
@@ -252,7 +257,19 @@ class TestRunLoopExtractDispatch:
         ran_job: list[str] = []
 
         monkeypatch.setattr("gacore.scheduler.EXTRACT_POOL", _FakePool(submitted, futures))
-        monkeypatch.setattr("gacore.scheduler.run_job", lambda job, *a, **k: ran_job.append(job.name))
+
+        def fake_run_job(job: Job, *a: object, **k: object) -> ScheduleResult:
+            ran_job.append(job.name)
+            return ScheduleResult(
+                job_name=job.name,
+                exit_reason="done",
+                output_path="",
+                duration_seconds=0.1,
+                error=None,
+                reply="",
+            )
+
+        monkeypatch.setattr("gacore.scheduler.run_job", fake_run_job)
 
         jobs_run = run_loop(
             cfg=cfg,

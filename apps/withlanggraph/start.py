@@ -13,7 +13,9 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import functools
 import sys
+import threading
 
 from gacore.config import Config, load_dotenv
 from gacore.frontends.qq import (
@@ -25,8 +27,9 @@ from gacore.frontends.qq import (
     _redirect_log,
     build_config,
 )
+from gacore.heartbeat import DEFAULT_INTERVAL_SECONDS, Heartbeat, run_dir
 from gacore.jsonl_logger import get_logger
-from gacore.scheduler import run_loop
+from gacore.scheduler import on_scheduler_done, run_loop
 
 logger = get_logger("start")
 
@@ -35,22 +38,44 @@ async def _main() -> None:
     """Start scheduler in a background thread, then run QQ Bot on the main loop."""
     cfg = Config.default()
 
+    # Main heartbeat: loop-driven via an asyncio task, so a wedged event loop
+    # stops beating and is detected as stale instead of looking alive.
+    heartbeat = Heartbeat("main", root=run_dir(cfg.root))
+    heartbeat.start(launcher="start.py")
+    heartbeat.beat(state="running", launcher="start.py")
+
+    async def _beat_main() -> None:
+        while True:
+            await asyncio.sleep(DEFAULT_INTERVAL_SECONDS)
+            heartbeat.beat(launcher="start.py")
+
+    beat_task = asyncio.create_task(_beat_main())
+
     # Scheduler runs in a helper thread (run_loop is synchronous, uses time.sleep).
-    scheduler_task = asyncio.create_task(asyncio.to_thread(run_loop, cfg))
+    # Graceful shutdown uses stop_event: asyncio cannot cancel the worker thread.
+    stop_event = threading.Event()
+    scheduler_task = asyncio.create_task(asyncio.to_thread(run_loop, cfg, stop_event=stop_event))
+    scheduler_task.add_done_callback(functools.partial(on_scheduler_done, stop_event=stop_event))
     logger.info("Scheduler started (background thread)")
 
-    # QQ Bot occupies the main asyncio event loop.
-    graph = await build_config()
-    app = QQApp(graph)
-    logger.info("QQ frontend starting")
     try:
+        # QQ Bot occupies the main asyncio event loop.
+        graph = await build_config()
+        app = QQApp(graph)
+        logger.info("QQ frontend starting")
         await app.start()
     finally:
-        scheduler_task.cancel()
+        stop_event.set()
         try:
             await scheduler_task
+        except Exception:  # noqa: BLE001 — failure already logged by the done callback
+            pass
+        beat_task.cancel()
+        try:
+            await beat_task
         except asyncio.CancelledError:
-            logger.info("Scheduler stopped")
+            pass
+        heartbeat.stop()
 
 
 def main() -> None:

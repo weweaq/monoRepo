@@ -26,6 +26,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping
@@ -37,6 +38,7 @@ from typing import Final
 
 from gacore.config import Config, load_dotenv
 from gacore.feedback import save_delivered, stamp_report_bullets
+from gacore.heartbeat import Heartbeat, run_dir
 from gacore.jsonl_logger import get_logger
 from gacore.langTrack.extract import RunResult, run_extract
 from gacore.proactive import PROACTIVE_POOL, proactive_due, run_proactive_job
@@ -186,22 +188,14 @@ def _log_proactive_failure(fut: object) -> None:
     """Log a top-level exception from a proactive worker (L1: never swallow)."""
     exc = fut.exception() if hasattr(fut, "exception") else None  # type: ignore[attr-defined]
     if exc is not None:
-        logger.error(
-            "proactive job raised top-level exception",
-            error_type=type(exc).__name__,
-            stack_trace=str(exc),
-        )
+        logger.exception("proactive job raised top-level exception", exc=exc)
 
 
 def _log_extract_failure(fut: object) -> None:
     """Log a top-level exception from an extract worker (L1: never swallow)."""
     exc = fut.exception() if hasattr(fut, "exception") else None  # type: ignore[attr-defined]
     if exc is not None:
-        logger.error(
-            "kg-extract job raised top-level exception",
-            error_type=type(exc).__name__,
-            stack_trace=str(exc),
-        )
+        logger.exception("kg-extract job raised top-level exception", exc=exc)
 
 
 def run_extract_job(job: Job, cfg: Config, for_day: str | None = None) -> RunResult | None:
@@ -237,13 +231,7 @@ def run_extract_job(job: Job, cfg: Config, for_day: str | None = None) -> RunRes
         )
         return result
     except Exception as e:  # noqa: BLE001 — worker must not leak the exception to the pool
-        logger.error(
-            "kg-extract failed",
-            job=job.name,
-            day=day,
-            error_type=type(e).__name__,
-            stack_trace=str(e),
-        )
+        logger.exception("kg-extract failed", exc=e, job=job.name, day=day)
         return None
 
 
@@ -510,6 +498,8 @@ def run_job(
     name = job.name
     logger.info("Job started", job=name, schedule=job.schedule)
     error: str | None = None
+    error_type: str | None = None
+    error_message: str | None = None
     reply = ""
     raw_reply = ""
     exit_reason: str | None = None
@@ -543,7 +533,9 @@ def run_job(
             break
     except Exception as e:  # noqa: BLE001 — scheduler must not crash on one job failure
         error = f"{type(e).__name__}: {e}"
-        logger.error("Job failed", job=name, error_type=type(e).__name__, stack_trace=str(e))
+        error_type = type(e).__name__
+        error_message = str(e)
+        logger.exception("Job failed", exc=e, job=name, error=error)
         exit_reason = "AGENT_ERROR"
 
     # 完成性校验：模型末条消息仅为 summary/工具DSML 残渣（INCOMPLETE_REPLY）或为空
@@ -554,9 +546,13 @@ def run_job(
             "INCOMPLETE_REPLY: 模型末条消息仅为 <summary>/工具调用DSML 残渣，"
             "未产出可交付的日报正文"
         )
+        error_type = exit_reason
+        error_message = error
         logger.warning("Job reply incomplete; marked as failed", job=name, exit_reason=exit_reason)
     elif error is None and exit_reason == "EMPTY_REPLY":
         error = "EMPTY_REPLY: 模型未产出任何 AIMessage 正文（空回复）"
+        error_type = exit_reason
+        error_message = error
         logger.warning("Job reply empty; marked as failed", job=name, exit_reason=exit_reason)
     duration = time.monotonic() - start
     output_path = _write_output(cfg, job, reply, error, prompt=prompt, raw_reply=raw_reply)
@@ -606,6 +602,9 @@ def run_job(
         "Job finished",
         job=name,
         exit_reason=exit_reason,
+        status="ok" if error is None else "error",
+        error_type=error_type,
+        error_message=error_message,
         duration_seconds=round(duration, 2),
         output_path=output_path,
     )
@@ -1129,6 +1128,7 @@ def run_loop(
     graph_runner: Callable[[str, Config, int], str | None] | None = None,
     max_iterations: int | None = None,
     clock: Callable[[], datetime] | None = None,
+    stop_event: threading.Event | None = None,
 ) -> int:
     """Main scheduler loop: poll for due jobs, run them, persist state.
 
@@ -1138,6 +1138,10 @@ def run_loop(
         graph_runner: Injection seam for tests; None uses the real graph.
         max_iterations: Stop after N polls (tests); None = run forever.
         clock: Time source override (tests); None = datetime.now().
+        stop_event: Cooperative shutdown flag; the loop exits before the next poll
+            once set. Production passes one from start.py: asyncio cannot cancel the
+            worker thread, so graceful shutdown means setting this and awaiting the
+            thread via its wrapping task.
 
     Returns:
         Number of jobs executed across all iterations.
@@ -1148,44 +1152,108 @@ def run_loop(
     jobs_run = 0
     iterations = 0
 
-    while max_iterations is None or iterations < max_iterations:
-        iterations += 1
+    heartbeat = Heartbeat(
+        "scheduler",
+        root=run_dir(resolved_cfg.root),
+        interval_sec=poll_interval,
+    )
+    heartbeat.start(poll_interval=poll_interval, max_iterations=max_iterations)
+    failed = False
+    try:
         now = now_fn()
-        jobs = load_jobs(resolved_cfg)
-        for job in jobs:
+        for job in load_jobs(resolved_cfg):
             state = states.get(job.name, JobState())
-            if not is_due(job, state, now):
-                continue
-            if job.type == "proactive":
-                # Proactive jobs: extra window/cooldown gate, then dispatch to the
-                # single-worker PROACTIVE_POOL so the poll loop is never blocked by
-                # LLM generation or QQ network I/O.
-                if not proactive_due(job, state, now):
-                    # Debug level on purpose: is_due stays true while the job waits for
-                    # its window/cooldown, so this branch runs on every poll tick and an
-                    # info log would flood the log with "not yet due" noise.
-                    logger.debug(
-                        "proactive job not due: window miss or cooldown",
+            nxt = next_run_time(job.schedule, state.last_run, now)
+            logger.info(
+                "scheduler job registered",
+                job=job.name,
+                type=job.type,
+                schedule=job.schedule,
+                next_run=nxt.isoformat(timespec="seconds") if nxt else None,
+            )
+
+        while (max_iterations is None or iterations < max_iterations) and not (
+            stop_event is not None and stop_event.is_set()
+        ):
+            iterations += 1
+            now = now_fn()
+            jobs = load_jobs(resolved_cfg)
+            heartbeat.beat(state="running", iteration=iterations, job_count=len(jobs))
+            for job in jobs:
+                state = states.get(job.name, JobState())
+                if not is_due(job, state, now):
+                    continue
+                if job.type == "proactive":
+                    # Proactive jobs: extra window/cooldown gate, then dispatch to the
+                    # single-worker PROACTIVE_POOL so the poll loop is never blocked by
+                    # LLM generation or QQ network I/O.
+                    if not proactive_due(job, state, now):
+                        # Debug level on purpose: is_due stays true while the job waits for
+                        # its window/cooldown, so this branch runs on every poll tick and an
+                        # info log would flood the log with "not yet due" noise.
+                        logger.debug(
+                            "proactive job not due: window miss or cooldown",
+                            job=job.name,
+                            schedule=job.schedule,
+                            now=now.isoformat(timespec="seconds"),
+                        )
+                        continue
+                    future = PROACTIVE_POOL.submit(run_proactive_job, job, resolved_cfg)
+                    if future is None:
+                        logger.warning(
+                            "proactive pool queue full, skipping this tick",
+                            job=job.name,
+                            schedule=job.schedule,
+                        )
+                        continue
+                    # L1: surface worker exceptions instead of letting the future die silently.
+                    future.add_done_callback(_log_proactive_failure)
+                    logger.info(
+                        "Proactive job dispatched",
                         job=job.name,
                         schedule=job.schedule,
                         now=now.isoformat(timespec="seconds"),
                     )
+                    states[job.name] = JobState(
+                        last_run=now.isoformat(timespec="seconds"),
+                        run_count=state.run_count + 1,
+                    )
+                    save_state(resolved_cfg, states)
+                    jobs_run += 1
                     continue
-                future = PROACTIVE_POOL.submit(run_proactive_job, job, resolved_cfg)
-                if future is None:
-                    logger.warning(
-                        "proactive pool queue full, skipping this tick",
+                if job.type == "extract":
+                    # KG extraction: deterministic, LLM-bearing but graph-free. Dispatch to its
+                    # own single worker so a long extraction never blocks the poll loop, then
+                    # persist last_run immediately so it does not refire on the next tick.
+                    future = EXTRACT_POOL.submit(run_extract_job, job, resolved_cfg)
+                    future.add_done_callback(_log_extract_failure)
+                    logger.info(
+                        "kg-extract job dispatched",
                         job=job.name,
                         schedule=job.schedule,
+                        now=now.isoformat(timespec="seconds"),
                     )
+                    states[job.name] = JobState(
+                        last_run=now.isoformat(timespec="seconds"),
+                        run_count=state.run_count + 1,
+                    )
+                    save_state(resolved_cfg, states)
+                    jobs_run += 1
                     continue
-                # L1: surface worker exceptions instead of letting the future die silently.
-                future.add_done_callback(_log_proactive_failure)
-                logger.info(
-                    "Proactive job dispatched",
+                logger.info("Job due, firing", job=job.name, schedule=job.schedule, now=now.isoformat(timespec="seconds"))
+                # run_job is synchronous and can take minutes; widen the staleness window
+                # so a long report run is not mistaken for a dead scheduler.
+                heartbeat.beat(
+                    state="busy",
                     job=job.name,
-                    schedule=job.schedule,
-                    now=now.isoformat(timespec="seconds"),
+                    job_type=job.type,
+                    stale_after_sec=1800,
+                )
+                result = run_job(job, resolved_cfg, graph_runner=graph_runner)
+                heartbeat.beat(
+                    state="running",
+                    last_job=job.name,
+                    last_status="ok" if result.error is None else "error",
                 )
                 states[job.name] = JobState(
                     last_run=now.isoformat(timespec="seconds"),
@@ -1193,38 +1261,45 @@ def run_loop(
                 )
                 save_state(resolved_cfg, states)
                 jobs_run += 1
-                continue
-            if job.type == "extract":
-                # KG extraction: deterministic, LLM-bearing but graph-free. Dispatch to its
-                # own single worker so a long extraction never blocks the poll loop, then
-                # persist last_run immediately so it does not refire on the next tick.
-                future = EXTRACT_POOL.submit(run_extract_job, job, resolved_cfg)
-                future.add_done_callback(_log_extract_failure)
-                logger.info(
-                    "kg-extract job dispatched",
-                    job=job.name,
-                    schedule=job.schedule,
-                    now=now.isoformat(timespec="seconds"),
-                )
-                states[job.name] = JobState(
-                    last_run=now.isoformat(timespec="seconds"),
-                    run_count=state.run_count + 1,
-                )
-                save_state(resolved_cfg, states)
-                jobs_run += 1
-                continue
-            logger.info("Job due, firing", job=job.name, schedule=job.schedule, now=now.isoformat(timespec="seconds"))
-            run_job(job, resolved_cfg, graph_runner=graph_runner)
-            states[job.name] = JobState(
-                last_run=now.isoformat(timespec="seconds"),
-                run_count=state.run_count + 1,
-            )
-            save_state(resolved_cfg, states)
-            jobs_run += 1
-        if max_iterations is None:
-            time.sleep(poll_interval)
+            if max_iterations is None:
+                if stop_event is not None:
+                    stop_event.wait(poll_interval)
+                else:
+                    time.sleep(poll_interval)
+    except Exception as exc:
+        failed = True
+        logger.exception("scheduler loop crashed", exc=exc, iterations=iterations, jobs_run=jobs_run)
+        heartbeat.stop(
+            state="error",
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+            iterations=iterations,
+        )
+        raise
+    finally:
+        if not failed:
+            heartbeat.stop(iterations=iterations, jobs_run=jobs_run)
 
     return jobs_run
+
+
+def on_scheduler_done(task: object, stop_event: threading.Event) -> None:
+    """Done-callback for the scheduler task that wraps ``run_loop`` in start.py.
+
+    Distinguishes the three terminal paths so a dead scheduler never disappears
+    silently: external cancellation, crash (real traceback), and normal stop
+    (``stop_event`` set by the shutdown path).
+    """
+    if getattr(task, "cancelled", lambda: False)():
+        logger.info("Scheduler task cancelled")
+        return
+    exc = task.exception() if hasattr(task, "exception") else None
+    if exc is not None:
+        logger.exception("Scheduler task died", exc=exc)
+    elif stop_event.is_set():
+        logger.info("Scheduler task stopped")
+    else:
+        logger.warning("Scheduler task exited unexpectedly")
 
 
 def main() -> None:
@@ -1248,6 +1323,7 @@ __all__ = (
     "load_state",
     "main",
     "next_run_time",
+    "on_scheduler_done",
     "run_extract_job",
     "run_job",
     "run_loop",
