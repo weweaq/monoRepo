@@ -90,7 +90,8 @@ flowchart TD
 
     subgraph OUT["④ 退出/投递"]
         FB["反馈闭环 feedback.py · 三级修复阶梯<br/>触发=QQ 消息经 feedback_route() 或 评审页<br/>①apply_feedback 确定性补丁<br/>②revise_report_llm 最小修订(默认):<br/>零工具单轮+diff 门禁非目标节逐字不变<br/>③rerun --day 整体重生成(需确认)<br/>_deliver_email 主题 {date}（重生成 vN）"]
-        LG["jsonl_logger<br/>+ llm_request_log"]
+        LG["jsonl_logger<br/>+ Logger.exception(真栈→error_type/error_message/stack_trace)<br/>+ llm_request_log"]
+        HB[("data/run/*.json 组件心跳<br/>gacore.heartbeat.Heartbeat<br/>main/scheduler/qq/langtrack_server<br/>原子写 os.replace · beat(state) 保留上一态<br/>stale_after_sec=max(60, interval×3)<br/>GACORE_RUN_DIR 覆盖")]
     end
 
     %% ===== 层间边 (带语义) =====
@@ -116,6 +117,10 @@ flowchart TD
     CU -. 日报正文 .-> FB
 
     IG --> RW --> ET --> OU
+    IG -. "server 心跳 + ingest 日志" .-> HB
+    ET -. "etl.run.* 摘要 + ETL timeout 归属" .-> HB
+    SC -. "scheduler 心跳" .-> HB
+    QQ -. "qq 心跳" .-> HB
     OU --> FC2
     RVW -. "⟳立即转换ETL: /api/etl/run·/api/etl/status 代理 :8000<br/>(防重入锁在 langTrack 进程内·与周期线程共用)" .-> ET
     PS -. "区县背景note" .-> SIP
@@ -183,5 +188,5 @@ flowchart TD
     class KG state
     %% ⑥ 日报链路 v3（2026-10-04 收敛：全部节点可回溯源码）
     class SIP,CB,FC2 main
-    class COR,PRE,HP,DT state
+    class COR,PRE,HP,DT,HB state
     class RVW bnd

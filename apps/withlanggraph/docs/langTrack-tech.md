@@ -1836,3 +1836,108 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 - **「默认停用」仓库层可复现**：`config/info_pack.json` gitignore，代码默认 `enabled`，新克隆环境 `_KG` 默认开启。让「默认停用」在仓库层可复现（`SourceSpec.default_enabled` 或 `info_pack.example.json`）需独立决策，属后续阶段（见交接文档 §7 风险①）。
 - 候选→规律升格机制、图查询层、周期聚合：上游文档空白/依赖前项，属后续独立阶段（计划 §12），本阶段 `patterns`/`worldview` 只落 `status='candidate'` 的候选。
 - 消解阈值观察项：实跑中 `我（用户）`/`用户（本人）`（同一人的两种写法）fuzzy 得分 0.55，恰低于 `0.6` 候选线，故当日无别名行——机制正常（能算分、够线才落行），阈值/权重是否调优留待候选复核阶段评估。
+
+## 9.29 可观测性 P0：组件心跳 + 结构化日志补齐（2026-10-21）
+
+> 设计文档：`./observability-design.md`（文件契约 / 状态机 / 取舍）；实施计划：仓库根 `docs/superpowers/plans/2026-10-21-observability-p0.md`。
+> 提交序列：`fcdfb76`（`Logger.exception`）→ `ea66d2f`（heartbeat 模块）→ `98ebf17`（scheduler 心跳 + 优雅停机）→ `8f66b64`（QQ 心跳）→ `c29cc74`（server `/ingest` + ETL 子进程归属）→ `56261de`（ETL 运行摘要）→ `2c9149c`（测试隔离守卫）。
+
+### 9.29.1 背景：日志只覆盖 ETL，「进程死了」和「活着但没话说」分不清
+
+- 2026-10-21 实测 `logs/2026-10-21/app.jsonl` 共 73 行：43 行来自 ETL 子进程，其余为 scheduler 相关；**服务端 0 行，四个长驻组件 0 条存活信号**。
+- 三个互相独立的缺陷：
+  1. **无存活信号**：QQ 前端 / langTrack 服务端 / scheduler 任一挂掉，外部只能靠「没消息」猜；`data/run/` 当时根本不存在。
+  2. **服务端盲区**：`POST /ingest` 成功或失败都不写日志——失败只剩 uvicorn 默认输出，且没有 `batch_id` / `device_id` 上下文，无法回答「这批数据到底进库没有」。
+  3. **ETL 归属缺失**：父进程用 `subprocess.run(timeout=...)` 拉子进程，超时被 kill 时只拿到一个 `TimeoutExpired`；子进程自身没有 run 级摘要，于是「这次 ETL 跑没跑、跑了多久、成没成」在日志里数不出来。
+
+### 9.29.2 组件心跳（`src/gacore/heartbeat.py`）
+
+**契约**：每个组件一个 JSON 文件，写在 `<root>/data/run/<component>.json`；目录可用环境变量 `GACORE_RUN_DIR` 覆盖（相对路径按项目根解析，见 `heartbeat.run_dir`）。文件内容是**一个 JSON 对象**，`Heartbeat._write` 实际写入的字段如下：
+
+| 字段 | 含义 |
+| --- | --- |
+| `schema_version` | 文件契约版本（当前 `1`） |
+| `component` | 组件名（`main` / `scheduler` / `qq` / `langtrack_server`） |
+| `instance_id` / `pid` | 写入实例标识与进程号（重启后能区分「换进程续写」还是「同进程续写」） |
+| `state` | `starting` / `running` / `busy` / `connecting` / `reconnecting` / `stopped` / `error` |
+| `seq` | 自增序号（心跳停摆时用于判断文件是否还在更新） |
+| `started_at` / `updated_at` / `updated_at_epoch` | 首写时间 / 最近写入时间（东八区 ISO8601）/ 最近写入时间戳 |
+| `interval_sec` | 该组件的心跳周期 |
+| `stale_after_sec` | 判定「心跳过期」的阈值；默认 `max(60, interval_sec × 3)`，可按次覆盖 |
+| `detail` | 本次写入的附加信息（**整体替换**，不做 key 合并） |
+
+**写法要点**：
+- **原子写**：先写临时文件再 `os.replace` 替换目标，读者不会读到半截 JSON。
+- **loop 驱动、无后台线程**：`Heartbeat` 自己不 起线程，由持有事件循环 / 主循环的组件在自己的循环里调 `beat()`。这样「事件循环卡死」会直接表现为心跳停更（可判定 stale），而不是被独立线程掩盖成「看起来还活着」。
+- **写失败不抛**：只记一条 `heartbeat write failed`（WARNING，60s 节流）。心跳是观测手段，不能反过来搞崩业务。
+- **`beat(state=None)` 保留上一状态**：周期心跳不带 `state` 时不会把 `reconnecting` 拍回 `running`；`detail` 每次整体替换（周期心跳写空对象），需要留痕的调用方每次自己带上。
+
+```mermaid
+stateDiagram-v2
+    [*] --> starting: start() 首写
+    starting --> running: beat(state="running")
+    running --> busy: scheduler 作业执行中（stale_after_sec=1800）
+    busy --> running: 作业结束
+    running --> reconnecting: QQ 断线进入退避（retry_in_sec）
+    reconnecting --> connecting: 再次尝试连接
+    connecting --> running: on_ready（connected_at）
+    running --> stopped: 正常退出 stop()
+    running --> error: 未捕获异常
+    error --> stopped: 收尾 stop()
+```
+
+**组件与写入点（真实符号）**：
+
+| 组件 | 文件 | 写入点 |
+| --- | --- | --- |
+| main | `data/run/main.json` | `start.py::_main`（`_beat_main` 协程每 15s `beat()`；`finally` 里 `heartbeat.stop()`） |
+| scheduler | `data/run/scheduler.json` | `scheduler.run_loop`（每轮 `beat(state="running")`；作业执行前 `beat(state="busy", stale_after_sec=1800)`，结束后回 `running`；崩溃先 `stop(state="error")` 再 re-raise；正常退出 `stop()`） |
+| qq | `data/run/qq.json` | `frontends/qq.QQApp.start`（`connecting` → 断线 `reconnecting(retry_in_sec)`）+ `on_ready`（`running(connected_at)`） |
+| langtrack_server | `data/run/langtrack_server.json` | `langTrack/server.py::_make_lifespan`（lifespan 起来写 `running`，退出写 `stopped`） |
+
+- scheduler 的心跳周期 = 轮询间隔（`interval_sec=poll_interval`），因此 stale 阈值 = `max(60, poll_interval × 3)`。
+- `busy` 期间把 `stale_after_sec` 放宽到 **1800s**：`run_job` 同步跑日报可能几分钟，不放宽会被误判成「scheduler 死了」。
+
+### 9.29.3 服务端 `/ingest` 与 ETL 子进程归属（`langTrack/server.py`）
+
+- **日志出口统一**：`server.py` 由 `logging.getLogger` 换成 `gacore.jsonl_logger.get_logger("langTrack.server")`，所有日志改成**关键字字段**（`logger.info("ingest completed", batch_id=..., ...)`），不再用 `%s` 拼接。
+- **`POST /ingest`**：
+  - 成功 → `ingest completed`（`batch_id` / `device_id` / `client_device_id` / `event_count` / `inserted` / `deduplicated` / `duration_ms`）。`client_device_id` **恒写入**（与 `device_id` 相同时为 `null`）——别名设备归一后仍能看出客户端原始 ID。
+  - 失败 → `ingest failed`（走 `Logger.exception`，带 `error_type` / `error_message` / `stack_trace`），随后原样抛出。
+  - **不记 payload**：只记条数与 ID，避免把剪贴板 / 短信正文写进日志。
+- **HTTP 中间件** `_log_failed_requests`：响应码 `>=400` 记 `http request failed`（`method` / `path` / `status` / `duration_ms`）；未捕获异常记 `http request crashed`（带真栈），但 **`/ingest` 例外**——该路由自己已归属错误，避免一行错误两份 ERROR。
+- **ETL 子进程归属（父进程侧，`_run_etl_once(trigger=...)`）**：
+  - 成功 → `periodic ETL finished`（`trigger` = `manual` | `periodic`，`returncode` / `duration_ms`）；
+  - 失败 → `periodic ETL failed`（附 `stderr_tail`，末 2000 字符）；
+  - **超时** → `ETL timeout`（`trigger` / `timeout_sec` / `duration_ms` / `stderr_tail`）：子进程已被 kill，它自己的 `etl.run.finished` 不会写，**这一行是权威归属信号**；
+  - 崩溃 → `periodic ETL crashed`（`Logger.exception`）。
+  - `trigger` 归属：周期线程 → `periodic`；`/etl/run` 按钮 → `manual`。
+- **`/etl/status`** 暴露 `running` / `last_finished_at` / `last_ok` / `last_trigger` / `last_duration_ms` / `last_error`。
+
+### 9.29.4 ETL 运行摘要（`langTrack/etl.py`）
+
+`run()` 改为薄包装，主体下沉为 `_run_impl()`（返回 metrics 字典）：
+
+| 日志 | 触发时机 | 关键字段 |
+| --- | --- | --- |
+| `etl.run.started` | 开跑 | `run_id` / `mode`（`full`\|`incremental`）/ `db_path` / `device_id` / `geocode` / `route` / `poi` |
+| `etl.run.finished` | 成功 | `run_id` / `status="ok"` / `mode` / `duration_ms` + **全部 metrics** |
+| `etl.run.failed` | 抛异常 | `error_type` / `error_message` / `stack_trace`（`Logger.exception`） |
+| `etl.run.interrupted` | `BaseException`（Ctrl-C 等） | `error_type` / `error_message` |
+
+metrics（`etl.run.finished` 平铺进同一行）：`events` / `sessions` / `daily_stats` / `anomalies` / `route_changes` / `contract_coverage` / `geocode` / `route` / `poi` / `incremental_active` / `affected_days` / `v2_location` / `alias_merged` / `stays_v2` / `table_counts` / `watermarks` / `max_event_ts` / `db_size_bytes`。
+
+- `table_counts` 由 `_collect_table_counts` 采集（表不存在记 `null`，不炸；表名来自固定常量 `_SUMMARY_TABLES`，不接受外部输入拼接）。
+- `geocode` / `route` / `poi` 未执行或失败时为 `null`——**不谎报 0**。
+- `etl.run.started` / `finished` 的 `run_id` 相同，可把一次 ETL 的起止与 metrics 串成一条链。
+
+### 9.29.5 `Logger.exception` 约定（`src/gacore/jsonl_logger.py`）
+
+- `logger.exception(message, exc=exc, **fields)`：自动派生 `error_type`（异常类名）/ `error_message`（`str(exc)`）/ `stack_trace`（`traceback.format_exception`）；当前没有活动异常时回退 `sys.exc_info()`。
+- `logger.error(message, error_message=..., ...)` 支持显式写 `error_message`（用于「只有一条消息、没有异常对象」的场景）。
+- **业务码与异常类名分离**：`error_type` 放纯类名或业务原因码，`error_message` 放可读描述——不要把整句中文塞进 `error_type`。
+
+### 9.29.6 测试隔离守卫（`tests/conftest.py`）
+
+- `GACORE_LOG_ROOT` 指向 `tempfile.mkdtemp(prefix="gacore-pytest-logs-")`；**同时清掉 `GACORE_RUN_DIR`**（开发者 shell 里可能带着真实目录），并重置 `jsonl_logger._sink`，确保测试日志不落仓库 `logs/`、心跳不落真实 `data/run/`。
+- `tests/test_log_isolation.py` 两条断言锁死：测试日志根目录 ≠ 项目 `logs/`；`jsonl_logger._get_sink()` 的 `_log_root` == 测试根目录。

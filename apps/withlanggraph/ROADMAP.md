@@ -1553,3 +1553,23 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 **验证**（repo-hygiene 全量）：`uv run ruff check apps packages tests` 全绿；`uv run --all-packages pytest -q` → **1529 passed / 5 skipped**；`node apps/mermaid-viewer/tests/check_prompt_logic.js` → ALL PASS。
 
 **偏差说明**：①本次为工作区修订（对应 2026-10-20「三道门禁」记录已完成部分更新为最终口径），不新增独立功能线。②`GACORE_LOG_ROOT` 为测试隔离环境变量，不入生产配置文档细节。③`docs/sre/` 未跟踪目录为定时任务运维产出，与本案无关，未提交。
+
+## [2026-10-21] 可观测性 P0：组件心跳 + 服务端/ETL 日志补齐
+
+**背景**：当日 `logs/2026-10-21/app.jsonl` 共 73 行且全部来自 ETL / scheduler——服务端 `/ingest` 零日志、四个长驻组件（main / scheduler / qq / langtrack_server）零存活信号，「进程死了」与「活着但没产出」无法区分；ETL 子进程超时被 kill 时父进程也无归属日志。详见 `docs/langTrack-roadmap.md` 同日记录。
+
+**已完成**：
+- `src/gacore/heartbeat.py`（新增）：`Heartbeat` 原子写组件心跳 JSON（`data/run/<component>.json`，`GACORE_RUN_DIR` 可覆盖）；写失败不抛（60s 节流 WARNING）；`beat(state=None)` 保留上一状态。
+- `src/gacore/jsonl_logger.py`：`Logger.exception` 输出真实栈（`error_type` / `error_message` / `stack_trace`）。
+- `src/gacore/scheduler.py`：`run_loop` 支持 `stop_event` 优雅停机 + `busy` 心跳 + 崩溃 `stop(state="error")` + `on_scheduler_done` 回调；`Job finished` 补 `status` / `error_type` / `error_message`。
+- `src/gacore/frontends/qq.py`：`connecting` / `reconnecting(retry_in_sec)` / `running(connected_at)` 三态心跳；重连异常改用 `logger.exception`。
+- `src/gacore/langTrack/server.py`：日志出口换 `jsonl_logger`；`/ingest` 记 `ingest completed` / `ingest failed`（带真栈）；中间件记 `http request failed` / `http request crashed`；ETL 子进程归属 `periodic ETL finished|failed` / `ETL timeout` / `periodic ETL crashed`（`trigger` 区分 manual / periodic）；lifespan 起 `langtrack_server` 心跳。
+- `src/gacore/langTrack/etl.py`：`etl.run.started|finished|failed|interrupted` 四行运行摘要 + metrics（表计数 / 水位线 / 耗时）。
+- `start.py`：main 心跳 + scheduler 结束回调 + 优雅停机。
+- 测试：`test_heartbeat.py` / `test_scheduler_heartbeat.py` / `test_scheduler_done_callback.py` / `test_qq_heartbeat.py` / `test_jsonl_logger_exception.py` / `test_langTrack_etl_summary.py` / `test_log_isolation.py`（新增），`test_scheduler.py` / `test_scheduler_extract_job.py` / `test_langTrack_server.py`（改造）。
+
+**实测**：单文件与组合测试全绿（scheduler 三件套 88、ETL 回归 33、server 15、qq 3、heartbeat 8、etl summary 3、isolation 2、logger exception 4）；`ruff check apps/withlanggraph/src apps/withlanggraph/tests` 全绿；全量 `uv run pytest apps/withlanggraph/tests -q` 见提交说明。
+
+**偏差说明**：未做 ops CLI / 深度 `/health` / 日志保留策略（列 P1/P2 待办）；架构图 `HB` 节点放 `OUT` 子图（心跳跨四个组件，非 langTrack 专属）。
+
+**待办**：P1 ops CLI（一条命令汇总四个心跳 + 最近 ETL 状态）；P1 `/health` 深度页（心跳新鲜度 / ETL 结果 / ingest 失败）；P2 日志保留与心跳历史归档。详见 `docs/langTrack-roadmap.md` 与 `docs/observability-design.md`。
