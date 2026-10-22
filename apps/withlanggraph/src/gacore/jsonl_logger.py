@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Final, final
 
 from gacore.config import Config, ConfigError
+from gacore.redact import redact_obj, redact_text
 
 _LOG_FILENAME: Final = "app.jsonl"
 _LOG_ROOT_ENV: Final = "GACORE_LOG_ROOT"
@@ -52,6 +53,10 @@ _SECRET_KEYS: Final = frozenset({
     "mobile",
 })
 
+# Recipient-style keys: masked only when the value looks like an email address,
+# so QQ openids and other opaque IDs stay readable for triage.
+_EMAIL_KEYS: Final = frozenset({"to", "recipient", "email_to", "cc", "bcc", "sender"})
+
 # Per-process session id: generated once, attached to every line.
 _SESSION_ID: Final = uuid.uuid4().hex[:8]
 _PID: Final = os.getpid()
@@ -69,14 +74,17 @@ def session_id() -> str:
 
 def _mask_value(key: str, value: object) -> object:
     """Mask sensitive values; pass everything else through unchanged."""
-    if key.lower() in _SECRET_KEYS and isinstance(value, str):
+    lowered = key.lower()
+    if lowered in _SECRET_KEYS and isinstance(value, str):
+        return "***"
+    if lowered in _EMAIL_KEYS and isinstance(value, str) and "@" in value:
         return "***"
     return value
 
 
 def _mask_fields(fields: Mapping[str, object]) -> dict[str, object]:
-    """Return a copy of fields with any secret values masked."""
-    return {k: _mask_value(k, v) for k, v in fields.items()}
+    """Return a copy of fields with secret values masked and free-text redacted."""
+    return {k: redact_obj(_mask_value(k, v)) for k, v in fields.items()}
 
 
 class _JsonlFormatter(logging.Formatter):
@@ -90,7 +98,7 @@ class _JsonlFormatter(logging.Formatter):
             "ts": datetime.fromtimestamp(record.created).astimezone().isoformat(timespec="milliseconds"),
             "level": record.levelname,
             "module": record.__dict__.get("gacore_module", record.module),
-            "message": record.getMessage(),
+            "message": redact_text(record.getMessage()),
             "session": _SESSION_ID,
             "pid": _PID,
         }
@@ -108,7 +116,7 @@ class _ConsoleFormatter(logging.Formatter):
         module = record.__dict__.get("gacore_module", record.module)
         fields = _mask_fields(record.__dict__.get("gacore_fields", {}))
         suffix = f" {fields}" if fields else ""
-        return f"[{ts}] [{record.levelname:<7}] [{module}] {record.getMessage()}{suffix}"
+        return f"[{ts}] [{record.levelname:<7}] [{module}] {redact_text(record.getMessage())}{suffix}"
 
 
 class _ConsoleSink(logging.StreamHandler):

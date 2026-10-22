@@ -21,6 +21,8 @@ from gacore.langTrack.dashboard import DB_PATH, build_map_day_data, render_dashb
 from gacore.langTrack.etl import canonical_device_id
 from gacore.langTrack.schemas import IngestRequest
 from gacore.langTrack.storage import Storage
+from gacore.ops import read_heartbeats
+from gacore.redact import redact_text
 
 logger = get_logger("langTrack.server")
 
@@ -45,6 +47,18 @@ def _tail(value: bytes | str | None, limit: int = 2000) -> str:
     return value[-limit:]
 
 
+def _last_stderr_line(value: bytes | str | None) -> str:
+    """Root-cause line of a stderr tail: the last non-empty line (traceback结尾)."""
+    lines = [line.strip() for line in _tail(value, limit=4000).splitlines() if line.strip()]
+    return lines[-1] if lines else ""
+
+
+def _etl_error_summary(prefix: str, detail: str, *, limit: int = 200) -> str:
+    """Short, redacted error for ``/etl/status`` — never the raw stderr block."""
+    text = redact_text(" ".join(detail.split()))
+    return f"{prefix}: {text[:limit]}" if text else prefix
+
+
 # 手动/周期 ETL 共用的防重入状态（Task 12c：dashboard"立即转换"按钮）
 _ETL_STATE_LOCK = threading.Lock()
 _ETL_STATE: dict = {
@@ -60,6 +74,35 @@ _ETL_STATE: dict = {
 def _set_etl_outcome(error: str | None) -> None:
     with _ETL_STATE_LOCK:
         _ETL_STATE["last_error"] = error
+
+
+# 最近一次 ingest 失败（供 /health 深度聚合；只留摘要，不留 payload）。
+_INGEST_STATE_LOCK = threading.Lock()
+_INGEST_STATE: dict = {
+    "last_failure_at": None,
+    "last_error_type": None,
+    "last_error_message": None,
+    "last_batch_id": None,
+    "last_device_id": None,
+}
+
+
+def _record_ingest_failure(
+    exc: BaseException,
+    *,
+    batch_id: str,
+    device_id: str,
+) -> None:
+    with _INGEST_STATE_LOCK:
+        _INGEST_STATE.update(
+            {
+                "last_failure_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "last_error_type": type(exc).__name__,
+                "last_error_message": redact_text(str(exc))[:200],
+                "last_batch_id": batch_id,
+                "last_device_id": device_id,
+            }
+        )
 
 
 def _run_etl_once(trigger: str = "manual") -> bool:
@@ -80,7 +123,7 @@ def _run_etl_once(trigger: str = "manual") -> bool:
             logger.info("periodic ETL finished", trigger=trigger, returncode=0, duration_ms=duration_ms)
             return True
         tail = _tail(result.stderr)
-        _set_etl_outcome(f"rc={result.returncode} stderr={tail}")
+        _set_etl_outcome(_etl_error_summary(f"rc={result.returncode}", _last_stderr_line(result.stderr)))
         logger.warning(
             "periodic ETL failed",
             trigger=trigger,
@@ -103,7 +146,7 @@ def _run_etl_once(trigger: str = "manual") -> bool:
         return False
     except Exception as e:  # noqa: BLE001
         duration_ms = round((time.perf_counter() - started) * 1000, 1)
-        _set_etl_outcome(f"{type(e).__name__}: {e}")
+        _set_etl_outcome(_etl_error_summary(type(e).__name__, str(e)))
         logger.exception("periodic ETL crashed", exc=e, trigger=trigger, duration_ms=duration_ms)
         return False
 
@@ -219,7 +262,37 @@ def create_app(storage: Storage, *, heartbeat_dir: Path | None = None) -> FastAP
 
     @app.get("/health")
     def health() -> dict:
-        return {"status": "ok"}
+        """Liveness + P1 deep aggregation: heartbeats, latest ETL, latest ingest failure.
+
+        ``status`` stays ``"ok"`` whenever the process can answer (backward compatible
+        with the mobile client's liveness probe); ``degraded``/``reasons`` carry the
+        deep verdict. Missing heartbeat files are reported as ``missing`` but do not
+        degrade on their own — the server may run without the unified launcher.
+        """
+        components = read_heartbeats(hb_dir)
+        with _ETL_STATE_LOCK:
+            etl = dict(_ETL_STATE)
+        with _INGEST_STATE_LOCK:
+            ingest = dict(_INGEST_STATE)
+
+        reasons: list[str] = []
+        for name, beat in components.items():
+            if beat["stale"]:
+                reasons.append(f"{name} heartbeat stale (age={beat['age_sec']}s)")
+            if beat["state"] == "error":
+                reasons.append(f"{name} state=error")
+        if etl["last_ok"] is False:
+            reasons.append("etl last run failed")
+
+        return {
+            "status": "ok",
+            "degraded": bool(reasons),
+            "reasons": reasons,
+            "checked_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "components": components,
+            "etl": etl,
+            "ingest": ingest,
+        }
 
     @app.get("/api/client/version")
     def client_version() -> dict:
@@ -270,8 +343,12 @@ def create_app(storage: Storage, *, heartbeat_dir: Path | None = None) -> FastAP
 
     @app.get("/etl/status")
     def etl_status() -> dict:
+        """ETL 运行状态；last_error 只给脱敏摘要，完整 stderr 只进日志。"""
         with _ETL_STATE_LOCK:
-            return dict(_ETL_STATE)
+            state = dict(_ETL_STATE)
+        if state.get("last_error"):
+            state["last_error"] = redact_text(state["last_error"])
+        return state
 
     @app.get("/api/map/day")
     def api_map_day(day: str | None = None, device_id: str | None = None) -> dict:
@@ -302,6 +379,7 @@ def create_app(storage: Storage, *, heartbeat_dir: Path | None = None) -> FastAP
         except Exception as exc:
             # 先置位再落日志：中间件据此判断这批是否已归属，避免同一错误两份 ERROR。
             request.state.ingest_logged = True
+            _record_ingest_failure(exc, batch_id=req.batch_id, device_id=device_id)
             logger.exception(
                 "ingest failed",
                 exc=exc,

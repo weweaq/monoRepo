@@ -50,7 +50,14 @@ def client(tmp_path, monkeypatch):
 
 def test_health(client):
     c, _ = client
-    assert c.get("/health").json() == {"status": "ok"}
+    body = c.get("/health").json()
+    # status 保持 "ok" 以兼容客户端存活探针；深度结论走 degraded/reasons。
+    assert body["status"] == "ok"
+    assert body["degraded"] is False
+    assert body["reasons"] == []
+    assert set(body["components"]) == {"main", "scheduler", "qq", "langtrack_server"}
+    assert body["etl"]["running"] is False
+    assert body["ingest"]["last_failure_at"] is None
 
 
 def test_client_version(client):

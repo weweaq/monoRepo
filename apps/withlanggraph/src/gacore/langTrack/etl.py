@@ -42,12 +42,18 @@ import uuid
 
 from collections import defaultdict
 
+from collections.abc import Callable
+
 from pathlib import Path
+
+from typing import Any
 
 
 from gacore.jsonl_logger import get_logger
 
 from gacore.langTrack.etl_config import load_etl_config
+
+from gacore.redact import redact_text
 
 logger = get_logger("langTrack.etl")
 DB_PATH = Path(__file__).resolve().parents[3] / "data" / "langTrack.db"
@@ -2417,6 +2423,45 @@ def _collect_table_counts(conn: sqlite3.Connection) -> dict[str, int | None]:
     return counts
 
 
+def _run_optional_step(
+    name: str,
+    *,
+    enabled: bool,
+    label: str,
+    run: Callable[[], Any],
+    status: dict[str, str],
+    errors: dict[str, str],
+) -> Any:
+    """执行一个可选 ETL 子步并记录 ok/skipped/failed，绝不中断主流程。
+
+    ``SystemExit``（geocode/route 客户端缺 API key 时的退出）算「未执行」而非
+    「失败」；其他异常算失败。两种情况下计数都保持 ``None``，摘要不会谎报 0。
+    """
+    if not enabled:
+        status[name] = "skipped"
+        return None
+    try:
+        result = run()
+    except SystemExit as exc:
+        status[name] = "skipped"
+        errors[name] = redact_text(str(exc))
+        print(f"[etl] 跳过{label}: {exc}")
+        return None
+    except Exception as exc:
+        status[name] = "failed"
+        errors[name] = redact_text(f"{type(exc).__name__}: {exc}")
+        print(f"[etl] {label}失败(不影响 ETL): {exc}")
+        logger.warning(
+            "etl.step.failed",
+            step=name,
+            error_type=type(exc).__name__,
+            error_message=redact_text(str(exc)),
+        )
+        return None
+    status[name] = "ok"
+    return result
+
+
 def _run_impl(db_path: Path = DB_PATH, device_id: str | None = None, run_geocode: bool = True, run_route: bool = True, run_poi: bool = True, incremental: bool = False) -> dict[str, object]:
 
     n_geo: int | None = None
@@ -2426,6 +2471,11 @@ def _run_impl(db_path: Path = DB_PATH, device_id: str | None = None, run_geocode
     n_poi: int | None = None
 
     n_stays_v2: int | None = None
+
+    # 子步结论：ok / skipped / failed，与计数分开，避免 None 既表示「没跑」又表示「失败」。
+    step_status: dict[str, str] = {}
+
+    step_error: dict[str, str] = {}
 
     conn = sqlite3.connect(db_path)
 
@@ -2611,45 +2661,55 @@ def _run_impl(db_path: Path = DB_PATH, device_id: str | None = None, run_geocode
 
     if run_geocode:
 
-        try:
+        def _encode_geocode() -> Any:
 
             from gacore.langTrack import geocode
 
-            n_geo = geocode.incremental_encode(db_path)
+            return geocode.incremental_encode(db_path)
+
+        n_geo = _run_optional_step(
+            "geocode",
+            enabled=True,
+            label="增量 regeo 编码",
+            run=_encode_geocode,
+            status=step_status,
+            errors=step_error,
+        )
+
+        if n_geo is not None:
 
             print(f"[etl] 增量 regeo 编码: {n_geo} 个常驻点")
 
-        except SystemExit as e:
+    else:
 
-            print(f"[etl] 跳过增量 regeo 编码: {e}")
-
-        except Exception as e:
-
-            print(f"[etl] 增量 regeo 编码失败(不影响 ETL): {e}")
-
-            logger.warning("etl.step.failed", step="geocode", error_type=type(e).__name__, error_message=str(e))
+        step_status["geocode"] = "skipped"
 
     # L3：增量路径规划补路（仅未编码新移动段，单次上限节流；失败跳过不阻塞）
 
     if run_route:
 
-        try:
+        def _encode_route() -> Any:
 
             from gacore.langTrack import routes
 
-            n_route = routes.incremental_encode_trips(db_path)
+            return routes.incremental_encode_trips(db_path)
+
+        n_route = _run_optional_step(
+            "route",
+            enabled=True,
+            label="增量补路",
+            run=_encode_route,
+            status=step_status,
+            errors=step_error,
+        )
+
+        if n_route is not None:
 
             print(f"[etl] 增量补路(路径规划): {n_route} 段")
 
-        except SystemExit as e:
+    else:
 
-            print(f"[etl] 跳过增量补路: {e}")
-
-        except Exception as e:
-
-            print(f"[etl] 增量补路失败(不影响 ETL): {e}")
-
-            logger.warning("etl.step.failed", step="route", error_type=type(e).__name__, error_message=str(e))
+        step_status["route"] = "skipped"
 
     # L3：路线变化事件（复用 anomalies 叙事表，依赖 trips 已完成补路）
 
@@ -2679,20 +2739,28 @@ def _run_impl(db_path: Path = DB_PATH, device_id: str | None = None, run_geocode
 
     if run_poi:
 
-        try:
+        def _encode_poi() -> Any:
 
-            n_poi = routes.encode_belt_pois(db_path, limit=_POI_MAX_PER_RUN)
+            from gacore.langTrack import routes as _routes_p2
+
+            return _routes_p2.encode_belt_pois(db_path, limit=_POI_MAX_PER_RUN)
+
+        n_poi = _run_optional_step(
+            "poi",
+            enabled=True,
+            label="沿途 POI 编码",
+            run=_encode_poi,
+            status=step_status,
+            errors=step_error,
+        )
+
+        if n_poi is not None:
 
             print(f"[etl] 沿途 POI 编码: {n_poi} 个网格")
 
-        except SystemExit as e:
+    else:
 
-            print(f"[etl] 跳过沿途 POI 编码: {e}")
-
-        except Exception as e:
-            print(f"[etl] 沿途 POI 编码失败(不影响 ETL): {e}")
-
-            logger.warning("etl.step.failed", step="poi", error_type=type(e).__name__, error_message=str(e))
+        step_status["poi"] = "skipped"
 
     # A① 契约覆盖校验：期望事件类型 vs 实际到达（全量重建，写在最后）
     conn = sqlite3.connect(db_path)
@@ -2730,6 +2798,8 @@ def _run_impl(db_path: Path = DB_PATH, device_id: str | None = None, run_geocode
         "geocode": n_geo,
         "route": n_route,
         "poi": n_poi,
+        "step_status": step_status,
+        "step_error": step_error,
         "incremental_active": incremental_active,
         "affected_days": len(affected_days),
         "v2_location": v2_location,
