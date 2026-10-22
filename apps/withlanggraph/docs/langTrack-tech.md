@@ -97,12 +97,12 @@ flowchart LR
 
 | 方法 | 路径 | 参数 | 响应 | 说明 |
 |---|---|---|---|---|
-| GET | `/health` | — | `{"status":"ok"}` | 存活探针 |
+| GET | `/health` | — | `{"status":"ok","degraded":bool,"reasons":[...],"checked_at":...,"components":{main,scheduler,qq,langtrack_server},"etl":{...},"ingest":{...}}` | 存活探针 + 深度聚合（P1）：`status` 恒为 `ok`（客户端存活探针兼容），深度结论放 `degraded`/`reasons`；`components` 为四个心跳的 `state/stale/age_sec`，心跳文件缺失记 `missing` 但**不单独降级**；`etl.last_ok=false`、心跳 `stale`、心跳 `state=error` 才计入 `reasons` |
 | GET | `/api/client/version` | — | `{"app_version":"1.N","latest_apk_url":""}` | 客户端版本自查（Task 14）：服务端声明期望客户端版本。请求时读 `data/client_version.json`（存在优先，缺失回退 `server.py` 常量 `_EXPECTED_CLIENT_VERSION`）——该文件由 weiCheckApp `build.ps1` 打包后自动写入，故设置页版本对比随打包自动推进，**无需重启服务端**。客户端 `VersionChecker.kt` 拉取后与 PackageManager `versionName`（`versionName="{major}.{minor}.{buildNumber}"`，如 1.0.1；buildNumber 由 `version.properties` 存储、`build.ps1` 每次构建后递增）对比，设置页「关于」显示「已是最新 / 可更新→vX.X / 检查中」 |
 | POST | `/ingest` | body=`IngestRequest` | `{"status":"ok","inserted":N,"deduplicated":bool}` | 幂等：`batch_id` 重复时返回 `{"status":"ok","inserted":0,"deduplicated":true}` |
 | GET | `/dashboard` | `?day=YYYY-MM-DD`（可选） | `text/html` | 深色单页仪表盘，调 `render_dashboard_html(conn, day)`（`dashboard.py:237`），每次请求新开只读连接；含「事实审查块」（FactCard 逐项人眼核对，不跑 ETL）；含「生活轨迹 · 时段分布」卡（小时 × 家/公司/其他 30 天矩阵，`spatial_profile._time_space_matrix`，单小时 ≥15 分钟计入、跨午夜 stay 按自然日分摊、无数据不隐藏）、「定位采集明细」卡（当日原始层 location 事件逐点：时间\|最近地点·距离\|精度\|信号源，`_render_location_points`，最近地点按 canonical 地点 WGS84 球面距离最小、显示名走 §2.6）、「当日地图」卡（高德 JS API，`_render_map_card`）与「立即转换 (ETL)」按钮 |
 | POST | `/etl/run` | — | `{"status":"started"}` / `{"status":"busy"}` | 异步触发 ETL 子进程；与周期线程共用防重入守卫（Task 12c） |
-| GET | `/etl/status` | — | `{"running":bool,"last_finished_at":...,"last_ok":bool}` | ETL 运行状态查询（Task 12c） |
+| GET | `/etl/status` | — | `{"running":bool,"last_finished_at":...,"last_ok":bool,"last_error":str\|null,...}` | ETL 运行状态查询（Task 12c）。`last_error` 只回**脱敏摘要**（`_etl_error_summary`：`rc=N: <stderr 末行>`，压空白后 ≤200 字符；超时为 `timeout after Ns`），完整 stderr 只进 `app.jsonl`，不再经局域网接口回传原文 |
 | GET | `/api/map/day` | `?day=` `?device_id=`（均可选） | JSON：`{device_id, points[], stays[], trips[]}` 或 `{error:"ambiguous_device"\|"no_data", ...}` | 地图卡前端数据源（Task 13）。点按 `to_amap_coord` 转 GCJ02；stay 名走 §2.6；trip polyline 已是 GCJ02 原样；device_id 省略时按当日唯一设备解析，多设备返回 candidates |
 
 ### 2.1 幂等与事务语义（`storage.ingest_batch`, storage.py:89-115）
@@ -1932,7 +1932,7 @@ stateDiagram-v2
 metrics（`etl.run.finished` 平铺进同一行）：`events` / `sessions` / `daily_stats` / `anomalies` / `route_changes` / `contract_coverage` / `geocode` / `route` / `poi` / `incremental_active` / `affected_days` / `v2_location` / `alias_merged` / `stays_v2` / `table_counts` / `watermarks` / `max_event_ts` / `db_size_bytes`。
 
 - `table_counts` 由 `_collect_table_counts` 采集（表不存在记 `null`，不炸；表名来自固定常量 `_SUMMARY_TABLES`，不接受外部输入拼接）。`max_event_ts` 同样容忍缺表。
-- `geocode` / `route` / `poi` 未执行或失败时为 `null`——**不谎报 0**；子步失败另记 `etl.step.failed`（`step` = `geocode` / `route` / `poi`，带 `error_type` / `error_message`），子进程日志与父进程 `stderr_tail` 一起构成归属证据。
+- `geocode` / `route` / `poi` 计数未执行或失败时仍为 `null`——**不谎报 0**；P1 起另带 `step_status`（`ok` / `skipped` / `failed`）与 `step_error`（脱敏后的失败原因）把「没跑」和「跑失败」分开：flag 关闭 → `skipped`；`SystemExit`（缺 API key）→ `skipped` 并记原因；其他异常 → `failed`。子步失败另记 `etl.step.failed`（`step` = `geocode` / `route` / `poi`，带 `error_type` / `error_message`），子进程日志与父进程 `stderr_tail` 一起构成归属证据。
 - `etl.run.started` / `finished` 的 `run_id` 相同，可把一次 ETL 的起止与 metrics 串成一条链。
 
 ### 9.29.5 `Logger.exception` 约定（`src/gacore/jsonl_logger.py`）
@@ -1945,3 +1945,60 @@ metrics（`etl.run.finished` 平铺进同一行）：`events` / `sessions` / `da
 
 - `GACORE_LOG_ROOT` 指向 `tempfile.mkdtemp(prefix="gacore-pytest-logs-")`；**同时清掉 `GACORE_RUN_DIR`**（开发者 shell 里可能带着真实目录），并重置 `jsonl_logger._sink`，确保测试日志不落仓库 `logs/`、心跳不落真实 `data/run/`。
 - `tests/test_log_isolation.py` 两条断言锁死：测试日志根目录 ≠ 项目 `logs/`；`jsonl_logger._get_sink()` 的 `_log_root` == 测试根目录。
+
+## 9.30 可观测性 P1：日志脱敏 + `/health` 深度聚合 + ops CLI（2026-10-22）
+
+> 设计依据：`docs/observability-design.md` 第 13 节 P1 行。P0 解决「有没有信号」，P1 解决「一条命令回答现在怎么样、日志不带密钥」。
+
+### 9.30.1 统一脱敏入口（`src/gacore/redact.py`）
+
+`redact_text(text)` / `redact_obj(value)` 是全仓唯一脱敏入口，日志与运维接口共用；幂等、不抛异常（脱敏失败不能带崩日志）。
+
+两层策略，按序执行：
+
+1. **值层**：遍历 `os.environ`，变量名命中 `(^|_)(API_?KEY|KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTH)(_|$)` 且值长度 ≥8、不是 `none/null/true/false/changeme/***` 的，按长度降序逐字替换为 `***`（先长后短，避免子串先被替换导致长值漏网）。
+2. **模式层**（正则）：URL query 密钥（`?key=` / `?token=` / `?sig=` 等）、`Bearer <token>`、`sk-/pk-/ak-/rk-/ghp-/github_pat-` 形态 token、赋值式密钥（`api_key|access_token|refresh_token|secret|password|passwd|token|key|sig|signature|auth` 后接 `:` 或 `=`，值 ≥8 字符）。
+
+### 9.30.2 日志出口（`src/gacore/jsonl_logger.py`）
+
+- `_JsonlFormatter`：`message` 走 `redact_text`；`gacore_fields` 经 `_mask_fields` → `redact_obj` 递归脱敏（嵌套 dict/list 内的字符串一并处理），因此 `stack_trace` / `error_message` / `context` 不再逐处手工清洗。
+- 邮箱字段（`to` / `recipient` / `email_to` / `cc` / `bcc` / `sender`）仅在值含 `@` 时整体掩码为 `***`；`to_openid` 等非邮箱标识保持原样。
+- 控制台输出行同样过 `redact_text`，避免「文件已脱敏、终端仍泄露」。
+
+### 9.30.3 `/health` 深度聚合（`langTrack/server.py`）
+
+`GET /health` 在原有存活语义上追加只读聚合，不新增后台线程、不写任何文件：
+
+| 字段 | 来源 | 语义 |
+| --- | --- | --- |
+| `status` | 常量 | 恒 `"ok"`（进程能应答即存活，兼容客户端探针） |
+| `degraded` / `reasons` | 聚合判定 | 心跳 `stale`、心跳 `state=error`、`etl.last_ok is False` 时 `degraded=true` 并逐条列出原因 |
+| `checked_at` | `time.strftime` | 聚合时刻（本地时间） |
+| `components` | `gacore.ops.read_heartbeats` | 四个组件 `state` / `stale` / `age_sec` / `stale_after_sec` / `pid` / `instance_id` / `updated_at` / `detail`（`detail` 递归脱敏） |
+| `etl` | 进程内 `_ETL_STATE` | `running` / `last_finished_at` / `last_ok` / `last_trigger` / `last_duration_ms` / `last_error` |
+| `ingest` | 进程内 `_INGEST_STATE` | 最近一次失败的时刻 / `error_type` / 脱敏后 `error_message`（≤200 字符）/ `batch_id` / `device_id` |
+
+- 心跳文件缺失记 `state="missing"`、`stale=false`，**不单独降级**：langTrack 服务可以脱离统一启动器独立运行。
+- `/ingest` 异常分支经 `_record_ingest_failure` 写入 `_INGEST_STATE`（只留摘要，不留 payload），原异常仍原样抛出。
+- `/etl/status` 的 `last_error` 在写出时统一 `redact_text`；`_run_etl_once` 失败分支用 `_etl_error_summary` 只保留「`rc=N` + stderr 末行」摘要（≤200 字符），不再回传整块 stderr。
+
+### 9.30.4 ops CLI（`src/gacore/ops.py`）
+
+```powershell
+python -m gacore.ops status            # 人类可读表格，degraded 时退出码 1
+python -m gacore.ops status --json     # 机器可读（与 /health 同源语义）
+python -m gacore.ops status --root <app-root> --run-dir <dir> --logs-dir <dir>
+```
+
+- `read_heartbeats(directory)`：与 `/health` 共用；缺失 → `missing`，读失败/非法 JSON → `unreadable`（带 `error_type`），均不抛异常。
+- `find_latest_record(logs_dir, messages)`：按日期目录名倒序（最多 7 天），对 `logs/<day>/app.jsonl` 尾部 256KB 逆序逐行解析，返回最新命中记录；跳过损坏行。
+- ETL 结论：`etl.run.finished` → `ok`，`etl.run.failed` → `failed`，`etl.run.interrupted` → `interrupted`，`etl.run.started` → `running`。
+- 降级原因：心跳 stale / `state=error` / ETL 上次 `failed|interrupted` / **四个心跳文件全部缺失**（与 `/health` 的差异：CLI 用于无人值守，全缺失要报警）。
+- 退出码：`0` 无降级、`1` 有降级、`2` 未知子命令——可直接挂 cron/计划任务。
+
+### 9.30.5 测试
+
+- `tests/test_redact.py`：URL query / Bearer / token 形态 / 环境变量值 / 短值不掩码 / 幂等 / 嵌套对象递归。
+- `tests/test_jsonl_logger_redaction.py`：`message`、`stack_trace`、`error_message`、嵌套 `context` 均不残留密钥；邮箱掩码但 openid 保留。
+- `tests/test_ops.py`：心跳聚合（missing/unreadable/stale）、7 天窗口内最新 ETL、最近 ingest 失败、退出码。
+- `tests/test_langTrack_server.py::test_health`：`status=ok` + `degraded=false` + 四个组件键 + `etl`/`ingest` 初始态。

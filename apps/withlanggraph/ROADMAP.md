@@ -1592,3 +1592,24 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 **偏差说明**：未做 ops CLI / 深度 `/health` / 日志保留策略（列 P1/P2 待办）；架构图 `HB` 节点放 `OUT` 子图（心跳跨四个组件，非 langTrack 专属）。
 
 **待办**：P1 ops CLI（一条命令汇总四个心跳 + 最近 ETL 状态）；P1 `/health` 深度页（心跳新鲜度 / ETL 结果 / ingest 失败）；P1 `/etl/status` 不把 ETL stderr 原文暴露到局域网；P1 `stack_trace` 密钥脱敏；P2 日志保留与心跳历史归档；P2 `data/run/` 目录 README（R11）。详见 `docs/langTrack-roadmap.md` 与 `docs/observability-design.md`。
+
+## [2026-10-22] 可观测性 P1：统一脱敏 + `/health` 深度聚合 + ops CLI
+
+**背景**：P0 解决了「有没有信号」，但日志与运维接口仍有三类盲区：①`stack_trace` / `error_message` / 嵌套 `context` 可能带出第三方密钥（高德 key、LLM key）与收件邮箱；②`/etl/status` 把 ETL 子进程 stderr 原文经局域网接口回传；③`/health` 只回 `{"status":"ok"}`、没有一条命令能回答「现在怎么样」。另外 `geocode/route/poi` 的计数 `None` 同时表示「未执行」和「失败」，无法归因。
+
+**已完成**：
+- `src/gacore/redact.py`（新增）：`redact_text` / `redact_obj` 统一脱敏入口。值层按环境变量名（`*_KEY` / `*_TOKEN` / `*_SECRET` / `*_PASSWORD` / `*_AUTH`）匹配、值 ≥8 字符、最长优先替换；模式层覆盖 URL query 密钥、`Bearer`、`sk-/ghp-` 类 token、赋值式密钥（含裸 `key/sig/signature/auth`）。幂等、不抛异常。
+- `src/gacore/jsonl_logger.py`：`message` 与 console 行走 `redact_text`；`gacore_fields` 经 `redact_obj` 递归脱敏（`stack_trace` / `error_message` / `context` 全覆盖）；邮箱键仅当值含 `@` 时掩码，`to_openid` 保留。
+- `src/gacore/ops.py`（新增）：`python -m gacore.ops status [--json] [--root] [--run-dir] [--logs-dir]`。`read_heartbeats` 四组件状态（missing/unreadable/stale 不抛）；`find_latest_record` 7 天窗口扫 `logs/<day>/app.jsonl` 尾部 256KB；ETL 结论 `ok/failed/interrupted/running`；最近 `ingest failed` 摘要；退出码 0/1 供 cron。
+- `src/gacore/langTrack/server.py`：`/health` 返回 `status="ok"`（客户端探针兼容）+ `degraded/reasons/checked_at/components/etl/ingest`；心跳缺失不单独降级，`stale` / `state=error` / `etl.last_ok=false` 才计入 `reasons`；`/ingest` 异常写入 `_INGEST_STATE` 摘要（脱敏 ≤200 字符）；`/etl/status` 的 `last_error` 统一脱敏，`_run_etl_once` 失败只留 `rc=N: <stderr 末行>` 摘要。
+- `src/gacore/langTrack/etl.py`：新增 `_run_optional_step`，`geocode/route/poi` 输出 `step_status`（`ok/skipped/failed`）与 `step_error`（脱敏）；`SystemExit`（缺 API key）记 `skipped` 而非失败，计数仍为 `None`。
+- 测试：新增 `tests/test_redact.py`、`tests/test_jsonl_logger_redaction.py`、`tests/test_ops.py`；改造 `tests/test_langTrack_server.py::test_health` 适配新增字段。
+
+**实测验证**：
+- `uv run ruff check apps packages tests` 全绿。
+- 全量 `uv run --all-packages pytest -q` → **1600 passed / 5 skipped**。
+- ops CLI 真实冒烟（生产 `data/run` + `logs`）：正确读到当日 `etl.run.finished`（`run_id=f3029868`、`mode=full`、`duration_ms=10847.5`、`table_counts` 非空、`max_event_ts` 有值）；四个心跳文件均缺失 → `degraded=true`、`reasons=["no component heartbeat files"]`、退出码 1，符合「无人值守全缺失要报警」的设计。
+
+**偏差说明**：①本轮 P1 只落地「脱敏 / `/health` 深度聚合 / ops CLI / `/etl/status` 摘要 / ETL 子步状态」五项；设计文档 P1 行里的「`stack_trace=str(e)` 全仓清扫、proactive/extract 池内异常可观测、scheduler 连续死亡自愈告警、`/health` 的 DB/磁盘/水位深度检查」未在本轮实现，继续留 P1。②ops CLI 的降级口径与 `/health` 有意不同：四个心跳全缺失时 CLI 判降级（无人值守告警），`/health` 不降级（服务可脱离统一启动器独立运行）。③全量测试使用了 `--basetemp` 覆盖：仓库根 `tmp_pytest/` 被历史进程写成拒绝访问的 ACL（当前用户无法读取/删除/取 ACL），pytest 启动清理该目录即失败；这是环境残留，不是代码问题，需管理员权限清理。
+
+**待办更新**：①P1 剩余项（全仓 `stack_trace=str(e)` 清扫、proactive/extract 池异常可观测、scheduler 连续死亡自愈/告警、`/health` DB/磁盘/水位检查）。②P2 日志保留/轮转、心跳历史归档、`data/run/` README（R11）。③环境清理：管理员 PowerShell 执行 `takeown /f tmp_pytest /r /d y` → `icacls tmp_pytest /reset /t` → `Remove-Item tmp_pytest -Recurse -Force`，恢复默认 `uv run pytest` 门禁。

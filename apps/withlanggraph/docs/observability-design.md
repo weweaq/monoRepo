@@ -537,6 +537,7 @@ Select-String -Path apps\withlanggraph\logs\<date>\app.jsonl -Pattern '"message"
 | --- | --- | --- |
 | P0（本设计） | 心跳 + scheduler 崩溃回调/优雅停机 + ingest 日志 + ETL 摘要 + exception helper + 测试隔离 | 上述验收 |
 | P1 | `python -m gacore.ops status` 聚合心跳/最新 ETL/最新 ingest；`/health` 深度检查 DB/磁盘/水位；`stack_trace=str(e)` 全仓清扫；敏感字段脱敏（`to` 邮箱等）；proactive/extract 池内异常可观测；scheduler 连续死亡时的自愈/告警 | 一条命令回答“现在怎么样”，且日志无 PII 泄露 |
+| P1 已落地（2026-10-22） | `gacore.redact` 统一脱敏（日志/`/health`/`/etl/status` 全链路）；`/health` 深度聚合（心跳 + 最近 ETL + 最近 ingest 失败）；`python -m gacore.ops status`（退出码 0/1）；`/etl/status` 只回脱敏摘要；`geocode/route/poi` 用 `step_status`/`step_error` 区分「未执行/失败」 | 实现细节见 `docs/langTrack-tech.md` §9.30 |
 | P2 | 日志保留/轮转；启动时清理 stale 心跳；dev-console/checkself/mermaid-viewer 统一 schema | 磁盘可控、跨 app 可观测 |
 
 ## 14. 附录：字段字典

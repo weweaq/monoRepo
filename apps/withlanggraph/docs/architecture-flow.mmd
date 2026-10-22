@@ -62,7 +62,7 @@ flowchart TD
 
     subgraph LANG["⑤ langTrack 数据子系统"]
         direction LR
-        IG["POST /ingest"]
+        IG["POST /ingest<br/>+ GET /health 深度聚合<br/>(心跳新鲜度 / 最近 ETL / 最近 ingest 失败)<br/>+ GET /etl/status last_error 只回脱敏摘要"]
         RW["原始层 events"]
         ET["ETL 事实层"]
         OU["读方出口<br/>fact_card·report·dashboard·qq_push"]
@@ -91,8 +91,10 @@ flowchart TD
 
     subgraph OUT["④ 退出/投递"]
         FB["反馈闭环 feedback.py · 三级修复阶梯<br/>触发=QQ 消息经 feedback_route() 或 评审页<br/>①apply_feedback 确定性补丁<br/>②revise_report_llm 最小修订(默认):<br/>零工具单轮+diff 门禁非目标节逐字不变<br/>③rerun --day 整体重生成(需确认)<br/>_deliver_email 主题 {date}（重生成 vN）"]
-        LG["jsonl_logger<br/>+ Logger.exception(真栈→error_type/error_message/stack_trace)<br/>+ llm_request_log"]
+        LG["jsonl_logger<br/>+ Logger.exception(真栈→error_type/error_message/stack_trace)<br/>+ message/fields/console 全链路脱敏(redact)<br/>+ llm_request_log"]
         HB[("data/run/*.json 组件心跳<br/>gacore.heartbeat.Heartbeat<br/>main/scheduler/qq/langtrack_server<br/>原子写 os.replace · beat(state) 保留上一态<br/>stale_after_sec=max(60, interval×3)<br/>GACORE_RUN_DIR 覆盖")]
+        RD["gacore/redact.py 统一脱敏入口<br/>redact_text / redact_obj(幂等·不抛)<br/>值层: *_KEY/*_TOKEN/*_SECRET 等环境变量值(≥8字符·最长优先)<br/>模式层: URL query · Bearer · sk-/ghp- token · 赋值式密钥"]
+        OPS["python -m gacore.ops status<br/>read_heartbeats(四个组件) + find_latest_record<br/>7天窗口扫 logs/&lt;day&gt;/app.jsonl 尾部256KB<br/>etl.run.* → ok/failed/interrupted/running<br/>+ 最近 ingest failed · 退出码 0/1 供 cron"]
     end
 
     %% ===== 层间边 (带语义) =====
@@ -123,6 +125,12 @@ flowchart TD
     SC -. "scheduler 心跳" .-> HB
     QQ -. "qq 心跳" .-> HB
     MN -. "main 心跳" .-> HB
+    HB -. "read_heartbeats: state/age/stale/detail" .-> OPS
+    LG -. "logs/&lt;day&gt;/app.jsonl 7天窗口尾部" .-> OPS
+    LG -. "message/fields/console 脱敏" .-> RD
+    IG -. "/health detail + ingest 失败摘要 + /etl/status last_error" .-> RD
+    ET -. "step_error / etl.step.failed 脱敏" .-> RD
+    OPS -. "心跳 detail / 日志记录脱敏" .-> RD
     OU --> FC2
     RVW -. "⟳立即转换ETL: /api/etl/run·/api/etl/status 代理 :8000<br/>(防重入锁在 langTrack 进程内·与周期线程共用)" .-> ET
     PS -. "区县背景note" .-> SIP
@@ -185,7 +193,7 @@ flowchart TD
     class TR,JD,AP,AU,TRN mem
     class T1,T2,T3,T4,T5,T6 tools
     class IG,RW,ET,OU,EX,OC lang
-    class LG out
+    class LG,RD,OPS out
     class FB bnd
     class KG state
     %% ⑥ 日报链路 v3（2026-10-04 收敛：全部节点可回溯源码）
