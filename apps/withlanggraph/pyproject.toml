@@ -13,6 +13,7 @@ dependencies = [
     "langgraph-checkpoint-sqlite",
     "langchain-core",
     "langchain-openai",
+    "openai",
     "langchain-anthropic",
     "python-dotenv",
     "httpx",

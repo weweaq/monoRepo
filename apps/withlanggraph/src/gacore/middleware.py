@@ -35,10 +35,12 @@ from langchain.agents.middleware import (
     hook_config,
 )
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
 
 from gacore.config import Config
 from gacore.context import build_system_prompt
 from gacore.jsonl_logger import get_logger
+from gacore.redact import redact_text
 from gacore.state import GAState
 
 logger = get_logger("middleware")
@@ -451,5 +453,20 @@ class GATurnLogicMiddleware(AgentMiddleware[GAState, None, Any]):
 
 
 def format_agent_error(exc: Exception) -> str:
-    """Format a provider failure as the GA agent-error message (for ModelRetryMiddleware)."""
-    return f"[Agent error: {exc}]"
+    """Format a provider failure as the GA agent-error message (for ModelRetryMiddleware).
+
+    The text is sent to the chat user verbatim, so transient transport failures get a
+    Chinese, actionable message instead of the SDK's raw ``Connection error.``.
+    """
+    # APITimeoutError subclasses APIConnectionError; check the narrower class first.
+    if isinstance(exc, APITimeoutError):
+        detail = "模型响应超时（已自动重试），请稍后再发一次"
+    elif isinstance(exc, APIConnectionError):
+        detail = "模型连接失败（已自动重试），请稍后再发一次"
+    elif isinstance(exc, RateLimitError):
+        detail = "模型请求过于频繁（已自动重试），请稍后再发一次"
+    elif isinstance(exc, APIStatusError):
+        detail = f"模型服务异常（HTTP {exc.status_code}），请稍后再试"
+    else:
+        detail = str(exc)
+    return redact_text(f"{_AGENT_ERROR_PREFIX} {detail}]")

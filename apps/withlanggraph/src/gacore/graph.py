@@ -257,10 +257,15 @@ def _build_core_agent(
         middleware=[
             GAPromptMiddleware(cfg),
             GATurnLogicMiddleware(),
+            # Chat runs on LLM_PROVIDER (zhipu) with no cross-provider fallback; one
+            # middleware-level retry with backoff absorbs a transient connection reset.
             ModelRetryMiddleware(
-                max_retries=0,
+                max_retries=1,
                 retry_on=(Exception,),
                 on_failure=format_agent_error,
+                initial_delay=1.0,
+                backoff_factor=2.0,
+                max_delay=10.0,
             ),
         ],
         checkpointer=checkpointer,

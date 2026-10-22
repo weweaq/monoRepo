@@ -15,12 +15,14 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from unittest.mock import patch
 
+import httpx
 import pytest
 from conftest import BindableFakeMessagesListChatModel
 from langchain.agents import create_agent
 from langchain.agents.middleware import ModelRetryMiddleware
 from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
+from openai import APIConnectionError, APIStatusError, APITimeoutError, RateLimitError
 
 from gacore.config import Config
 from gacore.middleware import (
@@ -442,6 +444,74 @@ def test_graph_model_failure_injects_agent_error(tmp_cfg: Config, message_llm: A
     last = final["messages"][-1]
     assert isinstance(last, AIMessage)
     assert last.content.startswith("[Agent error: provider boom]")
+
+
+def test_format_agent_error_transient_messages() -> None:
+    """Transport failures surface as Chinese, actionable text (not the SDK's raw error)."""
+    req = httpx.Request("POST", "https://open.bigmodel.cn/api/paas/v4/chat/completions")
+    assert format_agent_error(APIConnectionError(request=req)) == (
+        "[Agent error: 模型连接失败（已自动重试），请稍后再发一次]"
+    )
+    assert "模型响应超时" in format_agent_error(APITimeoutError(request=req))
+    rate = RateLimitError("429", response=httpx.Response(429, request=req), body=None)
+    assert "请求过于频繁" in format_agent_error(rate)
+    status = APIStatusError("500", response=httpx.Response(500, request=req), body=None)
+    assert "HTTP 500" in format_agent_error(status)
+
+
+def test_format_agent_error_redacts_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TEST_API_KEY", "abcdefgh12345")
+    text = format_agent_error(RuntimeError("boom key=abcdefgh12345"))
+    assert "abcdefgh12345" not in text
+    assert text.startswith("[Agent error: boom key=***")
+
+
+class _FlakyFake(BindableFakeMessagesListChatModel):
+    """Fails the first N model calls with a connection error, then succeeds."""
+
+    calls: int = 0
+    _fail_times: int = 1
+
+    def __init__(self, responses: list[Any], *, fail_times: int = 1) -> None:
+        super().__init__(responses=responses)
+        self.calls = 0
+        self._fail_times = fail_times
+
+    def invoke(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls += 1
+        if self.calls <= self._fail_times:
+            raise APIConnectionError(
+                request=httpx.Request("POST", "https://open.bigmodel.cn/api/paas/v4")
+            )
+        return super().invoke(*args, **kwargs)
+
+
+def test_graph_retries_transient_connection_error(tmp_cfg: Config) -> None:
+    """One transient reset is absorbed by the middleware retry, not shown to the user."""
+    llm = _FlakyFake([AIMessage(content="ok")], fail_times=1)
+    graph = create_agent(
+        llm,
+        tools=[],
+        state_schema=GAState,
+        middleware=[
+            GAPromptMiddleware(tmp_cfg),
+            GATurnLogicMiddleware(),
+            ModelRetryMiddleware(
+                max_retries=1,
+                retry_on=(Exception,),
+                on_failure=format_agent_error,
+                initial_delay=0.01,
+            ),
+        ],
+        checkpointer=MemorySaver(),
+        name="test-gacore-retry",
+    )
+
+    final = graph.invoke(new_state("hello", tmp_cfg), {"configurable": {"thread_id": "retry"}})
+
+    assert final["exit_reason"] == "CURRENT_TASK_DONE"
+    assert llm.calls == 2
+    assert final["messages"][-1].content == "ok"
 
 
 # ------------------------------------------------------- integration: LLM call log
