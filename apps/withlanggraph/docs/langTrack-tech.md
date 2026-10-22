@@ -2020,3 +2020,39 @@ python -m gacore.ops status --root <app-root> --run-dir <dir> --logs-dir <dir>
 **测试**：`tests/test_middleware.py` 新增 3 例——四类 openai 异常的文案映射、异常文本中的密钥被脱敏、首次 `APIConnectionError` 后中间件重试成功（`calls==2`、`exit_reason=CURRENT_TASK_DONE`）；该文件 27 passed。
 
 **已知缺口（未做）**：LLM 调用失败只写 `logs/llm_requests.jsonl` 的 `response.error`，不进 `app.jsonl`，也不进 `/health` 聚合，因此 `/health` 看不到模型侧失败。
+
+## 9.32 QQ 多消息合并：1.2s 静默窗口 + 同用户单轮串行（2026-10-22）
+
+**旧行为**：`_stream_agent` 开头直接 `old.cancel()`，被取消的任务在 `CancelledError` 分支发送 `⏹️ 任务已停止`。用户连续发两条时，第一条正在生成就被第二条取消，观感是“上一条被截断 + 停卡片 + 重答”。
+
+**新行为**：
+
+| 机制 | 位置 | 说明 |
+| --- | --- | --- |
+| 静默窗口 | `qq.py:_MERGE_WINDOW_SECONDS = 1.2` | 同一用户 1.2s 内的连续文本合并为一条 `HumanMessage`（换行拼接），只跑一轮 |
+| 入队 | `qq.py:_enqueue_agent_turn` | 文本 turn 不再直接 `create_task(_run_agent)`；追加到 `_pending_texts[user_id]`，刷新 `_merge_last`，并保证每用户只有一个 `_merge_loop` |
+| 串行循环 | `qq.py:_merge_loop` | 先按 `_merge_last` 做去抖，再 `pop` 全部积压文本 → 取消/等待旧轮 → 启动本轮 → 若期间又有积压则继续下一轮，直到清空 |
+| 静默取消 | `qq.py:_enqueue_agent_turn` | 新消息到达且当前是合并循环持有的文本轮（`_merge_turn`）时，先置 `_merge_cancel` 再 `cancel()`；`_stream_agent` 的停止卡片分支检查该集合，命中则不发 `⏹️ 任务已停止` |
+| 防丢消息 | `qq.py:_turn_input_in_checkpoint` | 取消发生在 `astream` 写 checkpoint 之前时，旧文本不在历史里；下一轮启动前用 `graph.aget_state` 检查，缺失则把 `_merge_replay` 的文本拼回 |
+| 非文本轮保护 | `qq.py:_merge_loop` | 正在跑 `ask_user` resume 或图片轮（不在 `_inflight_text` 中）时不取消，等其结束后再跑合并轮，避免丢失不可重放的 `Command(resume=...)` / 图片输入 |
+| `/stop` 语义不变 | `qq.py:_handle_command` → `task.cancel()` | 显式停止不置 `_merge_cancel`，仍发送 `⏹️ 任务已停止`；合并循环捕获 `CancelledError` 后清空状态退出 |
+
+**内存状态**（全部 RAM-only，进程重启即清）：
+
+| 字段 | 含义 |
+| --- | --- |
+| `_pending_texts` | user_id → 等待合并的文本列表 |
+| `_merge_task` | user_id → 唯一去抖/串行循环 task |
+| `_merge_turn` | user_id → 循环持有的当前轮 task（新消息取消它） |
+| `_merge_last` | user_id → 最近一条消息的 `time.monotonic()`，用于去抖 |
+| `_merge_replay` | user_id → 已取消但可能未落 checkpoint 的文本 |
+| `_inflight_text` | user_id → 当前文本轮正文（判断是否可安全取消 + 回放） |
+| `_merge_cancel` | 正在为合并而取消的 user_id 集合（抑制停止卡片） |
+
+**边界**：
+- 每条消息最多增加 1.2s 延迟；窗口内连发只回一条。
+- 正在跑非文本轮时到达的文本不会打断，会在该轮结束后作为下一轮回答（两条回复）。
+- 取消只丢弃尚未发送的生成内容（最终答案在流结束后统一发送，用户看不到半截），但已执行的工具副作用不会回滚；checkpoint 保留工具结果，模型通常会复用而不再重复调用。
+- 群聊按 `user_id` 隔离，不同成员互不打断。
+
+**测试**：`tests/test_qq.py` 新增 5 例——窗口内合并、运行中取消且不重复已落库文本、checkpoint 缺失时回放、合并取消不发停止卡片、`/stop` 仍发停止卡片；该文件 27 passed / 1 skipped。全量 `pytest` 1608 passed / 5 skipped（`test_cli` 一次 `agent_graph.png` 瞬时文件锁失败，单跑 11 passed）。

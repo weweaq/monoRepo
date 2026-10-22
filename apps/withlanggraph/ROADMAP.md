@@ -1632,3 +1632,20 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 **偏差说明**：聊天继续使用 `LLM_PROVIDER=zhipu`，不做跨 provider 回退（用户指定）；抽取链路 `KG_EXTRACT_LLM_PROVIDER=opencode` 未改。架构拓扑未变，仅在架构图的 middleware 链节点补充重试语义。
 
 **待办更新**：①LLM 失败未进 `app.jsonl` 与 `/health` 聚合，模型侧故障仍只能翻 `llm_requests.jsonl`，建议下一轮补 `llm.call.failed` 日志与健康字段。②当前 QQ 进程（pid 14256，10-21 21:38 启动）仍是旧代码，需重启才能加载本次重试逻辑与 P1 心跳。
+
+## [2026-10-22] QQ 多消息合并：1.2s 静默窗口 + 同用户单轮串行
+
+**背景**：用户连续发两条消息时，第一条正在生成就被 `_stream_agent` 开头的 `old.cancel()` 取消，并收到 `⏹️ 任务已停止` 卡片（截图 17:25）。根因是“同用户最新消息优先”的取消策略，且没有合并窗口。
+
+**已完成**：
+- `src/gacore/frontends/qq.py`：新增 `_MERGE_WINDOW_SECONDS=1.2`；文本 turn 改走 `_enqueue_agent_turn` → 每用户唯一 `_merge_loop`（去抖 + 串行）；新消息到达时取消 `_merge_turn` 并置 `_merge_cancel`，`_stream_agent` 命中该集合则不再发停止卡片；`_turn_input_in_checkpoint` + `_merge_replay` 防止取消早于 checkpoint 写入时丢消息；`ask_user` resume / 图片轮改为等待结束而非取消；`/stop` 仍显式提示。
+- `tests/test_qq.py`：新增 5 例（窗口内合并、运行中静默取消且不重复已落库文本、checkpoint 缺失回放、合并取消无停止卡片、`/stop` 仍有停止卡片）。
+
+**实测验证**：
+- `uv run ruff check apps packages tests` 全绿。
+- `apps/withlanggraph/tests/test_qq.py` → 27 passed / 1 skipped。
+- 全量 `uv run --all-packages pytest -q` → **1608 passed / 5 skipped**；`test_cli.py::test_unknown_command_is_reported` 一次因 `agent_graph.png` 瞬时文件锁失败，单跑该文件 11 passed，确认与本次改动无关。
+
+**偏差说明**：合并只在同一 `user_id` 的普通文本轮生效；命令、日报反馈、`ask_user` 续接、图片轮保持原路由。非文本轮期间到达的文本不打断，会在其后作为下一轮回答（两条回复）。
+
+**待办更新**：①1.2s 窗口目前为常量，若实际使用觉得延迟明显，可改为 `QQ_MERGE_WINDOW_SECONDS` 环境变量。②如需“非文本轮也合并”，需为图片/`resume` 输入定义可重放语义，暂不做。③gacore 需重启后合并逻辑才生效。
