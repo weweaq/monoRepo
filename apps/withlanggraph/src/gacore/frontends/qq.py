@@ -174,6 +174,9 @@ _LOG_FILE: str = os.environ.get("QQ_LOG_FILE", "").strip()
 
 _SPLIT_LIMIT: Final = 4500  # QQ markdown message length safety margin
 
+# Burst messages from one user inside this window are merged into a single agent turn.
+_MERGE_WINDOW_SECONDS: Final = 1.2
+
 # --------------------------------------------------------------------------- Phase 1: trivial-input gate
 # Ultra-short / casual words get a light (non-agent) one-liner reply; real questions
 # and tasks flow into the full graph. Conservative by design: anything borderline is
@@ -893,6 +896,21 @@ class QQApp:
 
         self._running_tasks: dict[str, asyncio.Task] = {}  # user_id -> running agent task
 
+        # user_id -> texts waiting in the merge window; a newer message resets the timer.
+        self._pending_texts: dict[str, list[str]] = {}
+        # user_id -> the single per-user drain loop (debounce + serialized turns).
+        self._merge_task: dict[str, asyncio.Task] = {}
+        # user_id -> the turn task owned by the loop (cancelled when a newer message lands).
+        self._merge_turn: dict[str, asyncio.Task] = {}
+        self._merge_last: dict[str, float] = {}
+        # Text of a cancelled turn that may not have reached the checkpoint yet.
+        self._merge_replay: dict[str, str] = {}
+        # user_id -> text of the currently streaming turn (replayed if cancellation
+        # happened before its HumanMessage reached the checkpoint).
+        self._inflight_text: dict[str, str] = {}
+        # user_ids whose in-flight turn is being cancelled for a merge (no stop notice).
+        self._merge_cancel: set[str] = set()
+
         # user_id -> one-shot rollover injection text, consumed by the first _run_agent
         # turn after a cross-day _maybe_rollover (kept in RAM only; never persisted).
         self._pending_rollover: dict[str, str] = {}
@@ -1123,9 +1141,9 @@ class QQApp:
                 )
                 return
 
-            # 4) Normal agent turn.
+            # 4) Normal agent turn — buffered so a burst merges into one run.
 
-            asyncio.create_task(self._run_agent(chat_id, content, user_id, msg_id=msg_id, is_group=is_group))
+            self._enqueue_agent_turn(chat_id, content, user_id, msg_id=msg_id, is_group=is_group)
 
 
 
@@ -1828,7 +1846,124 @@ class QQApp:
 
         await self._stream_agent(chat_id, state, config, msg_id=msg_id, is_group=is_group, user_id=user_id)
 
+    # ------------------------------------------------------- burst merge
 
+    def _enqueue_agent_turn(
+        self,
+        chat_id: str,
+        content: str,
+        user_id: str | None,
+        *,
+        msg_id: str | None,
+        is_group: bool,
+    ) -> None:
+        """Buffer a text turn; a burst from one user is merged into a single run."""
+        if user_id is None:
+            asyncio.create_task(
+                self._run_agent(chat_id, content, user_id, msg_id=msg_id, is_group=is_group)
+            )
+            return
+
+        self._pending_texts.setdefault(user_id, []).append(content)
+        self._merge_last[user_id] = time.monotonic()
+
+        loop = self._merge_task.get(user_id)
+        if loop is not None and not loop.done():
+            # Supersede the in-flight text turn now; the loop restarts after the window.
+            turn = self._merge_turn.get(user_id) or self._running_tasks.get(user_id)
+            if turn is not None and not turn.done() and user_id in self._inflight_text:
+                self._merge_cancel.add(user_id)
+                turn.cancel()
+            return
+
+        self._merge_task[user_id] = asyncio.create_task(
+            self._merge_loop(chat_id, user_id, msg_id=msg_id, is_group=is_group)
+        )
+
+    async def _merge_loop(
+        self,
+        chat_id: str,
+        user_id: str,
+        *,
+        msg_id: str | None,
+        is_group: bool,
+    ) -> None:
+        """Debounce one user's texts, then run one turn at a time until the buffer drains."""
+        try:
+            while True:
+                while True:
+                    idle = time.monotonic() - self._merge_last.get(user_id, 0.0)
+                    if idle >= _MERGE_WINDOW_SECONDS:
+                        break
+                    await asyncio.sleep(_MERGE_WINDOW_SECONDS - idle)
+
+                texts = self._pending_texts.pop(user_id, [])
+                if not texts:
+                    return
+                merged = "\n".join(texts)
+
+                replay = self._merge_replay.pop(user_id, None)
+                if replay and not await self._turn_input_in_checkpoint(user_id, replay):
+                    merged = f"{replay}\n{merged}"
+
+                running = self._running_tasks.get(user_id)
+                if running is not None and not running.done():
+                    if user_id in self._inflight_text:
+                        self._merge_cancel.add(user_id)
+                        running.cancel()
+                        with suppress(asyncio.CancelledError):
+                            await running
+                        self._merge_cancel.discard(user_id)
+                        inflight = self._inflight_text.pop(user_id, None)
+                        if inflight and not await self._turn_input_in_checkpoint(user_id, inflight):
+                            merged = f"{inflight}\n{merged}"
+                    else:
+                        # ask_user resume / image turn: not replayable as plain text,
+                        # so let it finish instead of cancelling it.
+                        try:
+                            await running
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception:  # noqa: BLE001 — must not block the merge
+                            pass
+
+                self._inflight_text[user_id] = merged
+                turn = asyncio.create_task(
+                    self._run_agent(chat_id, merged, user_id, msg_id=msg_id, is_group=is_group)
+                )
+                self._merge_turn[user_id] = turn
+                try:
+                    await turn
+                except asyncio.CancelledError:
+                    if user_id in self._merge_cancel:
+                        prior = self._merge_replay.get(user_id)
+                        self._merge_replay[user_id] = f"{prior}\n{merged}" if prior else merged
+                    current = asyncio.current_task()
+                    if current is not None and current.cancelling():
+                        raise
+                finally:
+                    self._merge_cancel.discard(user_id)
+                    if self._merge_turn.get(user_id) is turn:
+                        self._merge_turn.pop(user_id, None)
+                    if self._inflight_text.get(user_id) == merged:
+                        self._inflight_text.pop(user_id, None)
+
+                if not self._pending_texts.get(user_id):
+                    return
+        finally:
+            self._merge_task.pop(user_id, None)
+
+    async def _turn_input_in_checkpoint(self, user_id: str, text: str) -> bool:
+        config = {"configurable": {"thread_id": self._thread_for(user_id)}}
+        try:
+            state = await self.graph.aget_state(config)
+        except Exception:  # noqa: BLE001 — unknown checkpoint must not lose the message
+            return False
+        messages = (getattr(state, "values", None) or {}).get("messages") or []
+        for message in reversed(messages):
+            if isinstance(message, HumanMessage):
+                return text in str(message.content)
+        return False
 
     async def _resume_agent(
 
@@ -2167,7 +2302,9 @@ class QQApp:
 
                 logger.info(f"Agent task cancelled for user {user_id}")
 
-                await self.send_text(chat_id, "⏹️ 任务已停止", is_group=is_group)
+                # Merge cancellation is silent: the merged turn answers both messages.
+                if user_id not in self._merge_cancel:
+                    await self.send_text(chat_id, "⏹️ 任务已停止", is_group=is_group)
 
                 raise
 

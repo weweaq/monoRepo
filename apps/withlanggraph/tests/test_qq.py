@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import types
 from pathlib import Path
@@ -381,3 +382,144 @@ def test_time_intent_words_fail_open_full_graph(msg: str) -> None:
     from gacore.frontends.qq import trivial_detect
 
     assert trivial_detect(msg) is False
+
+
+@pytest.mark.asyncio
+async def test_burst_messages_merge_into_one_turn(monkeypatch) -> None:
+    """Two messages inside the merge window run as one turn with joined text."""
+    monkeypatch.setattr(qq, "_MERGE_WINDOW_SECONDS", 0.01)
+    app = QQApp(MagicMock())
+    app._run_agent = AsyncMock()
+
+    app._enqueue_agent_turn("chat", "第一条", "user-1", msg_id="m1", is_group=False)
+    app._enqueue_agent_turn("chat", "第二条", "user-1", msg_id="m2", is_group=False)
+    await asyncio.sleep(0.05)
+
+    app._run_agent.assert_awaited_once()
+    assert app._run_agent.await_args.args[1] == "第一条\n第二条"
+
+
+@pytest.mark.asyncio
+async def test_merge_cancels_running_turn_without_replaying_committed_text(monkeypatch) -> None:
+    """A running turn is cancelled silently; text already in the checkpoint is not re-sent."""
+    monkeypatch.setattr(qq, "_MERGE_WINDOW_SECONDS", 0.01)
+    app = QQApp(MagicMock())
+    app._run_agent = AsyncMock()
+    app._turn_input_in_checkpoint = AsyncMock(return_value=True)
+
+    async def _forever() -> None:
+        await asyncio.sleep(30)
+
+    old = asyncio.create_task(_forever())
+    app._running_tasks["user-1"] = old
+    app._inflight_text["user-1"] = "第一条"
+
+    app._enqueue_agent_turn("chat", "第二条", "user-1", msg_id="m2", is_group=False)
+    await asyncio.sleep(0.05)
+
+    assert old.cancelled()
+    app._run_agent.assert_awaited_once()
+    assert app._run_agent.await_args.args[1] == "第二条"
+
+
+@pytest.mark.asyncio
+async def test_merge_replays_inflight_text_when_checkpoint_missed(monkeypatch) -> None:
+    """If cancellation beat the checkpoint write, the in-flight text is replayed."""
+    monkeypatch.setattr(qq, "_MERGE_WINDOW_SECONDS", 0.01)
+    app = QQApp(MagicMock())
+    app._run_agent = AsyncMock()
+    app._turn_input_in_checkpoint = AsyncMock(return_value=False)
+
+    async def _forever() -> None:
+        await asyncio.sleep(30)
+
+    old = asyncio.create_task(_forever())
+    app._running_tasks["user-1"] = old
+    app._inflight_text["user-1"] = "第一条"
+
+    app._enqueue_agent_turn("chat", "第二条", "user-1", msg_id="m2", is_group=False)
+    await asyncio.sleep(0.05)
+
+    assert old.cancelled()
+    app._run_agent.assert_awaited_once()
+    assert app._run_agent.await_args.args[1] == "第一条\n第二条"
+
+
+@pytest.mark.asyncio
+async def test_message_during_turn_restarts_with_merged_text(monkeypatch) -> None:
+    """A message arriving mid-turn cancels it and the loop restarts once, without overlap."""
+    monkeypatch.setattr(qq, "_MERGE_WINDOW_SECONDS", 0.01)
+    app = QQApp(MagicMock())
+    app._turn_input_in_checkpoint = AsyncMock(return_value=True)
+    calls: list[str] = []
+
+    async def fake_run(chat_id, text, user_id, *, msg_id=None, is_group=False):
+        calls.append(text)
+        if len(calls) == 1:
+            await asyncio.sleep(30)
+
+    app._run_agent = fake_run
+
+    app._enqueue_agent_turn("chat", "第一条", "user-1", msg_id="m1", is_group=False)
+    await asyncio.sleep(0.2)
+    assert calls == ["第一条"]
+
+    app._enqueue_agent_turn("chat", "第二条", "user-1", msg_id="m2", is_group=False)
+    await asyncio.sleep(0.2)
+
+    assert calls == ["第一条", "第二条"]
+    assert app._merge_cancel == set()
+    assert "user-1" not in app._inflight_text
+
+
+class _BlockingGraph:
+    """Minimal graph whose stream blocks until cancelled."""
+
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+
+    async def aget_state(self, config):
+        return types.SimpleNamespace(values={"messages": []}, next=())
+
+    async def astream(self, *args, **kwargs):
+        self.started.set()
+        await asyncio.sleep(30)
+        yield {}
+
+
+async def _cancelled_turn(tmp_cfg, *, merge_cancel: bool) -> list[str]:
+    qq._rendered_msg_ids.clear()
+    app = QQApp(MagicMock())
+    app.send_text = AsyncMock()
+    graph = _BlockingGraph()
+    app.graph = graph
+
+    task = asyncio.create_task(
+        app._stream_agent(
+            "chat",
+            new_state("hi", tmp_cfg),
+            {"configurable": {"thread_id": "merge-stop"}},
+            msg_id=None,
+            is_group=False,
+            user_id="user-1",
+        )
+    )
+    await asyncio.wait_for(graph.started.wait(), timeout=2)
+    if merge_cancel:
+        app._merge_cancel.add("user-1")
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    return [call.args[1] for call in app.send_text.call_args_list if len(call.args) > 1]
+
+
+@pytest.mark.asyncio
+async def test_merge_cancel_sends_no_stop_notice(tmp_cfg) -> None:
+    texts = await _cancelled_turn(tmp_cfg, merge_cancel=True)
+    assert "⏹️ 任务已停止" not in texts
+
+
+@pytest.mark.asyncio
+async def test_explicit_stop_still_notifies(tmp_cfg) -> None:
+    texts = await _cancelled_turn(tmp_cfg, merge_cancel=False)
+    assert "⏹️ 任务已停止" in texts
