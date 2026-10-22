@@ -35,7 +35,7 @@ flowchart TD
         subgraph SIDE["支撑模块 (主图依赖, 非状态机节点)"]
             direction LR
             ST["state.py GAState<br/>working/轮次/exit_reason"]
-            MDW["middleware 链<br/>GAPrompt → GATurnLogic →<br/>ModelRetry(langchain)"]
+            MDW["middleware 链<br/>GAPrompt → GATurnLogic →<br/>ModelRetry(1 次退避重试)<br/>瞬时断连→中文友好提示"]
         end
     end
 

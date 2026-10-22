@@ -1613,3 +1613,22 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 **偏差说明**：①本轮 P1 只落地「脱敏 / `/health` 深度聚合 / ops CLI / `/etl/status` 摘要 / ETL 子步状态」五项；设计文档 P1 行里的「`stack_trace=str(e)` 全仓清扫、proactive/extract 池内异常可观测、scheduler 连续死亡自愈告警、`/health` 的 DB/磁盘/水位深度检查」未在本轮实现，继续留 P1。②ops CLI 的降级口径与 `/health` 有意不同：四个心跳全缺失时 CLI 判降级（无人值守告警），`/health` 不降级（服务可脱离统一启动器独立运行）。③全量测试使用了 `--basetemp` 覆盖：仓库根 `tmp_pytest/` 被历史进程写成拒绝访问的 ACL（当前用户无法读取/删除/取 ACL），pytest 启动清理该目录即失败；这是环境残留，不是代码问题，需管理员权限清理。
 
 **待办更新**：①P1 剩余项（全仓 `stack_trace=str(e)` 清扫、proactive/extract 池异常可观测、scheduler 连续死亡自愈/告警、`/health` DB/磁盘/水位检查）。②P2 日志保留/轮转、心跳历史归档、`data/run/` README（R11）。③环境清理：管理员 PowerShell 执行 `takeown /f tmp_pytest /r /d y` → `icacls tmp_pytest /reset /t` → `Remove-Item tmp_pytest -Recurse -Force`，恢复默认 `uv run pytest` 门禁。
+
+## [2026-10-22] 聊天模型瞬时失败：一次退避重试 + 中文友好报错
+
+**背景**：08:59 QQ 对话回复 `[Agent error: Connection error.]`。日志定位到 zhipu `GLM-5.3-Flash` 的 `ainvoke` 在 4.6s 时抛 `OpenAIConnectionError`；请求体仅 38KB，同配置真实调用实测成功，判定为瞬时连接重置。原中间件 `max_retries=0`、SDK 默认仅 1 次重试，一次抖动即直接暴露给用户。
+
+**已完成**：
+- `src/gacore/graph.py`：聊天核心 agent 的 `ModelRetryMiddleware` 改为 `max_retries=1` + 指数退避（`initial_delay=1.0` / `backoff_factor=2.0` / `max_delay=10.0`）；`retry_on` 保持 `(Exception,)`，最终失败仍走 `on_failure` → `AGENT_ERROR`。
+- `src/gacore/middleware.py`：`format_agent_error` 按 openai 异常类型输出中文提示（超时/连接失败/限流/HTTP 状态码），其余保留原 `str(exc)`；输出统一 `redact_text`。
+- `pyproject.toml`：显式声明 `openai`（直接 import 需落盘，R2）。
+- `tests/test_middleware.py`：新增四类异常文案映射、密钥脱敏、首次断连后重试成功三组用例。
+
+**实测验证**：
+- `uv run ruff check apps packages tests` 全绿。
+- `uv run --all-packages pytest -q`（`--basetemp` 覆盖坏掉的 `tmp_pytest`）→ **1603 passed / 5 skipped**；`test_middleware.py` 27 passed。
+- 真实调用复核：带全量 30 个工具的 zhipu 调用成功（5.33s），确认故障为瞬时而非配置/工具列表问题。
+
+**偏差说明**：聊天继续使用 `LLM_PROVIDER=zhipu`，不做跨 provider 回退（用户指定）；抽取链路 `KG_EXTRACT_LLM_PROVIDER=opencode` 未改。架构拓扑未变，仅在架构图的 middleware 链节点补充重试语义。
+
+**待办更新**：①LLM 失败未进 `app.jsonl` 与 `/health` 聚合，模型侧故障仍只能翻 `llm_requests.jsonl`，建议下一轮补 `llm.call.failed` 日志与健康字段。②当前 QQ 进程（pid 14256，10-21 21:38 启动）仍是旧代码，需重启才能加载本次重试逻辑与 P1 心跳。

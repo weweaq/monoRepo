@@ -2002,3 +2002,21 @@ python -m gacore.ops status --root <app-root> --run-dir <dir> --logs-dir <dir>
 - `tests/test_jsonl_logger_redaction.py`：`message`、`stack_trace`、`error_message`、嵌套 `context` 均不残留密钥；邮箱掩码但 openid 保留。
 - `tests/test_ops.py`：心跳聚合（missing/unreadable/stale）、7 天窗口内最新 ETL、最近 ingest 失败、退出码。
 - `tests/test_langTrack_server.py::test_health`：`status=ok` + `degraded=false` + 四个组件键 + `etl`/`ingest` 初始态。
+
+## 9.31 聊天模型瞬时失败：一次退避重试 + 中文友好报错（2026-10-22）
+
+**事故**：2026-10-22 08:59 QQ 对话返回 `[Agent error: Connection error.]`。`logs/2026-10-22/llm_requests.jsonl` 记录 `provider=zhipu / model=GLM-5.3-Flash / run_kind=ainvoke / duration_ms=4609 / response.error=OpenAIConnectionError: Connection error.`；请求体仅约 38KB（30 条消息 + 30 个工具），同配置下带全量工具的真实调用实测 5.33s 成功，故障为瞬时连接重置。zhipu 交互链路 4 天内已有 3 次网络类失败（10-19 19:32、10-20 00:20 超时，10-22 08:59 连接错误）。
+
+**改动**：
+
+| 文件 | 改动 |
+| --- | --- |
+| `src/gacore/graph.py` | `ModelRetryMiddleware` 由 `max_retries=0` 改为 `max_retries=1`，新增 `initial_delay=1.0` / `backoff_factor=2.0` / `max_delay=10.0`；`retry_on` 仍为 `(Exception,)`，保证任何最终失败仍走 `on_failure` → `AGENT_ERROR`，不改变退出语义 |
+| `src/gacore/middleware.py` | `format_agent_error` 按 `openai` 异常类型给中文提示：`APITimeoutError`→模型响应超时、`APIConnectionError`→模型连接失败、`RateLimitError`→请求过于频繁、`APIStatusError`→模型服务异常（HTTP N），其余保持 `str(exc)`；整句经 `redact_text` 脱敏 |
+| `pyproject.toml` | 显式声明 `openai` 依赖（R2：直接 import 必须落盘） |
+
+**边界**：聊天仍走 `LLM_PROVIDER=zhipu`，不做跨 provider 回退；抽取路径仍走 `KG_EXTRACT_LLM_PROVIDER=opencode`（`max_retries=0` 由 `_resolve_llm` 显式覆盖），两者互不影响。SDK 层 `LLM_MAX_RETRIES` 默认 1 未改，总尝试次数上限为 2 次中间件尝试 × 2 次 SDK 尝试。
+
+**测试**：`tests/test_middleware.py` 新增 3 例——四类 openai 异常的文案映射、异常文本中的密钥被脱敏、首次 `APIConnectionError` 后中间件重试成功（`calls==2`、`exit_reason=CURRENT_TASK_DONE`）；该文件 27 passed。
+
+**已知缺口（未做）**：LLM 调用失败只写 `logs/llm_requests.jsonl` 的 `response.error`，不进 `app.jsonl`，也不进 `/health` 聚合，因此 `/health` 看不到模型侧失败。
