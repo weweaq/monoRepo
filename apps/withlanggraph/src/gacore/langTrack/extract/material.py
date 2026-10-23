@@ -30,6 +30,9 @@ _BUILD_REPORT_FN = build_info_pack_report
 _DETAIL_HEADER: Final = "\n## 完整取数详情\n"
 _RENDER_HEADER: Final = "\n## 渲染文本\n"
 _FACT_CARD_STEM: Final = "_FACT_CARD"
+# 长期画像的素材占比体检线：超过即说明当日事实被长时效画像稀释（2026-10-22 实测 82%）。
+_LONG_TERM_KEY: Final = "_LONG_TERM"
+_LONG_TERM_DOMINANCE_RATIO: Final = 0.6
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,12 +98,26 @@ def _build_fresh(day: str, cfg: Config) -> dict[str, str]:
     return out
 
 
+def _share(by_source: dict[str, str], total_chars: int) -> float:
+    """``_LONG_TERM`` 占素材字符的比例（0~1）；口径唯一，日志与 channel_stats 共用。"""
+    if not total_chars:
+        return 0.0
+    return round(len(by_source.get(_LONG_TERM_KEY, "")) / total_chars, 3)
+
+
+def long_term_share(material: Material) -> float:
+    """长期画像占素材字符的比例（0~1）；无素材时为 0。"""
+    return _share(material.by_source, len(material.text))
+
+
 def load_material(day: str, cfg: Config) -> Material:
     """装配当日素材；raw_hash 对"按源名排序后的拼装文本"取 sha256，同素材恒等。"""
     detail = _read_pack_detail(cfg, day)
     by_source = detail or _build_fresh(day, cfg)
     text = "\n\n".join(f"## {k}\n{v}" for k, v in sorted(by_source.items()))
     raw_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    long_term_chars = len(by_source.get(_LONG_TERM_KEY, ""))
+    share = _share(by_source, len(text))
     _LOG.debug(
         "kg_material_loaded",
         day=day,
@@ -108,7 +125,19 @@ def load_material(day: str, cfg: Config) -> Material:
         sources=sorted(by_source),
         chars=len(text),
         by_source_chars={k: len(v) for k, v in sorted(by_source.items())},
+        long_term_chars=long_term_chars,
+        long_term_share=share,
     )
+    if share >= _LONG_TERM_DOMINANCE_RATIO:
+        # 只体检不动手：素材配比是否要改由人工判断，日志先留证据链。
+        _LOG.warning(
+            "kg_material_long_term_dominant",
+            day=day,
+            chars=len(text),
+            long_term_chars=long_term_chars,
+            long_term_share=share,
+            threshold=_LONG_TERM_DOMINANCE_RATIO,
+        )
     return Material(day=day, by_source=by_source, text=text, raw_hash=raw_hash)
 
 
@@ -116,10 +145,13 @@ def material_stats(material: Material) -> dict[str, Any]:
     """素材体检元信息（进 ``kg_runs.channel_stats``，便于回答"这天抽了多少料"）。
 
     ``by_source_chars`` 让运维日志能一眼看出当日哪个源把素材撑大（如 ``_LONG_TERM``
-    独占大半），从而判断某通道耗时是不是素材侧问题。
+    独占大半），从而判断某通道耗时是不是素材侧问题；``long_term_share`` 把这个
+    判断固化成可比指标，跨天趋势看它就够。
     """
     return {
         "chars": len(material.text),
         "sources": sorted(material.by_source),
         "by_source_chars": {k: len(v) for k, v in sorted(material.by_source.items())},
+        "long_term_chars": len(material.by_source.get(_LONG_TERM_KEY, "")),
+        "long_term_share": long_term_share(material),
     }

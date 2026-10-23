@@ -130,6 +130,98 @@ def test_material_stats_reports_sources(tmp_path):
 
     assert stats["sources"] == ["_CHAT"]
     assert stats["chars"] > 0
+    assert stats["long_term_chars"] == 0
+    assert stats["long_term_share"] == 0.0
+
+
+def test_material_stats_flags_long_term_dominance(tmp_path, monkeypatch):
+    """_LONG_TERM 占素材比例要可量化（2026-10-22 实测 82%，当日事实被稀释）。"""
+    cfg = _cfg(tmp_path)
+
+    def fake_build(_day: str, _cfg: Config):
+        return "pack", [
+            {"key": "_LONG_TERM", "detail_body": "画" * 1800},
+            {"key": "_CHAT", "detail_body": "聊" * 100},
+        ]
+
+    monkeypatch.setattr(mat, "_BUILD_REPORT_FN", fake_build)
+    material = mat.load_material(DAY, cfg)
+    stats = mat.material_stats(material)
+
+    assert stats["long_term_chars"] == 1800
+    assert stats["long_term_share"] == mat.long_term_share(material)
+    assert stats["long_term_share"] > mat._LONG_TERM_DOMINANCE_RATIO
+
+
+def test_long_term_dominance_emits_diagnostic_warning(tmp_path, monkeypatch):
+    """体检线（不动素材，只留证据）：超阈值时落一条 kg_material_long_term_dominant。"""
+    cfg = _cfg(tmp_path)
+    events: list[tuple[str, dict]] = []
+
+    class Capture:
+        def debug(self, event: str, **fields) -> None:
+            events.append((event, fields))
+
+        def info(self, event: str, **fields) -> None:
+            events.append((event, fields))
+
+        def warning(self, event: str, **fields) -> None:
+            events.append((event, fields))
+
+    monkeypatch.setattr(mat, "_LOG", Capture())
+    monkeypatch.setattr(
+        mat,
+        "_BUILD_REPORT_FN",
+        lambda _day, _cfg: (
+            "pack",
+            [
+                {"key": "_LONG_TERM", "detail_body": "画" * 1800},
+                {"key": "_CHAT", "detail_body": "聊" * 100},
+            ],
+        ),
+    )
+
+    mat.load_material(DAY, cfg)
+
+    loaded = next(fields for event, fields in events if event == "kg_material_loaded")
+    assert loaded["long_term_chars"] == 1800
+    dominant = next(fields for event, fields in events if event == "kg_material_long_term_dominant")
+    assert dominant["long_term_share"] >= dominant["threshold"]
+    assert dominant["day"] == DAY
+
+
+def test_long_term_below_threshold_does_not_warn(tmp_path, monkeypatch):
+    """低于体检线不告警——否则天天报等于没报。"""
+    cfg = _cfg(tmp_path)
+    events: list[tuple[str, dict]] = []
+
+    class Capture:
+        def debug(self, event: str, **fields) -> None:
+            events.append((event, fields))
+
+        def info(self, event: str, **fields) -> None:
+            events.append((event, fields))
+
+        def warning(self, event: str, **fields) -> None:
+            events.append((event, fields))
+
+    monkeypatch.setattr(mat, "_LOG", Capture())
+    monkeypatch.setattr(
+        mat,
+        "_BUILD_REPORT_FN",
+        lambda _day, _cfg: (
+            "pack",
+            [
+                {"key": "_LONG_TERM", "detail_body": "画" * 100},
+                {"key": "_CHAT", "detail_body": "聊" * 900},
+            ],
+        ),
+    )
+
+    material = mat.load_material(DAY, cfg)
+
+    assert mat.long_term_share(material) < mat._LONG_TERM_DOMINANCE_RATIO
+    assert [event for event, _ in events] == ["kg_material_loaded"]
 
 
 def test_load_material_logs_origin_and_source_sizes(tmp_path, monkeypatch):
