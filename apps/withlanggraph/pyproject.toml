@@ -36,8 +36,9 @@ qq = [
     "qq-botpy",
 ]
 # 记忆向量检索（阶段二：pgvector 语义触发）。独立 optional 组，避免厚重的
-# onnx/embedding 栈混进核心 qq/langTrack 门禁环境；需要向量触发时才显式
-# `uv sync --extra vector` 安装。
+# onnx/embedding 栈混进核心 qq/langTrack 门禁环境；需要向量触发时才显式装。
+# mono 单环境：`uv sync --all-packages --extra vector --extra qq`
+# （漏带 --extra 会被 prune，qq-botpy / huggingface-hub 会一起消失，见 AGENTS.md 踩坑 16）
 vector = [
     "psycopg[binary]>=3.1",
     "pgvector>=0.3",

@@ -194,7 +194,8 @@ else: 健康
 
 - 先写同目录临时文件，再 `os.replace(tmp, target)`；读者永远看不到半行 JSON。
 - 临时文件名包含 `pid + instance_id + seq`，避免并发覆盖。
-- 写失败只按 60s 节流记 `WARNING`，绝不向业务抛异常。
+- 瞬时冲突（Windows `WinError 5/32/33`，即 `PermissionError`）先按 `_WRITE_ATTEMPTS=3` 退避重试（20ms/40ms）；确定性错误（如 `ENOTDIR`）立即放弃，不做无意义重试。
+- 重试仍失败只按 60s 节流记 `WARNING`，绝不向业务抛异常。
 - 不调用 `fsync`：心跳是概率性存活信号，不需要持久化保证；避免每 15s 的磁盘同步开销。
 
 ### 5.5 为什么不用后台线程
@@ -331,10 +332,11 @@ sequenceDiagram
 
 ### 7.3 HTTP 失败与 422
 
-FastAPI 中间件只记录 `status >= 400` 的请求和未捕获异常：
+FastAPI 中间件只记录 `status >= 400` 的请求和未捕获异常。同一 `(method, path, status)` 只在首次记 `WARNING`，之后降 `DEBUG` 并累加 `seen`（5xx 例外：故障复发必须保持 `WARNING`）：
 
 ```json
-{"level":"WARNING","message":"http request failed","method":"POST","path":"/ingest","status":422,"duration_ms":2.0}
+{"level":"WARNING","message":"http request failed","method":"GET","path":"/v1/models","status":404,"duration_ms":0.4,"seen":1,"client":"127.0.0.1","user_agent":"OpenAI/1.0"}
+{"level":"DEBUG","message":"http request failed","method":"GET","path":"/v1/models","status":404,"duration_ms":0.3,"seen":2,"client":"127.0.0.1","user_agent":"OpenAI/1.0"}
 ```
 
 非 `/ingest` 路径的未捕获异常：
@@ -488,7 +490,7 @@ logger.exception("Job failed", exc=e, job=name, context={"stage": "graph"})
 | 日志体积增长 | 磁盘占用 | P0 只加关键行；P1 做保留/轮转 |
 | 子进程日志 session 不同 | 无法按 session 串 | 用 `run_id` 串 ETL 起止；server 行用 `trigger` 关联 |
 | 心跳目录不存在 | 首次写失败 | `mkdir(parents=True, exist_ok=True)` |
-| Windows 文件占用 | replace 失败 | 临时文件 + `os.replace`；失败节流告警 |
+| Windows 文件占用 | replace 失败（`WinError 5/32`） | 临时文件 + `os.replace`；瞬时错误退避重试 3 次，仍失败才节流告警 |
 
 ## 12. 验收标准
 

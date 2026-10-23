@@ -91,6 +91,7 @@
 
 ```powershell
 uv sync --all-packages                          # 安装全部成员与 dev 依赖（成员需显式 --all-packages）
+uv sync --all-packages --extra vector --extra qq  # 需要成员 extras 时必须一次列全，漏带的会被 prune（见 apps/withlanggraph/AGENTS.md 踩坑 16）
 uv run --all-packages pytest                    # 全仓测试
 uv run ruff check apps packages tests           # 全仓 lint
 uv run pytest apps/<name>/tests                 # 只跑某个应用的测试（或 cd 进该应用后 uv run pytest）

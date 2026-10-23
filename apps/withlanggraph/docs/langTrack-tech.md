@@ -127,7 +127,7 @@ sequenceDiagram
 
 关键点：
 - `type` **不做枚举限制**（`schemas.py:1-3`）：客户端持续扩展新类型，服务端按 JSON 原文落库，分析层自行区分——契约符合性由 A① 的 `contract_coverage` 表事后校验，而非入库拦截。
-- 后台周期 ETL：FastAPI lifespan 起 daemon 线程（`server.py:61-73`），间隔 `LANGTRACK_ETL_INTERVAL_SECONDS`（默认 1800s）、单次超时 `LANGTRACK_ETL_TIMEOUT_SECONDS`（默认 120s）；以 `subprocess` 方式跑 `python -m gacore.langTrack.etl`，失败仅记日志**不阻塞接收**。
+- 后台周期 ETL：FastAPI lifespan（`_make_lifespan`）起 daemon 线程，间隔 `LANGTRACK_ETL_INTERVAL_SECONDS`（默认 1800s）、单次超时 `LANGTRACK_ETL_TIMEOUT_SECONDS`（默认 180s，2026-10-22 实测最慢 121.9s，旧默认 120s 会偶发砍掉一个周期）；以 `subprocess` 方式跑 `python -m gacore.langTrack.etl`，失败仅记日志**不阻塞接收**。
 
 ### 2.2 启动方式
 
@@ -666,7 +666,7 @@ flowchart TD
 | `AMAP_JS_KEY` | `.env` 或环境变量（`dashboard._amap_js_key` → `_read_env_var` 字节查找） | 高德「**Web端(JS API)**」类型 Key，专供 dashboard 地图卡前端（Task 13）。与上行的 Web 服务型 Key **互不通用**；未配置时地图卡优雅降级为配置指引（不渲染 canvas、不外呼），配置后自动启用 |
 | `AMAP_JS_SECURITY_CODE` | `.env` 或环境变量（`dashboard._amap_js_security_code`） | JS API **安全密钥**（与 Key 同页生成）。2021-12 后申请的 Key 在 JS API 2.0 必配：缺失报 INVALID_USER_SCODE；前端在加载 JS API 前注入 `window._AMapSecurityConfig.securityJsCode`（`_MAP_JS` 函数首行）。旧 Key 无密钥可不配（前端跳过注入） |
 | `LANGTRACK_ETL_INTERVAL_SECONDS` | env | 周期 ETL 间隔，默认 1800s |
-| `LANGTRACK_ETL_TIMEOUT_SECONDS` | env | 单次 ETL 子进程超时，默认 120s |
+| `LANGTRACK_ETL_TIMEOUT_SECONDS` | env | 单次 ETL 子进程超时，默认 180s |
 | `data/place_labels.json` | 文件 | 人工确认的家/公司标签持久化（v3：`(device_id, place_id)` 主键 + anchor_grid_key 追溯；ETL 重跑恢复） |
 | `data/location_coord_systems.json` | 文件 | 设备坐标制声明（`default=unknown` + periods 按设备/历史区间；2026-09-04 起两台 device_id 声明 wgs84；重叠 period 拒绝 ETL） |
 | `data/app_categories.json` | 文件（gitignore） | App 分类映射；缺失时代码内置默认兜底 |
@@ -1659,7 +1659,7 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 | `__init__.py` | 对外入口 `run_extract` / `export_day` |
 | `__main__.py` | CLI：`--day`（必填）/`--force`/`--only`/`--dry-run`/`--dump`/`--db`；`main()` 内 `load_dotenv()`（R9：密钥读取顺序 环境变量→.env，CLI 边界补齐，库函数 `run_extract` 不产生副作用） |
 | `types.py` | `ChannelSpec(key/prompt/sources/handle)`、`ExtractContext(day/run_id/prompt_ver)`、`ChannelOutcome`、`infer_node_type(node_id 前缀→类型)` |
-| `material.py` | `load_material(day,cfg) → Material(by_source/text/raw_hash)`；`Material.select(keys)` 按路由取源；`material_stats` 报 `chars`/`sources`/`by_source_chars` |
+| `material.py` | `load_material(day,cfg) → Material(by_source/text/raw_hash)`；`Material.select(keys)` 按路由取源；`material_stats` 报 `chars`/`sources`/`by_source_chars`/`long_term_chars`/`long_term_share`（`_LONG_TERM` 占素材比例，≥0.6 另落 `kg_material_long_term_dominant` 体检告警；只观测不改素材） |
 | `schema.py` | `EXTRACT_SCHEMA`（kg_runs/kg_nodes/kg_edges/kg_relations/kg_aliases/kg_emotions/kg_patterns/kg_worldview）+ `migrate_extract_tables(conn)` 幂等建表 |
 | `channels/__init__.py` | `CHANNELS` 注册表（注册 events / relations / todos / emotions / patterns / worldview；新增通道只需追加一行） |
 | `channels/common.py` | 候选类通道（S3 三通道）共享落库原语：`collect_nodes`/`ensure_node`/`insert_nodes`/`derived_id`/`clamp_score`/`clamp_range`（不改动存量三通道） |
@@ -1678,7 +1678,7 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 
 - **零新增采集**：优先读已落盘的 `data/logs/pack_detail/{day}/{key}.md` 的「完整取数详情」节（与 `daily_info_pack.write_pack_detail` 同一份契约）；缺失时回退 `build_info_pack_report(day,cfg)` 各源 `detail_body`（当日抽取 23:30 早于日报 23:50，回退属常态路径）。
 - `raw_hash = sha256(按源名排序后的拼装文本)`，同素材恒等 → 作为幂等锚。
-- **装配可观测（2026-10-21）**：`load_material` 落 `kg_material_loaded`（DEBUG：`origin=pack_detail|fresh_build` + `sources` + `chars` + `by_source_chars`）。`_FILES` 曾在同一天从 25,806 掉到 424，靠这行可直接区分「复用了旧 detail」还是「现建取数变少」。
+- **装配可观测（2026-10-21，2026-10-23 扩）**：`load_material` 落 `kg_material_loaded`（DEBUG：`origin=pack_detail|fresh_build` + `sources` + `chars` + `by_source_chars` + `long_term_chars` + `long_term_share`）。`_FILES` 曾在同一天从 25,806 掉到 424，靠这行可直接区分「复用了旧 detail」还是「现建取数变少」；`long_term_share` 回答「当天素材有多少是长时效画像」（2026-10-22 实测 0.82），≥`_LONG_TERM_DOMINANCE_RATIO`(0.6) 另落 `kg_material_long_term_dominant`（WARNING），**只体检不改配比**。
 
 ### 数据表（R6 合规）
 
@@ -1870,7 +1870,7 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 **写法要点**：
 - **原子写**：先写临时文件再 `os.replace` 替换目标，读者不会读到半截 JSON。
 - **loop 驱动、无后台线程**：`Heartbeat` 自己不 起线程，由持有事件循环 / 主循环的组件在自己的循环里调 `beat()`。这样「事件循环卡死」会直接表现为心跳停更（可判定 stale），而不是被独立线程掩盖成「看起来还活着」。
-- **写失败不抛**：只记一条 `heartbeat write failed`（WARNING，60s 节流）。心跳是观测手段，不能反过来搞崩业务。
+- **写失败不抛**：`os.replace` 遇到**瞬时** `OSError`（Windows `WinError 5/32/33`、POSIX `EACCES/EPERM/EBUSY/EAGAIN`）按 `_WRITE_ATTEMPTS=3` 退避重试（20ms/40ms），确定性错误（如 `ENOTDIR`）立即放弃；仍失败才记一条 `heartbeat write failed`（WARNING，60s 节流），并清掉临时文件。心跳是观测手段，不能反过来搞崩业务。
 - **`beat(state=None)` 保留上一状态**：周期心跳不带 `state` 时不会把 `reconnecting` 拍回 `running`；`detail` 每次整体替换，需要留痕的线索**由调用方每次带上**（QQ 用 `QQApp._hb_detail` 这张活字典持有 `connected_at` / `retry_in_sec`，周期 task 每拍都带上，`connected_at` 才不会被下一拍冲掉）。
 
 ```mermaid
@@ -1909,7 +1909,7 @@ stateDiagram-v2
   - 失败 → `ingest failed`（走 `Logger.exception`，带 `error_type` / `error_message` / `stack_trace`；同样恒写 `client_device_id` 与 `duration_ms`），随后原样抛出。
   - **设备别名归一在 try 内**：`canonical_device_id` 要读手改的 `data/device_aliases.json`，若在 try 外抛错（文件根节点不是对象）整批 500 且**零日志**。现在归一化在 try 内，且 `etl._load_device_aliases` 对「根节点不是对象」降级为「无别名」并告警。
   - **不记 payload**：只记条数与 ID，避免把剪贴板 / 短信正文写进日志。
-- **HTTP 中间件** `_log_failed_requests`：响应码 `>=400` 记 `http request failed`（`method` / `path` / `status` / `duration_ms`）；未捕获异常记 `http request crashed`（带真栈）。`/ingest` 由路由自己归属错误（置 `request.state.ingest_logged`），中间件据此跳过，避免一行错误两份 ERROR；**但路由没来得及归属时中间件必须补一行**，杜绝「零日志批次」。
+- **HTTP 中间件** `_log_failed_requests`：响应码 `>=400` 记 `http request failed`（`method` / `path` / `status` / `duration_ms` / `client` / `user_agent`）；同一 `(method, path, status)` **只在首次记 WARNING**，之后降 DEBUG 并累加 `seen`（`_note_failure`）——未实现的探针路径不再淹没真正的 4xx/5xx（2026-10-22 `/v1/models` 轮询 128 次/天，占当日 WARNING 74%）。**5xx 永远 WARNING**（`_warn_on_failure`），降噪不替故障背书；计数表上限 `_FAILED_SEEN_MAX_KEYS=512`，超限清空防无界增长。未捕获异常记 `http request crashed`（带真栈）。`/ingest` 由路由自己归属错误（置 `request.state.ingest_logged`），中间件据此跳过，避免一行错误两份 ERROR；**但路由没来得及归属时中间件必须补一行**，杜绝「零日志批次」。
 - **ETL 子进程归属（父进程侧，`_run_etl_once(trigger=...)`）**：
   - 成功 → `periodic ETL finished`（`trigger` = `manual` | `periodic`，`returncode` / `duration_ms`）；
   - 失败 → `periodic ETL failed`（附 `stderr_tail`，末 2000 字符）；

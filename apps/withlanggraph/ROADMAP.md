@@ -1649,3 +1649,39 @@ episodic 零命中而 semantic 不受影响（两表隔离 + day 过滤正确）
 **偏差说明**：合并只在同一 `user_id` 的普通文本轮生效；命令、日报反馈、`ask_user` 续接、图片轮保持原路由。非文本轮期间到达的文本不打断，会在其后作为下一轮回答（两条回复）。
 
 **待办更新**：①1.2s 窗口目前为常量，若实际使用觉得延迟明显，可改为 `QQ_MERGE_WINDOW_SECONDS` 环境变量。②如需“非文本轮也合并”，需为图片/`resume` 输入定义可重放语义，暂不做。③gacore 需重启后合并逻辑才生效。
+
+## [2026-10-23] 昨日运行复盘修复：向量依赖自愈 + ETL 超时余量 + 心跳重试 + 404 去噪 + 素材占比体检
+
+**背景**：复盘 2026-10-22 的 langTrack 运行（服务实例 10-22 22:26 起，日报 23:53 发出），抽取链路本身正常（KG 6/6 通道 ok、90 行、`dropped_malformed=0`、一次成功），但输入与观测侧有 5 处问题：
+① 向量检索全天降级——`sentence-transformers` 依赖残缺，`huggingface_hub` 完全缺失，`recall_context unavailable`×9 / `memory_maintenance` 语义触发降级×6 / `embedding embed batch failed`×2 / `episodic sync failed`(ERROR)；
+② 21:53 那次周期 ETL 耗时 121.9s 被 120s 上限 kill，白丢一个周期；
+③ `heartbeat write failed`×29（`PermissionError`/WinError 5，写 `data/run/*.json` 的 `os.replace`），集中在实例交替期；
+④ `/v1/models` 404 被记 WARNING 128 次，占当日 175 条 WARNING 的 74%；
+⑤ 素材偏斜：`_LONG_TERM` 30287 字符占 KG 素材 82%，当日真实行为（B站+Edge+git+文件）仅约 6.5k。
+
+**已完成**：
+- **向量依赖自愈（环境侧，改的是 mono 根 `.venv`）**：定位根因=在 mono 根跑 `uv sync` 时漏带 `--extra`，uv 把 `gacore` 的 `qq`/`vector` extras 当多余依赖 prune（`qq-botpy`/`aiohttp`/`huggingface-hub` 一并消失）；且服务在跑时 sync 撞已加载的 `.pyd`（`os error 5`）导致写到一半。处理：dev-console 停 `gacore`/`langtrack`/`review`/`mermaid-viewer` → `uv sync --all-packages --extra vector --extra qq` → `--reinstall-package markupsafe --reinstall-package aiohttp --reinstall-package jinja2`（三个包的 `METADATA` 已被上次中断写坏）→ `uv pip check` 只剩 `rapidocr-onnxruntime` 的 py<3.13 已知不兼容 → 实测 `encode('测试向量检索')` 返回 512 维（17.3s 首载）→ 四个服务重启。
+- `src/gacore/heartbeat.py`：`_write` 只对**瞬时**文件错误（`WinError 5/32/33`、`EACCES/EPERM/EBUSY/EAGAIN`，`_is_transient_fs_error`）做 `_WRITE_ATTEMPTS=3` 退避重试（20ms/40ms）；确定性错误（如 `ENOTDIR`）立即放弃，不拖慢业务循环；最终失败才清临时文件 + 60s 节流 WARNING。
+- `src/gacore/langTrack/server.py`：`_ETL_TIMEOUT_SECONDS` 默认 120 → **180**（实测最慢 121.9s + 50% 余量）；新增 `_FAILED_SEEN` / `_note_failure()` / `_warn_on_failure()`，同一 `(method, path, status)` 首次 WARNING、之后 DEBUG 并累加 `seen`，**5xx 例外恒 WARNING**，计数表上限 512 键；同时补 `client` / `user_agent` 字段便于定位轮询方。
+- `src/gacore/tools/langTrack_tools.py`：`_ETL_TIMEOUT_SECONDS` 120 → 180（与 server 侧对齐）。
+- `src/gacore/langTrack/extract/material.py`：`kg_material_loaded` 增 `long_term_chars` / `long_term_share`；`material_stats()` 同增两字段进 `kg_runs.channel_stats`；占比 ≥ `_LONG_TERM_DOMINANCE_RATIO`(0.6) 时落一条 `kg_material_long_term_dominant` 体检告警。**按用户决策只做体检、不动素材配比。**
+- 测试：`tests/test_heartbeat.py` +3（瞬时失败重试成功 / 确定性错误不重试 / 持续失败停在重试预算且不留临时文件）、`tests/test_langTrack_server.py` +3（重复 404 首次 WARNING 后续 DEBUG 且带 `seen`+`user_agent` / 日志级别策略含 `_warn_on_failure` 5xx 例外 / 默认超时 ≥180）、`tests/test_langTrack_extract_material.py` +3（`long_term_share` 指标 / 超阈值告警 / 低于阈值不告警）。
+- 文档：`docs/langTrack-tech.md`（超时默认值两处、`material.py` 与 `kg_material_loaded` 字段、心跳写失败、HTTP 中间件去噪）、`docs/observability-design.md`（§5.4 重试、§7.3 日志样例、排障表）、`docs/architecture-flow.mmd`（HB 节点补重试语义）、`AGENTS.md` 踩坑 16 + 元仓根 `AGENTS.md` 命令表（`uv sync` 必须列全 extras）。
+
+**实测验证**：
+- `uv run ruff check`（7 个改动文件）全绿。
+- `uv run pytest apps/withlanggraph/tests -q --basetemp=<临时目录>` → **1559 passed / 1 skipped**（206s）。
+- 重启后 `/health`：`degraded=false`，四个心跳 `stale=false`，QQ bot ready；日志确认 `/v1/models` 从第 2 次起为 `DEBUG ... seen=2/3/4...`，仅首条 WARNING。
+- 复现口径：`grep 'http request failed' logs/2026-10-22/app.jsonl | wc -l` = 129（128 条 `/v1/models`）；`select long_term_share` 走 `kg_runs.channel_stats`。
+
+**偏差说明**：
+- **未改素材配比**：用户选择"先不动，只加体检指标"，`_LONG_TERM` 仍全量进素材，只是把占比固化进日志/`channel_stats`，观察几天再定阈值。
+- 环境修复不在 git 里（`.venv` 不入库），只能靠文档约束后续 sync 姿势；已写进两处 AGENTS.md。
+- `tmp_pytest` 目录 ACL 已损坏（`Get-ChildItem`/`icacls` 均拒绝访问），本轮用 `--basetemp` 绕开，未尝试提权修复。
+- `/v1/models` 的调用方仍未知（已补 `user_agent`/`client` 字段，下次轮询即可定位）；未实现假端点，避免客户端接着打 `/v1/chat/completions`。
+
+**待办更新**：
+- [ ] 观察 `kg_material_long_term_dominant` 出现频率，再决定是否给 KG 素材的 `_LONG_TERM` 加尾部截断上限。
+- [ ] 从新日志的 `user_agent` 字段确认 `/v1/models` 轮询方，决定"实现端点"还是"客户端改配置"。
+- [ ] 修 `mono/tmp_pytest` 的 ACL（需管理员 `takeown`/`icacls`），否则每次跑测试都要带 `--basetemp`。
+- [ ] 手机端采集断流（10-21/10-22 只有 session/usage，10-23 22:29 才补传）属 weiCheckApp 侧，另行排查。

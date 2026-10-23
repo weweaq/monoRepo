@@ -92,7 +92,7 @@ flowchart TD
     subgraph OUT["④ 退出/投递"]
         FB["反馈闭环 feedback.py · 三级修复阶梯<br/>触发=QQ 消息经 feedback_route() 或 评审页<br/>①apply_feedback 确定性补丁<br/>②revise_report_llm 最小修订(默认):<br/>零工具单轮+diff 门禁非目标节逐字不变<br/>③rerun --day 整体重生成(需确认)<br/>_deliver_email 主题 {date}（重生成 vN）"]
         LG["jsonl_logger<br/>+ Logger.exception(真栈→error_type/error_message/stack_trace)<br/>+ message/fields/console 全链路脱敏(redact)<br/>+ llm_request_log"]
-        HB[("data/run/*.json 组件心跳<br/>gacore.heartbeat.Heartbeat<br/>main/scheduler/qq/langtrack_server<br/>原子写 os.replace · beat(state) 保留上一态<br/>stale_after_sec=max(60, interval×3)<br/>GACORE_RUN_DIR 覆盖")]
+        HB[("data/run/*.json 组件心跳<br/>gacore.heartbeat.Heartbeat<br/>main/scheduler/qq/langtrack_server<br/>原子写 os.replace(瞬时错误尝试×3、重试 2 次) · beat(state) 保留上一态<br/>stale_after_sec=max(60, interval×3)<br/>GACORE_RUN_DIR 覆盖")]
         RD["gacore/redact.py 统一脱敏入口<br/>redact_text / redact_obj(幂等·不抛)<br/>值层: *_KEY/*_TOKEN/*_SECRET 等环境变量值(≥8字符·最长优先)<br/>模式层: URL query · Bearer · sk-/ghp- token · 赋值式密钥"]
         OPS["python -m gacore.ops status<br/>read_heartbeats(四个组件) + find_latest_record<br/>7天窗口扫 logs/&lt;day&gt;/app.jsonl 尾部256KB<br/>etl.run.* → ok/failed/interrupted/running<br/>+ 最近 ingest failed · 退出码 0/1 供 cron"]
     end

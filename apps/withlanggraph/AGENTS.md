@@ -264,6 +264,23 @@
 6. **新增源后用 health 实证一周**：`data/logs/info_pack_health.jsonl` 若某源 `full_chars` 恒大于 cap、或 status 长期非 ok，即为采样设计有问题的信号，别只看"没报错"。
 7. **敏感事件进包边界（2026-10-05 用户拍板，同日放宽）**：`notification` 内容已进包（`_PHONE_NOTIF`）；`sms`/`input`/`clipboard` 同样**允许进包**，统一隐私边界=**仅本地日报落盘+发送到本人邮箱，绝不出网**（不进 git、不提交任何真实个人数据，见 R11）。新增涉敏事件类型时：先向用户确认边界，再在此登记取舍，然后写 builder。
 
+### 16. mono 侧 `uv sync` 必须带全 extras（2026-10-23）
+
+- **现象**：10-21~10-23 向量检索全天降级（`EmbeddingUnavailable`）、`huggingface_hub` 缺失，且 `markupsafe` / `aiohttp` 的 `METADATA` 读不出来（venv 半损坏）。
+- **根因**：在 mono 根跑 `uv sync` / `uv sync --all-packages` 时**没带 `--extra`**，uv 会把 `gacore` 的 `qq` / `vector` extras 当成多余依赖**prune 掉**（`qq-botpy`、`aiohttp`、`huggingface-hub` 一起消失）；另外服务在跑时 sync 会撞上已加载的 `.pyd`（`os error 5 拒绝访问`），写一半中断 → 依赖目录残缺。
+- **正确姿势**：
+
+  ```powershell
+  # 1) 先停掉跑着 .venv 的服务（dev-console 停 gacore / langtrack / review / mermaid-viewer）
+  # 2) 再同步，两个 extras 都要带
+  uv sync --all-packages --extra vector --extra qq
+  # 3) 校验：不能有 broken/incomplete，只剩 rapidocr 的 py<3.13 已知不兼容
+  uv pip check
+  uv run python -c "import huggingface_hub, sentence_transformers"
+  ```
+
+- **教训**：extras 不是"装过一次就常在"，mono 单环境每次 sync 都按当前命令行参数重建环境。改依赖前先看 `uv pip check`。
+
 ## 常用命令速查
 
 
