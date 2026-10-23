@@ -5,12 +5,15 @@ see ``docs/observability-design.md`` §5 for the file contract and state machine
 
 Deliberately loop-driven: ``Heartbeat`` never starts a thread of its own, so a
 stuck component stops beating and ages out (stale) instead of appearing alive.
-Every write is atomic (temp file + ``os.replace``) and write failures are
-swallowed with a throttled WARNING — heartbeat trouble must never break business.
+Every write is atomic (temp file + ``os.replace``); a transient filesystem error
+(Windows ``WinError 5/32``) is retried with backoff before giving up. Remaining
+failures are swallowed with a throttled WARNING — heartbeat trouble must never
+break business.
 """
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import threading
@@ -28,7 +31,22 @@ DEFAULT_INTERVAL_SECONDS: Final = 15
 RUN_DIR_ENV: Final = "GACORE_RUN_DIR"
 SCHEMA_VERSION: Final = 1
 _WARN_THROTTLE_SECONDS: Final = 60
+# Windows 上紧接着另一次替换/杀软扫描时 os.replace 会短暂 WinError 5（拒绝访问）；
+# 退避重试能把这类瞬时冲突消化掉（2026-10-22 实测 29 次，集中在实例交替期）。
+_WRITE_ATTEMPTS: Final = 3
+_WRITE_RETRY_BACKOFF_SECONDS: Final = 0.02
+# 只有"可能下一秒就好了"的错误才值得重试：Windows 的 ACCESS_DENIED(5) /
+# SHARING_VIOLATION(32) / LOCK_VIOLATION(33) 与 POSIX 的 EACCES/EPERM/EBUSY/EAGAIN。
+_TRANSIENT_ERRNOS: Final = frozenset({errno.EACCES, errno.EPERM, errno.EBUSY, errno.EAGAIN})
+_TRANSIENT_WINERRORS: Final = frozenset({5, 32, 33})
 _UTC_PLUS_8: Final = timezone(timedelta(hours=8))
+
+
+def _is_transient_fs_error(exc: OSError) -> bool:
+    """True when retrying the write could plausibly succeed (lock/AV/instance handover)."""
+    if getattr(exc, "winerror", None) in _TRANSIENT_WINERRORS:
+        return True
+    return exc.errno in _TRANSIENT_ERRNOS
 
 
 def run_dir(root: Path) -> Path:
@@ -125,16 +143,29 @@ class Heartbeat:
                 "detail": dict(detail),
             }
             tmp = self._root / f".{self._component}.{self._pid}.{self._instance_id}.{self._seq}.tmp"
-            try:
-                self._root.mkdir(parents=True, exist_ok=True)
-                tmp.write_text(json.dumps(payload, ensure_ascii=False, default=str), encoding="utf-8")
-                os.replace(tmp, self._path)
-            except Exception as exc:  # noqa: BLE001 - heartbeat must never break business
+            payload_text = json.dumps(payload, ensure_ascii=False, default=str)
+            failure: Exception | None = None
+            for attempt in range(1, _WRITE_ATTEMPTS + 1):
                 try:
-                    tmp.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                self._warn_throttled(exc)
+                    self._root.mkdir(parents=True, exist_ok=True)
+                    tmp.write_text(payload_text, encoding="utf-8")
+                    os.replace(tmp, self._path)
+                    return
+                except OSError as exc:  # 含 PermissionError(WinError 5)：多为瞬时冲突，退避重试
+                    failure = exc
+                    if attempt < _WRITE_ATTEMPTS and _is_transient_fs_error(exc):
+                        time.sleep(_WRITE_RETRY_BACKOFF_SECONDS * attempt)
+                        continue
+                    break
+                except Exception as exc:  # noqa: BLE001 - heartbeat must never break business
+                    failure = exc
+                    break
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            if failure is not None:
+                self._warn_throttled(failure)
 
     def _warn_throttled(self, exc: Exception) -> None:
         now = time.monotonic()

@@ -116,6 +116,78 @@ def test_run_dir_default(tmp_path: Path, monkeypatch) -> None:
     assert run_dir(tmp_path) == tmp_path / "data" / "run"
 
 
+def test_transient_replace_failure_is_retried(tmp_path: Path, monkeypatch) -> None:
+    """os.replace 短暂 WinError 5（杀软/实例交替）要退避重试，不该漏掉这次心跳。"""
+    from gacore import heartbeat as heartbeat_mod
+
+    root = tmp_path / "run"
+    target = root / "scheduler.json"
+    hb = heartbeat_mod.Heartbeat("scheduler", root=root)
+    calls = {"n": 0}
+    real_replace = heartbeat_mod.os.replace
+
+    def flaky_replace(src, dst):
+        if Path(dst) != target:  # 只接管本次心跳的落盘，别误伤其它调用
+            return real_replace(src, dst)
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise PermissionError(13, "Access is denied")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(heartbeat_mod.os, "replace", flaky_replace)
+
+    hb.start()
+
+    assert calls["n"] == 3
+    assert _read(root)["state"] == "starting"
+    assert list(root.glob(".*.tmp")) == []
+
+
+def test_non_transient_error_is_not_retried(tmp_path: Path, monkeypatch) -> None:
+    """确定性错误（如路径不是目录）不重试——重试只会拖慢业务循环。"""
+    from gacore import heartbeat as heartbeat_mod
+
+    root = tmp_path / "run"
+    target = root / "scheduler.json"
+    hb = heartbeat_mod.Heartbeat("scheduler", root=root)
+    calls = {"n": 0}
+    real_replace = heartbeat_mod.os.replace
+
+    def wrong_kind(_src, dst):
+        if Path(dst) != target:
+            return real_replace(_src, dst)
+        calls["n"] += 1
+        raise NotADirectoryError(20, "Not a directory")
+
+    monkeypatch.setattr(heartbeat_mod.os, "replace", wrong_kind)
+
+    hb.start()  # 不得抛出
+
+    assert calls["n"] == 1
+    assert list(root.glob(".*.tmp")) == []
+
+
+def test_persistent_failure_stops_after_attempt_budget(tmp_path: Path, monkeypatch) -> None:
+    """重试有上限：一直拒绝访问时不无限重试，也不留临时文件。"""
+    from gacore import heartbeat as heartbeat_mod
+
+    assert heartbeat_mod._WRITE_ATTEMPTS == 3
+    root = tmp_path / "run"
+    hb = heartbeat_mod.Heartbeat("scheduler", root=root)
+    calls = {"n": 0}
+
+    def always_denied(_src, _dst):
+        calls["n"] += 1
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr(heartbeat_mod.os, "replace", always_denied)
+
+    hb.start()  # 不得抛出
+
+    assert calls["n"] == heartbeat_mod._WRITE_ATTEMPTS
+    assert list(root.glob(".*.tmp")) == []
+
+
 def test_instances_have_distinct_instance_ids(tmp_path: Path) -> None:
     root = tmp_path / "run"
     a = Heartbeat("scheduler", root=root)

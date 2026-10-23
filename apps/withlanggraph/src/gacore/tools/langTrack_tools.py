@@ -50,7 +50,7 @@ _DEFAULT_ROOT: Final = Path(__file__).resolve().parents[3]  # WithLangGraph ä»“å
 
 
 
-_ETL_TIMEOUT_SECONDS: Final = 120
+_ETL_TIMEOUT_SECONDS: Final = 180
 
 
 

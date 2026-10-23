@@ -345,6 +345,35 @@ def test_ingest_422_logs_http_failed(client):
     assert hit and hit[-1]["status"] == 422
 
 
+def test_repeated_404_logs_once_then_debug(client, monkeypatch):
+    """同一路径的重复 404（如 /v1/models 轮询）只在首次记 WARNING，之后降 DEBUG 并带计数。"""
+    c, _ = client
+    monkeypatch.setattr(server_mod, "_FAILED_SEEN", {})  # 计数是进程级状态，测试内隔离
+    assert [c.get("/v1/models").status_code for _ in range(3)] == [404, 404, 404]
+
+    hits = [x for x in _read_jsonl_logs() if x.get("path") == "/v1/models"]
+    assert [h["seen"] for h in hits] == [1, 2, 3]
+    assert [h["level"] for h in hits] == ["WARNING", "DEBUG", "DEBUG"]
+    assert hits[0]["status"] == 404
+    # 首次那条要能回答"是谁在轮询"
+    assert hits[0]["user_agent"] == "testclient"
+    assert hits[0]["client"] in {"testclient", "127.0.0.1", "testserver"}
+
+
+def test_failure_log_level_policy_keeps_5xx_loud():
+    """降噪只针对重复的 4xx；5xx 是故障，重复也必须留在 WARNING。"""
+    assert server_mod._warn_on_failure(404, 1) is True
+    assert server_mod._warn_on_failure(404, 2) is False
+    assert server_mod._warn_on_failure(500, 99) is True
+
+
+def test_etl_timeout_default_leaves_headroom():
+    """2026-10-22 实测 121.9s 被 120s 砍掉 → 默认超时至少 180s。"""
+    if "LANGTRACK_ETL_TIMEOUT_SECONDS" in os.environ:
+        pytest.skip("LANGTRACK_ETL_TIMEOUT_SECONDS override in effect")
+    assert server_mod._ETL_TIMEOUT_SECONDS >= 180
+
+
 def test_lifespan_writes_server_heartbeat(tmp_path, monkeypatch):
     """lifespan 期间心跳为 running，退出后为 stopped。"""
     monkeypatch.setattr(server_mod, "_ETL_INTERVAL_SECONDS", 3600)

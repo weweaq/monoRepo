@@ -11,6 +11,7 @@ import threading
 import time
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
+from typing import Final
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse
@@ -34,8 +35,34 @@ _EXPECTED_CLIENT_VERSION = "1.0"
 _EXPECTED_CLIENT_APK_URL = ""
 # 周期 ETL 间隔（秒），默认 30 分钟；可用环境变量覆盖
 _ETL_INTERVAL_SECONDS = int(os.environ.get("LANGTRACK_ETL_INTERVAL_SECONDS", "1800"))
-# 单次 ETL 超时（秒）
-_ETL_TIMEOUT_SECONDS = int(os.environ.get("LANGTRACK_ETL_TIMEOUT_SECONDS", "120"))
+# 单次 ETL 超时（秒）。2026-10-22 实测一次耗时 121.9s 被 120s 砍掉、白丢一个周期，
+# 余量按"实测最慢 122s + 50%"留到 180s；真卡死仍由本超时兜底 kill。
+_ETL_TIMEOUT_SECONDS = int(os.environ.get("LANGTRACK_ETL_TIMEOUT_SECONDS", "180"))
+
+# 失败请求的（method, path, status）计数：同一组合只在首次记 WARNING，之后降 DEBUG。
+# 未实现的探针路径（2026-10-22：/v1/models 轮询 128 次/天）不再淹没真正的 4xx/5xx。
+# 5xx 永远 WARNING——降噪只针对"重复的确定性拒绝"，不能把故障复发也一起静音。
+_FAILED_SEEN: dict[tuple[str, str, int], int] = {}
+_FAILED_SEEN_LOCK = threading.Lock()
+_FAILED_SEEN_MAX_KEYS: Final = 512
+_ALWAYS_WARN_STATUS_FLOOR: Final = 500
+
+
+def _note_failure(method: str, path: str, status: int) -> int:
+    """记一次失败请求，返回该组合的累计次数（1 = 本进程首次）。"""
+    key = (method, path, status)
+    with _FAILED_SEEN_LOCK:
+        if len(_FAILED_SEEN) >= _FAILED_SEEN_MAX_KEYS:
+            # 扫描器随机路径不该把这张表撑爆；清空只是让老路径重新记一次 WARNING。
+            _FAILED_SEEN.clear()
+        seen = _FAILED_SEEN.get(key, 0) + 1
+        _FAILED_SEEN[key] = seen
+        return seen
+
+
+def _warn_on_failure(status: int, seen: int) -> bool:
+    """首次出现、或 5xx 故障：这两种情况必须留在 WARNING。"""
+    return seen == 1 or status >= _ALWAYS_WARN_STATUS_FLOOR
 
 
 def _tail(value: bytes | str | None, limit: int = 2000) -> str:
@@ -251,11 +278,18 @@ def create_app(storage: Storage, *, heartbeat_dir: Path | None = None) -> FastAP
                 )
             raise
         if response.status_code >= 400:
-            logger.warning(
+            seen = _note_failure(request.method, request.url.path, response.status_code)
+            # 首次 WARNING（可检索），重复降 DEBUG 但保留计数与调用方指纹，便于事后定位是谁在轮询。
+            # 5xx 是服务端故障，重复也必须保持 WARNING——降噪不替故障背书。
+            emit = logger.warning if _warn_on_failure(response.status_code, seen) else logger.debug
+            emit(
                 "http request failed",
                 method=request.method,
                 path=request.url.path,
                 status=response.status_code,
+                seen=seen,
+                client=request.client.host if request.client else None,
+                user_agent=request.headers.get("user-agent"),
                 duration_ms=round((time.perf_counter() - started) * 1000, 1),
             )
         return response
