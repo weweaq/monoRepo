@@ -24,7 +24,7 @@
 
 - **原仓库（独立 WithLangGraph git 仓库）已停止更新**，所有改动一律在本仓库
   （mono 的 `apps/withlanggraph/`）进行，不再回写原仓库。
-- 因此下面所有文档路径（`docs/langTrack-roadmap.md`、`docs/langTrack-tech.md`）
+- 因此下面所有文档路径（`docs/ROADMAP.md`、`docs/langTrack-tech.md`）
   均指**本仓库 `apps/withlanggraph/docs/`** 下的文件，以 mono 侧为唯一事实来源。
 - 原仓库仅作为历史参考保留；如后续执行 `git subtree pull` 同步原仓库 HEAD，
   原仓库已无新改动，不会与本仓库文档冲突。
@@ -41,28 +41,22 @@
 
 ### 改完必更路书
 
-**`docs/langTrack-roadmap.md` 是本项目的数据链路路书（指南 + 工作日志）。**
-**（mono 侧完整路径：`apps/withlanggraph/docs/langTrack-roadmap.md`）**
+**`docs/ROADMAP.md` 是本项目唯一路书（指南 + 工作日志），完整路径 `apps/withlanggraph/docs/ROADMAP.md`。**
 
-**每次改动代码（客户端或服务端，哪怕一行）后，必须：**
+- 位置约定：路书放 app 的 `docs/` 下，**不放 app 根目录**；也不得再新建 `docs/langTrack-roadmap.md` 之类的平行路书（2026-10-24 已把两份历史文件合并进本文件）。
+- 每次改动代码（客户端或服务端，哪怕一行）后，必须：
 
-
-
-1. 在路书「执行记录」节追加一条记录：改了什么、为什么改、验证结果
-
+1. 在路书「执行记录」节末尾追加一条 `## YYYY-MM-DD · 标题`：改了什么、为什么改、验证结果
 2. 更新「待办」清单：完成项打 ✅，新增项追加
-
 3. 数据相关的验证结论（实测数字、问题诊断）也要记录
-   
-   
 
-**违反此规则 = 工作不完整，不允许直接收尾。
+**违反此规则 = 工作不完整，不允许直接收尾。**
 
 ## 同步文档规则
 
 每次改动代码（哪even 一行）后，必须同步更新如下文件，确保技术文档与代码实现保持一致：
 
-1. `docs/langTrack-roadmap.md`——执行记录与进度节点（如 A①/B/C1 节点），缺一不可。
+1. `docs/ROADMAP.md`——执行记录与进度节点（如 A①/B/C1 节点），缺一不可。
 2. `docs/langTrack-tech.md`——技术实现参考（接口/实体/表字段/数据流图），确保技术细节与代码保持一致，符合 C1>C2>C3 的优先级。
 
 违反此规则会导致技术文档与代码产生偏差，后续维障和复现工作会受阻。**

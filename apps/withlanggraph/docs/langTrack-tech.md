@@ -45,7 +45,7 @@ AIGC:
 # langTrack 技术实现参考（接口 · 实体 · 数据库 · 数据流）
 
 > 本文是 langTrack 服务端的**代码级技术参考**，所有字段/接口/阈值均对照源码（标注 `文件:行号`）。
-> 配套文档：数据链路总览与工作日志见 [`langTrack-roadmap.md`](langTrack-roadmap.md)；ETL 清洗规则细节见 [`etl-cleaning-guide.md`](etl-cleaning-guide.md)。
+> 配套文档：数据链路总览与工作日志见 [`ROADMAP.md`](ROADMAP.md)；ETL 清洗规则细节见 [`etl-cleaning-guide.md`](etl-cleaning-guide.md)。
 > 生成日期：2026-08-22，基于 ETL_VERSION `1.0.0`（`etl.py:159`）。
 > 2026-09-03 更新：位置智能增强 Task 1-11 落地后同步——位置事实 schema 增加 v2（shadow v2 / 迁移审计表）、双坐标边界（`to_amap_coord` 全高德入口统一转换 + `daily_location_quality` 坐标质量观测）、PlaceRef/FactCard 消费侧契约、mermaid 数据流分 v1/v2 双轨。
 
@@ -1841,7 +1841,7 @@ roadmap「episodic 日报路径不并入 `persist_entry`」。
 ## 9.29 可观测性 P0：组件心跳 + 结构化日志补齐（2026-10-21）
 
 > 设计文档：`./observability-design.md`（文件契约 / 状态机 / 取舍）；实施计划：仓库根 `docs/superpowers/plans/2026-10-21-observability-p0.md`。
-> 提交序列（实现 → 检视 → 修缺陷 → 文档）：`fcdfb76`（`Logger.exception`）→ `ea66d2f`（heartbeat 模块）→ `98ebf17`（scheduler 心跳 + 优雅停机）→ `8f66b64`（QQ 心跳）→ `c29cc74`（server `/ingest` + ETL 子进程归属）→ `56261de`（ETL 运行摘要）→ `2c9149c`（测试隔离守卫）→ `29b29d2`（本文档 + 设计文档）→ `d7b233f`（心跳测试固定 botpy 桩）→ `de64f29`（ETL 超时归属测试）→ `f0ec494`（修 `/ingest` 零日志盲区）→ `06ba779`（心跳线索保真 + 停机收尾健壮性）。逐条提交说明见 `docs/langTrack-roadmap.md` 同日执行记录。
+> 提交序列（实现 → 检视 → 修缺陷 → 文档）：`fcdfb76`（`Logger.exception`）→ `ea66d2f`（heartbeat 模块）→ `98ebf17`（scheduler 心跳 + 优雅停机）→ `8f66b64`（QQ 心跳）→ `c29cc74`（server `/ingest` + ETL 子进程归属）→ `56261de`（ETL 运行摘要）→ `2c9149c`（测试隔离守卫）→ `29b29d2`（本文档 + 设计文档）→ `d7b233f`（心跳测试固定 botpy 桩）→ `de64f29`（ETL 超时归属测试）→ `f0ec494`（修 `/ingest` 零日志盲区）→ `06ba779`（心跳线索保真 + 停机收尾健壮性）。逐条提交说明见 `docs/ROADMAP.md` 同日执行记录。
 
 ### 9.29.1 背景：日志只覆盖 ETL，「进程死了」和「活着但没话说」分不清
 

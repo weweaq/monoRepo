@@ -1,6 +1,6 @@
 # withlanggraph 可观测性设计（P0：心跳 + 关键链路日志）
 
-> 状态：已落地（P0，2026-10-21；实施记录见 `docs/langTrack-roadmap.md` 同日条目）
+> 状态：已落地（P0，2026-10-21；实施记录见 `docs/ROADMAP.md` 同日条目）
 > 日期：2026-10-21
 > 范围：`apps/withlanggraph`（gacore 主进程、scheduler、langTrack server/ETL）
 > 关联事故/证据：`apps/withlanggraph/logs/2026-10-21/app.jsonl`、`apps/withlanggraph/logs/2026-10-20/app.jsonl`、`apps/dev-console/logs/2026-10-05-101917/services/langtrack.log`

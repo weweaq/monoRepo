@@ -1194,8 +1194,8 @@ test(logging): 锁定测试日志根目录
 **文件**
 
 - 修改：`apps/withlanggraph/docs/langTrack-tech.md`
-- 修改：`apps/withlanggraph/docs/langTrack-roadmap.md`
-- 修改：`apps/withlanggraph/ROADMAP.md`
+- 修改：`apps/withlanggraph/docs/ROADMAP.md`
+- 修改：`apps/withlanggraph/docs/ROADMAP.md`
 - 修改：`apps/withlanggraph/docs/architecture-flow.mmd`
 - 修改：`apps/withlanggraph/AGENTS.md`（仅当需要登记 `GACORE_RUN_DIR`；否则不改）
 
@@ -1207,13 +1207,13 @@ test(logging): 锁定测试日志根目录
   - `etl.run.*` 字段
   - `Logger.exception` 约定
   - 引用设计文档相对链接 `./observability-design.md`
-- `langTrack-roadmap.md` 追加执行记录：
+- `ROADMAP.md` 追加执行记录：
   - 背景：2026-10-21 日志只有 ETL、无 server/心跳
   - 已完成：P0 七项（含 QQ 心跳、scheduler 优雅停机）
   - 实测验证：测试命令、冒烟结果
   - 偏差说明：未做 ops CLI/保留策略
   - 待办：P1/P2
-- `apps/withlanggraph/ROADMAP.md` 按仓库 R5 追加本轮执行记录（背景/已完成/验证/偏差/待办），与 langTrack-roadmap 不重复细节，用链接互指。
+- `apps/withlanggraph/docs/ROADMAP.md` 按仓库 R5 追加本轮执行记录（背景/已完成/验证/偏差/待办），与 langTrack-roadmap 不重复细节，用链接互指。
 - `architecture-flow.mmd`：
   - 在 langTrack 子图加 `HB[("data/run/*.json")]`，从 `IG`、`ET`、`SC`、`QQ` 指向它
   - 在 `LG` 节点补充 `Logger.exception`
@@ -1307,7 +1307,7 @@ feat(observability): 落地 P0 心跳与关键链路日志
 
 ## 4. 验收清单
 
-> 2026-10-22 收口：全部条目已达成；「子 agent 检视」一轮 FAIL 一轮 PASS，FAIL 的 blocking 已逐条修复并复检（结论见 `apps/withlanggraph/docs/langTrack-roadmap.md` 同日「检视结论」）。
+> 2026-10-22 收口：全部条目已达成；「子 agent 检视」一轮 FAIL 一轮 PASS，FAIL 的 blocking 已逐条修复并复检（结论见 `apps/withlanggraph/docs/ROADMAP.md` 同日「检视结论」）。
 
 - [x] `Logger.exception` 输出真实 `stack_trace`（inside/outside except 两条路径都有测试）
 - [x] `Heartbeat` 原子写、状态机、`beat()` 保留状态、失败不抛
@@ -1322,7 +1322,7 @@ feat(observability): 落地 P0 心跳与关键链路日志
 - [x] ETL 超时有 `ETL timeout` 行，带 `timeout_sec/stderr_tail`
 - [x] `Job finished` 含 `status/error_type/error_message`；`Job failed` 含真栈
 - [x] 测试日志/心跳双隔离回归守卫（`GACORE_LOG_ROOT` + `GACORE_RUN_DIR`）
-- [x] `langTrack-tech.md` / `langTrack-roadmap.md` / `ROADMAP.md` / `architecture-flow.mmd` 同步（与并发入库的 KG 文档改动干净拆分，无重复章节）
+- [x] `langTrack-tech.md` / `ROADMAP.md` / `ROADMAP.md` / `architecture-flow.mmd` 同步（与并发入库的 KG 文档改动干净拆分，无重复章节）
 - [x] ruff + 目标 pytest 全绿
 - [x] 子 agent 检视通过（4 组并行检视；2 组 FAIL 的 blocking 全部修复后复检通过）
 

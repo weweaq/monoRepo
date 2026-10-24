@@ -83,7 +83,7 @@
 | 项 | 路径 |
 |---|---|
 | tech 文档 | `apps/withlanggraph/docs/langTrack-tech.md` |
-| 路书 | `apps/withlanggraph/docs/langTrack-roadmap.md`（格式：`## YYYY-MM-DD：标题` + `### 已完成 / ### 实测数据 / ### 问题诊断`）|
+| 路书 | `apps/withlanggraph/docs/ROADMAP.md`（格式：`## YYYY-MM-DD · 标题` + `### 已完成 / ### 实测数据 / ### 问题诊断`）|
 | 架构图 | `apps/withlanggraph/docs/architecture-flow.mmd`（codemap 生成，节点=`真实符号名 <br/> 文件路径`）|
 | 测试 | `apps/withlanggraph/tests/`，60 文件，`conftest.py` 提供 `tmp_cfg / scripted_llm / tool_list / run_graph` |
 | **测试封闭性铁律** | 不得触碰真实 LLM API、外部网络、真实 DB、embedding 加载 |
@@ -276,7 +276,7 @@ uv run --package gacore python -m gacore.langTrack.extract --day 2026-10-16 --fo
 ```
 
 **提交**：`feat(langTrack): 新增 KG 抽取子系统骨架与 events 通道`
-**文档同步**：`langTrack-tech.md` 加"KG 抽取层"节；`architecture-flow.mmd` 加 extract 节点（走 codemap 复审）；`langTrack-roadmap.md` 追加执行记录
+**文档同步**：`langTrack-tech.md` 加"KG 抽取层"节；`architecture-flow.mmd` 加 extract 节点（走 codemap 复审）；`ROADMAP.md` 追加执行记录
 
 ### S2 relations + todos 通道 + 实体消解（2 天）
 
