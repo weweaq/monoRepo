@@ -7,7 +7,7 @@ dependencies = ["fastapi>=0.100", "uvicorn>=0.20"]
 [project.optional-dependencies]
 dev = ["pytest>=7.0"]
 
-# mono 接线（与上游的差异，原因见 apps/checkself/ROADMAP.md）：
+# mono 接线（与上游的差异，原因见 apps/checkself/docs/ROADMAP.md）：
 # - 虚拟成员（不构建不安装）：包名 profile 与标准库同名，装进 site-packages 会被
 #   标准库 shadow，运行语义保持"应用目录内运行"（如 uv run --directory apps/checkself ...）
 # - 移除 dependency-groups 的 httpx2：测试从未 import（PyPI 上另有其包）；

@@ -66,7 +66,7 @@ pyproject `name` 是 **workspace 成员名，不一定等于目录名，也不�
 
 任何代码改动都要三处同步，新建 app 时先把三处骨架建好：
 
-1. **`apps/<name>/ROADMAP.md`** — 空执行记录表 + 待办清单
+1. **`apps/<name>/docs/ROADMAP.md`** — 路书（执行记录 + 待办清单）；**位置固定在 `docs/` 下，不放 app 根目录**
 2. **`apps/<name>/docs/<name>-tech.md`** — 接口/实体/表/数据流四节骨架
 3. **`apps/<name>/docs/architecture-flow.mmd`** — 涉及模块/数据流/依赖时同步；## **架构图是单一真源，tech 只引用 `./architecture-flow.mmd` 相对链接，不得在 tech 里复制维护副本**（tech 自己的流程/时序图正常内嵌）
 
@@ -78,9 +78,8 @@ pyproject `name` 是 **workspace 成员名，不一定等于目录名，也不�
 apps/<name>/
 ├── pyproject.toml     必须（成员声明+依赖）
 ├── .gitignore         本地运行时产物
-├── ROADMAP.md         推荐（执行记录，R5）
+├── docs/              推荐（ROADMAP.md 路书、<name>-tech.md、architecture-flow.mmd）
 ├── AGENTS.md          推荐（包级特有约定，R8，不得与根冲突）
-├── docs/              推荐（<name>-tech.md、architecture-flow.mmd）
 ├── tests/             推荐（业务测试，R7）
 ├── src/<pkg>/         多模块（或顶层模块文件）
 ├── .env.example       有密钥时（R9）
@@ -92,7 +91,7 @@ apps/<name>/
 
 1. `uv init --package apps/<name>`（或手动起目录 + pyproject.toml）
 2. 填 `pyproject.toml`：`name`（workspace 成员名）、`dependencies`、可选 `[project.scripts]`/构建
-3. 建 `ROADMAP.md` + `AGENTS.md`（推荐）
+3. 建 `docs/ROADMAP.md` + `AGENTS.md`（推荐）
 4. 按需建 `docs/`、`tests/`、`src/`、`.env.example`、`data|logs/`
 5. `uv sync --all-packages`
 6. 在仓库根执行门禁：`uv run ruff check apps packages tests` + `uv run --all-packages pytest apps/<name>/tests`

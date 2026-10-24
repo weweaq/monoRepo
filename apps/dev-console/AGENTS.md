@@ -61,9 +61,10 @@ dev-console/
 ├── start.bat            # 启动器（pythonw，无窗口）
 ├── start-console.vbs    # 双击启动器（wscript，零窗口）
 ├── logs/                # 运行产物（gitignored）
+├── docs/
+│   └── ROADMAP.md       # 执行记录与进度（路书统一放 docs/）
 ├── pyproject.toml       # workspace 成员声明
-├── AGENTS.md            # 本文件
-└── ROADMAP.md           # 执行记录与进度
+└── AGENTS.md            # 本文件
 ```
 
 ## 5. 常用命令

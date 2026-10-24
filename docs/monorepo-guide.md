@@ -158,9 +158,9 @@ testpaths = ["apps", "packages"]
 
 ### 4.1 来自 WithLangGraph（实践密度最高，作为范本）
 
-**(1) roadmap 执行记录模式**（`docs/langTrack-roadmap.md`）
+**(1) roadmap 执行记录模式**（`docs/ROADMAP.md`）
 每次代码改动后强制追加执行记录，格式固定为：背景 / 已完成 / 实测验证 / 偏差说明 / 待办更新。AGENTS.md 将其定为硬规则："任何代码变更后必须更新 roadmap"。
-→ 全仓推广：每个 app 有自己的 `ROADMAP.md`，执行记录按日期追加，禁止删除历史记录。
+→ 全仓推广：每个 app 的路书固定放 `apps/<app>/docs/ROADMAP.md`（2026-10-24 起；不再放 app 根目录，也不再另起 `<app>-roadmap.md`），执行记录按日期追加，禁止删除历史记录。
 
 **(2) tech.md 四层文档结构**（`docs/langTrack-tech.md`）
 接口 / 实体 / 数据库表字典 / 数据流四层组织，且标注代码行号锚点（如 `etl.py:159`）。
@@ -207,7 +207,7 @@ style(langTrack): ruff --fix 整理导入与格式
 | dev-console | `services.json` 模板 + `services.local.json` 本地覆盖（后者 gitignore） | 所有含本地差异配置的 app 采用"模板入库 + local 不入库"二文件制 |
 | claw1 | AGENTS.md 定义任务类型选择、停止条件、变更范围 | 根 AGENTS.md 的"AI 协作规则"一节照此结构写 |
 | GenericAgent | 可选依赖组（`ui` / `all-frontends` extras） | 重前端依赖一律走 extras，核心安装保持轻量 |
-| py-wei | AGENTS.md + ROADMAP.md 双文件分工（规则与进度分离） | 全仓 app 标配这两个文件 |
+| py-wei | AGENTS.md + ROADMAP.md 双文件分工（规则与进度分离） | 全仓 app 标配这两个文件（路书位置：`apps/<app>/docs/ROADMAP.md`） |
 
 ### 4.3 来自第三方参考仓库（本地已克隆，可随时查阅）
 
@@ -245,7 +245,7 @@ style(langTrack): ruff --fix 整理导入与格式
 - 一个提交只做一件事；跨包联动改动允许一个提交覆盖所涉包，但 scope 写明（如 `feat(langTrack,amap-sdk): ...`）
 
 ### R5 文档同步
-- 任何代码改动：对应 app 的 ROADMAP.md 追加执行记录（背景/已完成/实测验证/偏差/待办）
+- 任何代码改动：对应 app 的 `docs/ROADMAP.md` 追加执行记录（背景/已完成/实测验证/偏差/待办）
 - 涉及接口、表结构、数据流：同步更新该 app 的 tech 文档
 - 文档变更单独成提交（`docs(scope): ...`），不与代码混提
 
@@ -334,7 +334,7 @@ packages/amap-sdk/
 ### Phase 2：首批共享包 + 主力项目迁入（1-2 个工作日）
 - [x] 迁 `WithLangGraph`（subtree add 保留完整历史——305 个测试的演进史值得保留）2026-09-05 完成
 - [ ] 迁移过程中提炼 `amap-sdk`（geocode/routes/坐标转换整体搬出，WithLangGraph 改为依赖 workspace 包，全量回归 305 用例必须全绿）——暂缓：上游 geocode.py 有未提交 WIP，先等同步
-- [x] 迁 `checkSelf` 2026-09-05 完成（提炼 `ga-logging` 待做，已记入 apps/checkself/ROADMAP.md）
+- [x] 迁 `checkSelf` 2026-09-05 完成（提炼 `ga-logging` 待做，已记入 `apps/checkself/docs/ROADMAP.md`）
 - [x] 迁 `mermaid-viewer` 2026-09-12 完成（原 `tools/mermaid-viewer/` 零依赖工具按 buildApp skill 升级为 `apps/` 标准成员：新增 pyproject.toml + AGENTS.md / ROADMAP.md / docs，`git mv` 保留历史；tests 于 09-13 起随功能补齐）
 - [x] 存量迁移注意：WithLangGraph 的 `data/`（langTrack.db、etl_config.json）保持 gitignore 状态，配置文件按 R9 出 `.example` 模板
 
@@ -393,7 +393,7 @@ uv run pip-audit
 
 - [ ] ruff + pytest 全绿
 - [ ] 提交信息符合 `type(scope): 描述`
-- [ ] ROADMAP.md 追加了执行记录
+- [ ] `apps/<app>/docs/ROADMAP.md` 追加了执行记录
 - [ ] 涉及接口/表结构时 tech 文档已同步
 - [ ] 无新硬编码密钥（密钥走环境变量/.env）
 - [ ] 新增依赖已写入对应 pyproject.toml

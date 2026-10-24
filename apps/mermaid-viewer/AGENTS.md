@@ -49,10 +49,9 @@ mermaid-viewer/
 ├── scan-mmd-reviews.py   # 评审标记扫描脚本
 ├── vendor/               # 本地 mermaid + svg-pan-zoom 库
 ├── data/                 # 运行时评论库 reviews.db（gitignored，留 README）
-├── docs/                 # tech 文档 + 架构图
+├── docs/                 # tech 文档 + 架构图 + ROADMAP.md（路书统一放这里）
 ├── tests/                # 业务测试
-├── AGENTS.md             # 本文件
-└── ROADMAP.md            # 执行记录与进度
+└── AGENTS.md             # 本文件
 ```
 
 ## 5. 常用命令

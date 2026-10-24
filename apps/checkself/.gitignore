@@ -1,7 +1,9 @@
 __pycache__/
 *.pyc
 /.superpowers/
-/docs/
+# docs/ 默认不入库；仅路书按 R5 例外放行（新增 tech/架构图需显式加白名单）
+/docs/*
+!/docs/ROADMAP.md
 /logs/
 /.idea/
 /data/
