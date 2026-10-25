@@ -14,7 +14,7 @@ import argparse
 import json
 import re
 from dataclasses import asdict, dataclass, replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from gacore.config import Config, load_dotenv
@@ -298,6 +298,7 @@ def last_seen(cfg: Config, topic: str, before_date: str) -> LastSeen:
 
 # R2 容差带（决策 14）：claimed ≥ 2×actual 且 claimed − actual ≥ 14 天才判硬冲突，约数不冤枉
 _FIRST_WORDS: tuple[str, ...] = ("首次", "第一次", "久违")
+_RUNNING_WORDS: tuple[str, ...] = ("连续", "持续")
 
 
 def is_conflict(claimed_days: int, actual_gap_days: int) -> bool:
@@ -328,13 +329,34 @@ class AuditResult:
     claims: tuple[Claim, ...] = ()
 
 
+def _yesterday_claims(cfg: Config, before_date: str) -> list[Claim]:
+    """读前一日 v1 快照的 report_text 抽断言（R5 跨篇对照语料）；无快照/非 ISO 日期返回空。"""
+    try:
+        prev = (date.fromisoformat(before_date) - timedelta(days=1)).isoformat()
+    except ValueError:
+        return []
+    path = cfg.logs_dir / "report_audit" / f"{prev}.v1.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    text = data.get("report_text") if isinstance(data, dict) else None
+    return extract_claims(text) if isinstance(text, str) and text else []
+
+
 def _audit_claims(cfg: Config, claims: list[Claim], before_date: str) -> tuple[Finding, ...]:
-    """规则闸：每条断言至多出一条 Finding，优先级 R2（硬冲突）> R4（首现无先例）> R1（量级无锚）。
+    """规则闸：每条断言至多出一条 Finding，优先级 R2（硬冲突）> R4（首现无先例）> R5（计数断档）> R1（量级无锚）。
 
     P4 周报审计复用本函数，不复制规则。
     """
     findings: list[Finding] = []
     table = _load_topic_synonyms(cfg)
+    prev_running: dict[str, int] = {}
+    for c in _yesterday_claims(cfg, before_date):
+        if c.claim_word in _RUNNING_WORDS and c.claimed_days is not None:
+            topic = _topic_from_table(table, c.text)
+            if topic:
+                prev_running[topic] = max(prev_running.get(topic, 0), c.claimed_days)
     for claim in claims:
         topic = _topic_from_table(table, claim.text)
         if topic and claim.claimed_days is not None:
@@ -355,6 +377,18 @@ def _audit_claims(cfg: Config, claims: list[Claim], before_date: str) -> tuple[F
                         claim=claim.text, claimed_days=claim.claimed_days,
                         actual_last_seen=None, actual_gap_days=None,
                         evidence=f"主题「{topic}」在记忆库无先例",
+                    )
+                )
+                continue
+        if claim.claim_word in _RUNNING_WORDS and claim.claimed_days is not None:
+            prev = prev_running.get(topic) if topic else None
+            if prev is not None and claim.claimed_days not in (prev + 1, 1):
+                findings.append(
+                    Finding(
+                        rule="R5", severity="warn", section=claim.section, anchor=claim.anchor,
+                        claim=claim.text, claimed_days=claim.claimed_days,
+                        actual_last_seen=None, actual_gap_days=None,
+                        evidence=f"昨日连续 {prev} 天 vs 今日 {claim.claimed_days} 天（主题「{topic}」计数断档）",
                     )
                 )
                 continue

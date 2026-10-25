@@ -195,6 +195,50 @@ def test_daily_report_prompt_carries_audit_contract():
     assert "0 条合法" in prompt
 
 
+# ------------------------------------------------------------ P2 Task 4: R5 跨篇计数
+
+
+def _seed_running_count_case(tmp_path, today_text: str):
+    cfg = Config.for_tests(tmp_path)
+    (cfg.memory_dir / "daily").mkdir(parents=True, exist_ok=True)
+    reports = cfg.logs_dir / "delivered_report"
+    reports.mkdir(parents=True, exist_ok=True)
+    _write_v1(cfg, "2026-10-19", "# 工作日志\n- [工作日志-1] 硬件教程连续 2 天在看\n")
+    (reports / "2026-10-20.md").write_text(today_text, encoding="utf-8")
+    return cfg
+
+
+def test_r5_flags_discontinuous_running_count(tmp_path):
+    cfg = _seed_running_count_case(tmp_path, "# 工作日志\n- [工作日志-1] 硬件教程连续第 4 天在看\n")
+    got = audit_report(cfg, "2026-10-20")
+    r5 = [f for f in got.findings if f.rule == "R5"]
+    assert len(r5) == 1
+    assert r5[0].severity == "warn"
+    assert "昨日连续 2 天" in r5[0].evidence
+
+
+def test_r5_continuous_and_fresh_start_pass(tmp_path):
+    cfg = _seed_running_count_case(tmp_path, "# 工作日志\n- [工作日志-1] 硬件教程连续第 3 天在看\n")
+    got = audit_report(cfg, "2026-10-20")
+    assert [f for f in got.findings if f.rule == "R5"] == []
+
+    cfg2 = _seed_running_count_case(tmp_path, "# 工作日志\n- [工作日志-1] 硬件教程连续第 1 天在看\n")
+    got2 = audit_report(cfg2, "2026-10-20")
+    assert [f for f in got2.findings if f.rule == "R5"] == []
+
+
+def test_r5_topic_unrecognized_fails_open(tmp_path):
+    """词表识别不出主题（两侧任一）就不判 R5（fail-open，不误报）。"""
+    cfg = Config.for_tests(tmp_path)
+    (cfg.memory_dir / "daily").mkdir(parents=True)
+    reports = cfg.logs_dir / "delivered_report"
+    reports.mkdir(parents=True)
+    _write_v1(cfg, "2026-10-19", "# 工作日志\n- [工作日志-1] 肉鸽连续 2 天在刷\n")
+    (reports / "2026-10-20.md").write_text("# 工作日志\n- [工作日志-1] 肉鸽连续第 5 天在刷\n", encoding="utf-8")
+    got = audit_report(cfg, "2026-10-20")
+    assert [f for f in got.findings if f.rule == "R5"] == []
+
+
 # ------------------------------------------------------------ Task 3: 冲突判定与单篇审计
 
 
