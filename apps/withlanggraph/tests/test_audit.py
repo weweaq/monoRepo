@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from gacore.audit import extract_claims, find_topic, last_seen, parse_duration_days
+from gacore.audit import (
+    audit_report,
+    extract_claims,
+    find_topic,
+    is_conflict,
+    last_seen,
+    parse_duration_days,
+)
 from gacore.config import Config
 
 
@@ -90,3 +97,37 @@ def test_last_seen_handles_duplicate_rows(tmp_path):
         "[2026-10-03] insight: 硬件 B\n", encoding="utf-8"
     )
     assert last_seen(cfg, "硬件", "2026-10-20").date == "2026-10-03"
+
+
+# ------------------------------------------------------------ Task 3: 冲突判定与单篇审计
+
+
+def test_is_conflict_tolerance_band():
+    assert is_conflict(180, 17) is True
+    assert is_conflict(60, 27) is True
+    assert is_conflict(14, 13) is False
+    assert is_conflict(20, 19) is False
+
+
+def test_audit_report_flags_hard_conflict(tmp_path):
+    cfg = Config.for_tests(tmp_path)
+    (cfg.memory_dir / "daily").mkdir(parents=True)
+    (cfg.memory_dir / "daily" / "2026-10-03.md").write_text("硬件信号", encoding="utf-8")
+    reports = cfg.logs_dir / "delivered_report"
+    reports.mkdir(parents=True)
+    (reports / "2026-10-20.md").write_text(
+        "# 关键变化\n- [关键变化-1] 硬件线半年沉寂后重新点火\n", encoding="utf-8"
+    )
+    got = audit_report(cfg, "2026-10-20")
+    assert got.score == 75
+    assert len(got.findings) == 1
+    assert got.findings[0].rule == "R2"
+    assert got.findings[0].severity == "error"
+    assert got.findings[0].actual_last_seen == "2026-10-03"
+
+
+def test_audit_report_missing_file(tmp_path):
+    cfg = Config.for_tests(tmp_path)
+    got = audit_report(cfg, "2026-01-01")
+    assert got.missing is True
+    assert got.findings == ()

@@ -236,3 +236,97 @@ def last_seen(cfg: Config, topic: str, before_date: str) -> LastSeen:
     day_str, source, snippet = max(hits, key=lambda h: h[0])
     gap = (datetime.strptime(before_date, "%Y-%m-%d").date() - date.fromisoformat(day_str)).days
     return LastSeen(found=True, date=day_str, gap_days=gap, source=source, snippet=snippet)
+
+
+# ------------------------------------------------------- Task 3: 冲突判定与单篇审计
+
+# R2 容差带（决策 14）：claimed ≥ 2×actual 且 claimed − actual ≥ 14 天才判硬冲突，约数不冤枉
+_FIRST_WORDS: tuple[str, ...] = ("首次", "第一次", "久违")
+
+
+def is_conflict(claimed_days: int, actual_gap_days: int) -> bool:
+    return claimed_days >= 2 * actual_gap_days and claimed_days - actual_gap_days >= 14
+
+
+@dataclass(frozen=True, slots=True)
+class Finding:
+    rule: str
+    severity: str
+    section: str
+    anchor: str | None
+    claim: str
+    claimed_days: int | None
+    actual_last_seen: str | None
+    actual_gap_days: int | None
+    evidence: str
+
+
+@dataclass(frozen=True, slots=True)
+class AuditResult:
+    date: str
+    version: int
+    score: int
+    missing: bool
+    findings: tuple[Finding, ...]
+    report_text: str = ""
+    claims: tuple[Claim, ...] = ()
+
+
+def _audit_claims(cfg: Config, claims: list[Claim], before_date: str) -> tuple[Finding, ...]:
+    """规则闸：每条断言至多出一条 Finding，优先级 R2（硬冲突）> R4（首现无先例）> R1（量级无锚）。
+
+    P4 周报审计复用本函数，不复制规则。
+    """
+    findings: list[Finding] = []
+    for claim in claims:
+        topic = find_topic(claim.text)
+        if topic and claim.claimed_days is not None:
+            seen = last_seen(cfg, topic, before_date)
+            if seen.found and seen.gap_days is not None and is_conflict(claim.claimed_days, seen.gap_days):
+                findings.append(
+                    Finding(
+                        rule="R2", severity="error", section=claim.section, anchor=claim.anchor,
+                        claim=claim.text, claimed_days=claim.claimed_days,
+                        actual_last_seen=seen.date, actual_gap_days=seen.gap_days, evidence=seen.source,
+                    )
+                )
+                continue
+            if claim.claim_word in _FIRST_WORDS and not seen.found:
+                findings.append(
+                    Finding(
+                        rule="R4", severity="warn", section=claim.section, anchor=claim.anchor,
+                        claim=claim.text, claimed_days=claim.claimed_days,
+                        actual_last_seen=None, actual_gap_days=None,
+                        evidence=f"主题「{topic}」在记忆库无先例",
+                    )
+                )
+                continue
+        if not claim.anchored:
+            findings.append(
+                Finding(
+                    rule="R1", severity="warn", section=claim.section, anchor=claim.anchor,
+                    claim=claim.text, claimed_days=claim.claimed_days,
+                    actual_last_seen=None, actual_gap_days=None, evidence="",
+                )
+            )
+    return tuple(findings)
+
+
+def audit_report(cfg: Config, date: str) -> AuditResult:
+    """审计一篇已投递日报（date = YYYY-MM-DD）；文件缺失返回 missing 占位，不抛异常。"""
+    path = cfg.logs_dir / "delivered_report" / f"{date}.md"
+    if not path.is_file():
+        return AuditResult(date=date, version=0, score=100, missing=True, findings=())
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return AuditResult(date=date, version=0, score=100, missing=True, findings=())
+    claims = extract_claims(text)
+    findings = _audit_claims(cfg, claims, before_date=date)
+    errors = sum(1 for f in findings if f.severity == "error")
+    warns = len(findings) - errors
+    score = max(0, 100 - 25 * errors - 5 * warns)
+    return AuditResult(
+        date=date, version=0, score=score, missing=False,
+        findings=findings, report_text=text, claims=tuple(claims),
+    )
