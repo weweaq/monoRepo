@@ -2261,3 +2261,34 @@ reply ─cap_questions→ gated ─stamp_report_bullets→ deliver_reply ─save
 - 首晚运行前 `data/qa/` 不存在，`_QA` 恒为 missing_data 空态（已实测诚实）。
 - 裸回答的「已推送过」护栏强于 spec 原文（用户未见过问题前不吞裸消息）；多条开放时必须 `[Qn]` 显式引用。
 - `_write_back_proactive` 会把推送轮写回主线程，用户后续追问由对话 agent 接住，与捕获正交。
+
+## 9.37 周报 + 人物闸 P4：数字程序填 + 评分两问 + 候选确认（2026-10-25）
+
+> 实施计划：`docs/superpowers/plans/2026-10-25-daily-report-audit-p4.md`。周日 20:30 触发（weekday 调度），数据窗 周一 00:00 – 周日 20:00；铁律=数字由程序填、叙事由模型写（决策 18）。
+
+### 模块
+
+| 符号 | 说明 |
+|---|---|
+| `weekly_stats.week_of / week_window / prev_week` | `YYYY-Www` 周编号与 (周一, 周日) 窗口 |
+| `weekly_stats.collect_week_numbers(cfg, week)` | 只读数字区：git 提交/日（一次 `git log` 取 7 天）、屏幕小时/睡眠分钟（daily_stats `mode=ro`）、审计分/日+周均（v1 口径）、QA 提问/回答计数、环比、缺数据标注；头部带铁律声明 |
+| `weekly_stats.write_weekly / pending_candidates` | 存档 `logs/delivered_weekly/{week}.md`；candidates.jsonl pending ≤3 条 |
+| `weekly_eval.set_pending_weekly / load_pending` | `data/eval/human/pending.json`（week + 候选清单 + rated 标记，3 天过期） |
+| `weekly_eval.try_weekly_interaction(cfg, content)` | 评分 `4 3`（可带第三数字=最不像条目与自由文本）→ `{week}.json`（`rubric_version:1`，决策 17/22，已评分不重复吞）；候选 `1`/`-2`/`0`（决策 27）→ `set_candidate_status`，confirmed 追加 `global_mem_facts.txt` |
+| `weekly_eval.push_weekly_notice(cfg, week)` | 投递后确定性 QQ 提醒（评分与候选操作说明，best-effort） |
+| `scheduler.next_run_time` weekday 形态 | `Sun 20:30`/`周日 20:30`；既有 `HH:MM`/`every N<d/h/m>` 不变 |
+| `audit._report_path / _anchor_day` | week id → `delivered_weekly/{week}.md`；last_seen 基线锚点 = 周日；R5 对周报 fail-open |
+| `audit.cap_questions(reply, limit=…)` | 日报 limit=5（默认）、周报 limit=3 |
+
+### 接线
+
+- **注入**：weekly job 的 prompt 前置 `collect_week_numbers` 数字区 + 候选清单（原样转述约束）+ 上期周报 `file_read` 回看指引。
+- **投递**（run_job weekly 分支，全 best-effort）：`cap_questions(limit=3)` → `stamp_report_bullets` → `write_weekly` → `_audit_delivered(week)` → `set_pending_weekly` → `push_weekly_notice`；邮件 `for_day=week`。
+- **捕获**：`qq.py` 路由 3.55 步（先于 3.6 的 QA 捕获——pending 期间纯数字消息归周报交互；评分模式要求 pending 未评分）。
+- **job**：`schedule.json` 删 `weekly-summary`、增 `weekly-report`（Sun 20:30 · deliver_to email · 九节结构 prompt，含决策 26 的可回验预测要求）。
+
+### 已知边界
+
+- confirmed 候选直写 `global_mem_facts.txt`（不走 persist_entry 唯一写入口），向量同步靠记忆维护全量兜底——若画像不一致改走 persist_entry。
+- 周报想问你未种入 qa 库（避免与日报问题混入同一 08:30 推送列表），首期观察后定。
+- R5 跨周对照未实现（fail-open）；周报首期无回看节内容时写「首期无回看」。

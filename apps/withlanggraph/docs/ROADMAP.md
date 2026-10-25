@@ -4420,3 +4420,32 @@ batterystats 实测 weiCheckApp 耗电 67.7 mAh，其中 GNSS 64.4 mAh（引擎�
 **待办更新**：
 - [ ] gacore 重启后首晚验证：qa 种入 → 08:30 推送 → 回答捕获 → 次日 `_QA` 注入
 - [ ] P4：周报（程序填数字 + 模型写叙事 + `rubric_version` 评分两问 + 画像候选确认 + 周趋势）；周报同样过 `_audit_claims`
+
+## 2026-10-25 · 日报评测 P4（周报 + 人物闸，评测设计四阶段收官）
+
+**背景**：P1–P3 让日报可审计、会查表、会提问且有回答回路；P4 按 `docs/superpowers/plans/2026-10-25-daily-report-audit-p4.md` 落地最后一块：周报（周日 20:30，数据窗周一 00:00–周日 20:00）+ 评分两问 + 画像候选确认。铁律=数字由程序填、叙事由模型写。
+
+**已完成**（3 笔提交）：
+- `gacore/weekly_stats.py`（新增）：`week_of/week_window/prev_week`；`collect_week_numbers` 聚合 git 提交/日（`git log` 一次取 7 天）、屏幕小时/睡眠分钟（daily_stats `mode=ro`）、审计分/日 + 周均（v1 口径）、QA 提问/回答计数，外加环比与缺数据标注，产出带铁律声明的只读数字区；`write_weekly` 存档 `logs/delivered_weekly/{week}.md`；`pending_candidates` 取 candidates.jsonl pending（≤3）。
+- `gacore/weekly_eval.py`（新增）：`set_pending_weekly`（投递时登记评分+候选待交互状态，3 天过期）；`try_weekly_interaction` 捕获 `4 3`（可带第三数字=最不像条目与自由文本）→ `data/eval/human/{week}.json`（`rubric_version:1`，决策 17/22）与 `1`/`-2`/`0` 候选操作（决策 27；confirmed 追加 `global_mem_facts.txt`）；`push_weekly_notice` 周报投递后确定性 QQ 提醒。
+- `scheduler.py`：调度新增 weekday 形态（`Sun 20:30`/`周日 20:30`，既有 HH:MM/every 不受影响）；weekly job 注入数字区+候选清单+上期回看指引；投递路径 `cap_questions(limit=3)` → stamp → `write_weekly` → `_audit_delivered(week)` → `set_pending_weekly` → `push_weekly_notice`（全 best-effort）；邮件 `for_day=week`。
+- `audit.py`：`_report_path` 支持 week id（`delivered_weekly/{week}.md`）；`_anchor_day` 周 → 周日（last_seen 基线锚点）；`cap_questions` 增 `limit` 参数（日报 5/周报 3）。R5 对周报 fail-open（无上期对照语料即跳过）。
+- `qa_store.py`：`set_candidate_status`（pending/confirmed/rejected 状态机操作）。
+- `qq.py`：路由 3.55 步 `try_weekly_interaction`（先于 QA 捕获——pending 期间纯数字消息归周报交互）。
+- `schedule.json`：删 `weekly-summary`（every 7d 自由总结，被取代），增 `weekly-report`（Sun 20:30·email·九节结构 prompt：本周一句话≤120字/数字只读转述/三条变化≥1 条可回验预测（决策 26）/上周回看/画像候选原样列出/本周未解/想问你≤3/打分提示）。
+
+**实测验证**：
+- `test_weekly.py` 11 例（周窗口/数字序列与环比/缺数据/weekday due 四场景/周报审计 R2 命中/评分落盘含 rubric_version 与 least_like_me/候选确认进 facts/否掉与全否/无 pending 不吞）+ audit/qa/proactive 回归 → **58 passed**；ruff 全绿；mermaid 断言 ALL PASS。
+- 真实周报首期生成待本周日 20:30（需 gacore 重启加载新调度与代码）。
+
+**偏差说明**：
+- confirmed 候选直接追加 `global_mem_facts.txt`（`[date] fact: …（周报候选确认）`），未走记忆维护的 `persist_entry` 唯一写入口——向量同步靠记忆维护的全量 sync 兜底；记入已知偏差，若画像不一致再改走 persist_entry。
+- 旧 `weekly-summary` job 直接删除（其"搜近 7 天笔记做总结"的能力被 weekly-report 的结构化周报取代），未保留开关。
+- R5 跨周对照未实现（周报锚点=周日，`_yesterday_claims` 找不到"上周六日报"自然跳过），fail-open。
+- 周报审计的 `_seed_qa` 未挂（周报想问你 ≤3 与日报共用 qa 库时，种入会与日报问题混在 open 列表被 08:30 推送——首期先不种入周报提问，观察后定）。
+
+**待办更新**：
+- [x] 评测设计 P0–P4 全部落地（2026-10-25 单日完成）
+- [ ] gacore 重启：P2 查表契约/审计钩子、P3 提问回路、P4 周报调度一次性生效
+- [ ] 首周观察：审计分周均、回答率、周报评分回收率（spec §9 验收表）；4 周后按体感调权重（§7）
+- [ ] 主题词表从记忆库高频主题导出扩充（决策 28 尾巴）

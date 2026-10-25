@@ -447,8 +447,9 @@ P0 已完成。**建议先做 P1**：它不改生成逻辑，能立刻给出一�
 - **P1 完成**（2026-10-25）：`gacore/audit.py` 离线审计 + 15→29 例测试 + 真实 59 篇基线（29 断言 / 16 无锚 / 2 硬冲突命中）+ `config/audit_topics.json` 词表外置；详见 `apps/withlanggraph/docs/ROADMAP.md` 同日记录。
 - **P2 完成**（2026-10-25）：`last_seen` 工具化接入生成 prompt（查表契约 + `# 想问你` 节）、R5 跨篇计数、投递后审计钩子（只标记）与 `cap_questions` 硬闸；计划 `docs/superpowers/plans/2026-10-25-daily-report-audit-p2.md`。
 - **P3 完成**（2026-10-25）：提问回路闭环——`qa_store` 落库（已答不重开/语义去重/重问两期归档）、`daily-questions` proactive job 08:30 QQ 推送、QQ 路由 `try_answer` 捕获（不走订正阶梯）、`_QA` 源注入（cap 600）；计划 `docs/superpowers/plans/2026-10-25-daily-report-audit-p3.md`。
+- **P4 完成**（2026-10-25）：周报 + 人物闸——weekday 调度（Sun 20:30）、`collect_week_numbers` 数字只读区（铁律：数字程序填）、`delivered_weekly/{week}.md` 存档与 week 审计、`4 3` 评分两问（rubric_version）与 `[候选-N]` 确认捕获、`push_weekly_notice`；`weekly-summary` 旧 job 被 `weekly-report` 取代；计划 `docs/superpowers/plans/2026-10-25-daily-report-audit-p4.md`。
 - **设计已确认**（2026-10-25），第 11–12 节共 28 条定案（含同日补的实施决策 23–28），无遗留问题。
-- **下一步 P4**（周报：程序填数字 + 评分两问 + 画像候选确认 + 周趋势），写计划后再开工；`proactive_qa` 解析已按可扩展写法覆盖 `[Qn] 答案`，P4 增补 `5 4` 评分与 `1`/`0` 候选确认两形态。
+- **状态：P0–P4 全部落地（2026-10-25）**。剩余为运行时验证（gacore 重启后首晚日报链路、首周周报与评分回收）与 §7 的 4 周权重复评、决策 28 的词表导出扩充。
 
 ### 14.2 已定死、不要重新讨论的事
 
