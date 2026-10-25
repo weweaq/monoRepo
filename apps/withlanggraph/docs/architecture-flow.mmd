@@ -157,6 +157,7 @@ flowchart TD
     SC -. "投递正文想问你节种入 (_seed_qa·save_delivered 后 best-effort)" .-> QAS
     SC -. "daily-questions job (type=proactive·08:30·scene=questions)<br/>open_questions 注入·qq_push 逐条转述[Qn]<br/>push 后 asks+1·archive_stale" .-> QAS
     QQ -. "回答捕获 try_answer (路由3.6步·feedback 之前·命中即确认)" .-> QAS
+    SC -. "日报正文分段推 QQ (_push_daily_to_qq·600字/段·想问你随行·成功即计触达)" .-> QQ
     QAS -. "_QA 源 (cap600·决策24·qa_brief 近7天已答+未答key)" .-> SIP
     SC -. "weekly-report job (Sun 20:30·weekday 调度)<br/>collect_week_numbers 数字区只读注入+候选清单+上期回看指引<br/>cap_questions(limit=3)→stamp→write_weekly delivered_weekly/{week}.md<br/>_audit_delivered(week)·set_pending_weekly·push_weekly_notice(全 best-effort)" .-> WK
     QQ -. "评分「4 3」/候选「1·-1·0」捕获 (try_weekly_interaction·路由3.55·先于QA)" .-> WK
