@@ -2227,3 +2227,37 @@ reply ─cap_questions→ gated ─stamp_report_bullets→ deliver_reply ─save
 
 - R5 覆盖面受词表限制（当前 4 主题）；扩词表即扩覆盖，不改代码。
 - 生成→投递→审计全链路属运行时行为，首晚真实运行后以 `logs/report_audit/{当日}.v1.json` 与 `report audited` 日志核对。
+
+## 9.36 提问回路 P3：qa 落库 + QQ 推送与捕获 + `_QA` 注入（2026-10-25）
+
+> 实施计划：`docs/superpowers/plans/2026-10-25-daily-report-audit-p3.md`。回答只影响下一期（决策 9）；不自动写长期画像，候选进 `candidates.jsonl` 由用户确认（决策 10）。
+
+### 数据与接口（`gacore/qa_store.py`）
+
+| 存储 | 内容 |
+|---|---|
+| `data/qa/{date}.jsonl` | 每行一问：`question_key/question/anchor/day/status(open·answered·archived)/answer/answer_day/asks/created_at/updated_at` |
+| `data/qa/candidates.jsonl` | 回答落画像候选：`question_key/question/answer/status(pending·confirmed·rejected)` |
+| `data/qa/open_state.json` | 裸回答指针：有且仅有 1 条待答时指向它 |
+
+| 符号 | 说明 |
+|---|---|
+| `question_key(cfg, question)` | `sha1(topic + 意图)[:16]`：topic 取 `config/audit_topics.json` 命中（无则空串），意图 = 去数字/日期/标点后归一 |
+| `seed_questions(cfg, day, bullets)` | 投递正文种入；已答 key 永不重开（决策 11）、同期 2-gram Jaccard > 0.6 语义去重 |
+| `mark_pushed` / `archive_stale` | 推送后 `asks+1`；未答 `asks > 2` 归档（用户不关心），不再注入/推送 |
+| `try_answer(cfg, content, allow_bare)` | QQ 捕获入口（决策 8）：显式 `[Qn]`/`Qn`/`想问你-n` 命中第 n 条开放问题；裸回答仅在「唯一开放 + 已推送（asks>0）+ ≤30 字 + allow_bare」时归给该问题 |
+| `qa_brief(cfg, before_date)` | `_QA` 源取数：近 7 天已答（新→旧）+ 全部开放问题 |
+| `stats(cfg)` | 每期提问数 / 回答率 / 归档数 |
+
+### 接线
+
+- **种入**：`scheduler._seed_qa(cfg, day, deliver_reply)` 在 `save_delivered` 后执行（审计钩子旁，best-effort），从已 stamp 的 `- [想问你-N]` 行种入。
+- **推送**：`schedule.json` 的 `daily-questions` job（type=proactive·08:30·scene=questions·window 08:00-09:30）；`run_proactive_job` 无开放问题整 job 跳过（`no_open_questions`，0 条不推）；问题清单注入 `build_proactive_prompt(questions=...)` 并强制**逐条原样转述、保留 [Qn] 编号**（编号是捕获配对键）；push 成功后 `asks+1` + 归档超限。
+- **捕获**：`qq.py on_message` 路由 3.6 步（`feedback_route` 判定后、feedback 分发前）调 `try_answer`，命中回确认消息并 return——不进订正阶梯、不进 agent 轮（决策 8）；`allow_bare=route is None` 防止吞掉订正关键词。
+- **注入**：`daily_info_pack` 注册 `SourceSpec("_QA", 600, 110, _build_qa)`（决策 24）；pack 单一截断点=cap（减已答组→对半减未答 key→硬截断），单行 `_qa_clip`（问 90/答 60）；空态 `- 当日无问答数据` → missing_data；detail=qa 库全量不压缩。
+
+### 已知边界
+
+- 首晚运行前 `data/qa/` 不存在，`_QA` 恒为 missing_data 空态（已实测诚实）。
+- 裸回答的「已推送过」护栏强于 spec 原文（用户未见过问题前不吞裸消息）；多条开放时必须 `[Qn]` 显式引用。
+- `_write_back_proactive` 会把推送轮写回主线程，用户后续追问由对话 agent 接住，与捕获正交。

@@ -446,8 +446,9 @@ P0 已完成。**建议先做 P1**：它不改生成逻辑，能立刻给出一�
 - **P0 完成**：探针跑完，结果见 §1。脚本是一次性的，放在系统临时目录，**未入库**；产品代码零改动。
 - **P1 完成**（2026-10-25）：`gacore/audit.py` 离线审计 + 15→29 例测试 + 真实 59 篇基线（29 断言 / 16 无锚 / 2 硬冲突命中）+ `config/audit_topics.json` 词表外置；详见 `apps/withlanggraph/docs/ROADMAP.md` 同日记录。
 - **P2 完成**（2026-10-25）：`last_seen` 工具化接入生成 prompt（查表契约 + `# 想问你` 节）、R5 跨篇计数、投递后审计钩子（只标记）与 `cap_questions` 硬闸；计划 `docs/superpowers/plans/2026-10-25-daily-report-audit-p2.md`。
+- **P3 完成**（2026-10-25）：提问回路闭环——`qa_store` 落库（已答不重开/语义去重/重问两期归档）、`daily-questions` proactive job 08:30 QQ 推送、QQ 路由 `try_answer` 捕获（不走订正阶梯）、`_QA` 源注入（cap 600）；计划 `docs/superpowers/plans/2026-10-25-daily-report-audit-p3.md`。
 - **设计已确认**（2026-10-25），第 11–12 节共 28 条定案（含同日补的实施决策 23–28），无遗留问题。
-- **下一步 P3**（提问回路：proactive 推送 + `proactive_qa` + qa 落库 + `_QA` 源 + key 去重），写计划后再开工。
+- **下一步 P4**（周报：程序填数字 + 评分两问 + 画像候选确认 + 周趋势），写计划后再开工；`proactive_qa` 解析已按可扩展写法覆盖 `[Qn] 答案`，P4 增补 `5 4` 评分与 `1`/`0` 候选确认两形态。
 
 ### 14.2 已定死、不要重新讨论的事
 

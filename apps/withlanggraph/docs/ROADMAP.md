@@ -4394,3 +4394,29 @@ batterystats 实测 weiCheckApp 耗电 67.7 mAh，其中 GNSS 64.4 mAh（引擎�
 - [ ] 当晚真实运行验证：v1 自动落盘 + `report audited` 日志 + 日报含 `# 想问你`（或整节省略）
 - [ ] P3：proactive job（次日 08:30 QQ 推送）+ `proactive_qa` 处理器 + `data/qa/` 落库 + `_QA` 源（cap 600 字）+ 想问你 key 去重
 - [ ] P4：周报 + 评分两问 + 周趋势
+
+## 2026-10-25 · 日报提问回路 P3（qa 落库 / QQ 推送与捕获 / _QA 注入）
+
+**背景**：P2 让日报会问（`# 想问你` 节 + 硬闸），但提问仍是单行道——QQ 收不到正文、回答没有入口、问了白问。P3 按 `docs/superpowers/plans/2026-10-25-daily-report-audit-p3.md` 闭合回路：投递后种入 qa 库 → 次日 08:30 QQ 推送（决策 25）→ QQ 回答捕获（决策 8 不走订正阶梯）→ `_QA` 源注入下一期（决策 24）。
+
+**已完成**（4 笔功能提交）：
+- `gacore/qa_store.py`（新增）：`data/qa/{date}.jsonl`（question_key=sha1(topic+意图)，已答 key 永不重开）+ `candidates.jsonl`（回答落 pending，不自动写画像，决策 10）+ `open_state.json`（裸回答指针）；`seed_questions`（同期 2-gram Jaccard>0.6 语义去重，P2 遗留补齐）、`mark_pushed`+`archive_stale`（未答重问 2 期后归档）、`try_answer`（显式 `[Qn]`/唯一开放且已推送的 ≤30 字裸答）、`stats`、`qa_brief`。
+- `scheduler.py`：`_seed_qa` 挂 `save_delivered` 后（审计钩子旁，best-effort），从已 stamp 正文种入。
+- `proactive.py`：`build_proactive_prompt` 增 `questions` 注入（逐条原样转述、保留 [Qn]、禁止改写——编号是捕获配对键）；`run_proactive_job` 的 `scene=questions` 分支（无开放问题整 job 跳过 `no_open_questions`，0 条不推）；push 成功后 `asks+1` 并归档超限。`schedule.json` 新增 `daily-questions` job（08:30·window 08:00-09:30·cooldown 720）。
+- `frontends/qq.py`：路由 3.6 步（`feedback_route` 判定后、feedback 分发前）`try_answer` 捕获，命中回确认并 return，不进订正、不进 agent 轮。
+- `_QA` 信息源（走 add-info-source skill 军规）：`SourceSpec("_QA", 600, 110, _build_qa)` 注册；单一截断点=cap（减已答组→对半减 key→硬截断兜底，单行 `_qa_clip`）；空态 `- 当日无问答数据` → missing_data；失败 sentinel 登记 `test_source_registry._inject_failure`；`data/qa` 属本地运行数据，data_catalog 的 CONSUMERS 只映射 langTrack 事件类型，不适用。
+- 架构图 `QAS` 节点 + 四条边（SC 种入 / SC questions job / QQ 捕获 / QAS→SIP `_QA` 源）；mermaid 断言同步（FB 97 / 日报正文 124）ALL PASS。tech 新增 §9.36。
+
+**实测验证**：
+- `test_qa_store.py` 14 例 + `test_proactive_questions.py` 5 例 + 注册表/信息包回归 → 相关 80 passed；`test_qq.py` 27 passed/1 skipped 无回归；ruff 全绿。
+- 真实回算：`backfill_health.refresh_day(cfg, 2026-10-24)` 正常出包（7565 字符），`_QA` 源以 `missing_data` 空态入健康 jsonl（回路未运行，诚实空态）。
+- 全链路（生成→种入→08:30 推送→回答→注入）属运行时行为，待 gacore 重启后首晚真实运行验证。
+
+**偏差说明**：
+- `config/info_pack.json` 为 gitignore 的本地运行时配置，`_QA` 开关的本地启用不入库；代码注册表默认 enabled。
+- 裸回答语义按 spec 落地为「唯一开放 + 已推送过（asks>0）+ ≤30 字 + 无 feedback 关键词」，比 spec 多了"已推送过"护栏（用户没看到问题前不吞裸消息）。
+- `_write_back_proactive` 会把推送轮写回主线程，用户在 QQ 的后续追问由对话 agent 自然接住，与本捕获正交。
+
+**待办更新**：
+- [ ] gacore 重启后首晚验证：qa 种入 → 08:30 推送 → 回答捕获 → 次日 `_QA` 注入
+- [ ] P4：周报（程序填数字 + 模型写叙事 + `rubric_version` 评分两问 + 画像候选确认 + 周趋势）；周报同样过 `_audit_claims`
