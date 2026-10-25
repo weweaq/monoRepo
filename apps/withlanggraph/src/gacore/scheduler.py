@@ -357,11 +357,11 @@ def next_run_time(schedule: str, last_run: str | None, now: datetime) -> datetim
             return None
         days_ahead = (wd - now.weekday()) % 7
         slot = now.replace(hour=hour, minute=minute, second=0, microsecond=0) + timedelta(days=days_ahead)
-        if slot <= now:  # 本周槽位已过 → 下周
-            slot += timedelta(days=7)
         last = _parse_iso(last_run) if last_run else None
         if last and last >= slot:
-            slot += timedelta(days=7)
+            slot += timedelta(days=7)  # 本周槽位已跑过 → 下周
+        # 注意：槽位已过但未跑过时必须原样返回（now >= slot 即到期，迟到补跑），
+        # 与 daily "HH:MM" 分支同语义——修复前这里无条件 +7 天，导致到期窗口零宽、job 永不触发。
         return slot
 
     # Daily time form: "HH:MM"

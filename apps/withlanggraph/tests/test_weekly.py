@@ -87,7 +87,7 @@ def test_collect_week_numbers_tolerates_missing_data(tmp_path, monkeypatch):
 def test_weekday_schedule_next_due():
     from datetime import datetime
 
-    from gacore.scheduler import next_run_time
+    from gacore.scheduler import Job, JobState, is_due, next_run_time
 
     # 周一 09:00 距周日 20:30 还有 6 天
     got = next_run_time("Sun 20:30", None, datetime(2026, 10, 19, 9, 0))
@@ -95,12 +95,18 @@ def test_weekday_schedule_next_due():
     # 周日 19:00 → 今天 20:30
     got = next_run_time("周日 20:30", None, datetime(2026, 10, 25, 19, 0))
     assert got == datetime(2026, 10, 25, 20, 30)
-    # 周日 21:00（槽位已过）→ 下周
+    # 周日 21:00 槽位已过但本周未跑 → 原样返回已过槽位（迟到补跑，与 daily HH:MM 同语义；
+    # 2026-10-25 首跑事故：修复前这里无条件翻到下周，到期窗口零宽、job 永不触发）
     got = next_run_time("Sun 20:30", None, datetime(2026, 10, 25, 21, 0))
-    assert got == datetime(2026, 11, 1, 20, 30)
-    # 本周已跑过 → 下周
+    assert got == datetime(2026, 10, 25, 20, 30)
+    # 到期判定：未跑 + 已过槽位 → True
+    job = Job(name="weekly-report", schedule="Sun 20:30", prompt="p")
+    assert is_due(job, JobState(), datetime(2026, 10, 25, 20, 31)) is True
+    assert is_due(job, JobState(), datetime(2026, 10, 25, 20, 29)) is False
+    # 本周已跑过 → 下周（且不再到期）
     got = next_run_time("Sun 20:30", "2026-10-25T20:30:05", datetime(2026, 10, 25, 21, 0))
     assert got == datetime(2026, 11, 1, 20, 30)
+    assert is_due(job, JobState(last_run="2026-10-25T20:30:05"), datetime(2026, 10, 25, 21, 0)) is False
     # 既有形态不受影响
     assert next_run_time("23:30", None, datetime(2026, 10, 25, 9, 0)) == datetime(2026, 10, 25, 23, 30)
 
