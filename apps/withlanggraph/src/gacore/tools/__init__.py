@@ -13,6 +13,7 @@ from langchain_core.tools import BaseTool
 from gacore.config import Config
 
 from .ask_user import ask_user
+from .audit_tools import last_seen
 from .bili_history import bili_history
 from .browser_history import browser_history
 from .code_run import code_run
@@ -66,6 +67,7 @@ TOOL_NAMES: tuple[str, ...] = (
     "qq_push",
     "send_email",
     "langTrack_stats",
+    "last_seen",
     "news_hot_list",
     "news_search",
     "news_list_sources",
@@ -99,6 +101,7 @@ _TOOLS: tuple[BaseTool, ...] = (
     qq_push,
     send_email,
     langTrack_stats,
+    last_seen,
     news_hot_list,
     news_search,
     news_list_sources,

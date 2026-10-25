@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from gacore.audit import (
     audit_report,
@@ -157,6 +158,31 @@ def test_last_seen_ignores_reports_on_or_after_before_date(tmp_path):
     _write_v1(cfg, "2026-10-15", "- [工作日志-1] 工学椅到货\n")
     got = last_seen(cfg, "工学椅", "2026-10-15")
     assert got.found is False
+
+
+# ------------------------------------------------------- P2 Task 2: last_seen 工具
+
+
+def test_last_seen_tool_registered():
+    from gacore.tools import TOOL_NAMES, build_tool_list
+
+    assert "last_seen" in TOOL_NAMES
+    names = [t.name for t in build_tool_list(Config.for_tests(Path(".")))]
+    assert "last_seen" in names
+
+
+def test_last_seen_tool_resolves_via_config_default(tmp_path, monkeypatch):
+    cfg = Config.for_tests(tmp_path)
+    daily = cfg.memory_dir / "daily"
+    daily.mkdir(parents=True)
+    (daily / "2026-10-03.md").write_text("硬件信号", encoding="utf-8")
+    monkeypatch.setattr(Config, "default", classmethod(lambda cls: cfg))
+    from gacore.tools.audit_tools import last_seen as last_seen_tool
+
+    out = last_seen_tool.invoke({"topic": "硬件", "before_date": "2026-10-20"})
+    assert out["found"] is True
+    assert out["gap_days"] == 17
+    assert out["date"] == "2026-10-03"
 
 
 # ------------------------------------------------------------ Task 3: 冲突判定与单篇审计
