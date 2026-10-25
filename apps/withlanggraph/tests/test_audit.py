@@ -185,6 +185,16 @@ def test_last_seen_tool_resolves_via_config_default(tmp_path, monkeypatch):
     assert out["date"] == "2026-10-03"
 
 
+def test_daily_report_prompt_carries_audit_contract():
+    """schedule.json 的 daily-report prompt 必须带查表契约与想问你节（P2 接入，防回归）。"""
+    schedule = Path(__file__).resolve().parents[1] / "config" / "schedule.json"
+    data = json.loads(schedule.read_text(encoding="utf-8"))
+    prompt = next(j for j in data["jobs"] if j["name"] == "daily-report")["prompt"]
+    assert "last_seen(topic)" in prompt
+    assert "# 想问你" in prompt
+    assert "0 条合法" in prompt
+
+
 # ------------------------------------------------------------ Task 3: 冲突判定与单篇审计
 
 
