@@ -380,6 +380,52 @@ def backfill(cfg: Config) -> dict[str, int]:
     return summary
 
 
+def render_baseline(cfg: Config) -> str:
+    """读全部 {date}.v1.json 汇总历史基线：总览表 + 硬冲突清单 + 无锚清单（≤50 条）。"""
+    rows: list[dict] = []
+    out_dir = cfg.logs_dir / "report_audit"
+    if out_dir.is_dir():
+        for f in sorted(out_dir.glob("*.v1.json")):
+            try:
+                rows.append(json.loads(f.read_text(encoding="utf-8")))
+            except (OSError, ValueError):
+                continue
+    total_claims = sum(len(r.get("claims", ())) for r in rows)
+    bare: list[tuple[str, dict]] = [
+        (r["date"], c) for r in rows for c in r.get("claims", ()) if not c.get("anchored")
+    ]
+    conflicts = sorted(
+        ((r["date"], r.get("score", 100), x) for r in rows for x in r.get("findings", ()) if x.get("rule") == "R2"),
+        key=lambda t: t[1],
+    )
+    scores = [r.get("score", 100) for r in rows if not r.get("missing")]
+    avg = round(sum(scores) / len(scores)) if scores else 0
+
+    lines = [
+        "# 日报断言基线（v1 冻结口径）",
+        "",
+        f"- 篇数：{len(rows)}",
+        f"- 时间量级断言：{total_claims}",
+        f"- 无锚断言：{len(bare)}",
+        f"- 硬冲突（R2）：{len(conflicts)}",
+        f"- v1 均分：{avg}",
+        "",
+        "## 硬冲突清单（按分数升序）",
+        "",
+    ]
+    for day, score, x in conflicts:
+        lines.append(
+            f"- **{day}**（score {score}）R2：{x.get('claim', '')}"
+            f" —— 声称 {x.get('claimed_days')} 天，实际 {x.get('actual_gap_days')} 天"
+            f"（{x.get('actual_last_seen')}，{x.get('evidence')}）"
+        )
+    lines += ["", "## 无锚断言清单（最多 50 条）", ""]
+    for day, c in bare[:50]:
+        anchor = f"[{c['anchor']}] " if c.get("anchor") else ""
+        lines.append(f"- {day} {anchor}{c.get('text', '')}")
+    return "\n".join(lines) + "\n"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="日报断言基线闸：离线审计已投递日报")
     parser.add_argument("--backfill", action="store_true", help="审计全部已投递日报并落 v1 快照")
@@ -390,6 +436,8 @@ def main(argv: list[str] | None = None) -> int:
     load_dotenv()
     cfg = Config.default()
     summary = backfill(cfg)
+    baseline_path = cfg.logs_dir / "report_audit" / "baseline.md"
+    baseline_path.write_text(render_baseline(cfg), encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False))
     return 0
 

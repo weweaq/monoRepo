@@ -12,6 +12,7 @@ from gacore.audit import (
     is_conflict,
     last_seen,
     parse_duration_days,
+    render_baseline,
     write_audit,
 )
 from gacore.config import Config
@@ -170,3 +171,32 @@ def test_backfill_skips_existing_v1(tmp_path):
     assert summary["reports"] == 2
     assert summary["conflicts"] == 1
     assert (cfg.logs_dir / "report_audit" / "2026-10-20.v1.json").is_file()
+
+
+# ------------------------------------------------------ Task 5: 基线报告
+
+
+def test_render_baseline_lists_conflicts(tmp_path):
+    cfg = Config.for_tests(tmp_path)
+    (cfg.logs_dir / "report_audit").mkdir(parents=True)
+    (cfg.logs_dir / "report_audit" / "2026-10-20.v1.json").write_text(
+        json.dumps(
+            {
+                "date": "2026-10-20", "version": 1, "score": 75, "missing": False,
+                "findings": [
+                    {
+                        "rule": "R2", "severity": "error", "section": "关键变化",
+                        "anchor": "关键变化-1", "claim": "硬件线半年沉寂",
+                        "claimed_days": 180, "actual_last_seen": "2026-10-03",
+                        "actual_gap_days": 17, "evidence": "memory/daily/2026-10-03.md",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    text = render_baseline(cfg)
+    assert "2026-10-20" in text
+    assert "硬件线半年沉寂" in text
+    assert "R2" in text
