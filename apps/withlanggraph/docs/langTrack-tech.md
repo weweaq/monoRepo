@@ -2254,7 +2254,7 @@ reply ─cap_questions→ gated ─stamp_report_bullets→ deliver_reply ─save
 - **种入**：`scheduler._seed_qa(cfg, day, deliver_reply)` 在 `save_delivered` 后执行（审计钩子旁，best-effort），从已 stamp 的 `- [想问你-N]` 行种入。
 - **推送**：`schedule.json` 的 `daily-questions` job（type=proactive·08:30·scene=questions·window 08:00-09:30）；`run_proactive_job` 无开放问题整 job 跳过（`no_open_questions`，0 条不推）；问题清单注入 `build_proactive_prompt(questions=...)` 并强制**逐条原样转述、保留 [Qn] 编号**（编号是捕获配对键）；push 成功后 `asks+1` + 归档超限。
 - **捕获**：`qq.py on_message` 路由 3.6 步（`feedback_route` 判定后、feedback 分发前）调 `try_answer`，命中回确认消息并 return——不进订正阶梯、不进 agent 轮（决策 8）；`allow_bare=route is None` 防止吞掉订正关键词。
-- **日报 QQ 推送**：`scheduler._push_daily_to_qq`——正文先过 `_plain_for_qq`（剥 `**` 与反引号：QQ 聊天不渲染 Markdown，符号裸露成噪音；邮件版保留原样），再 `_split_for_qq` 6000 UTF-8 字节/段行边界切段（多段带〔日报 i/N〕标头）+ 尾段回复指引，挂 `_deliver` 邮件后 best-effort；成功即对当日问题 `mark_pushed`（裸回答当晚生效）。
+- **日报 QQ 推送**：`scheduler._push_daily_to_qq`——正文先过 `_plain_for_qq`（剥 `**` 与反引号：QQ 聊天不渲染 Markdown，符号裸露成噪音；邮件版保留原样），再 `_split_for_qq` 6000 UTF-8 字节/段行边界切段（多段带〔日报 i/N〕标头），尾段追加 `_qq_reply_guidance`（按当日问答状态三态：正文带「想问你」→ 短指引；正文没带但当日有开放问题 → 指引复述问题原文再给 [Qn] 话术；两者皆无 → 只留订正），挂 `_deliver` 邮件后 best-effort；成功即对当日问题 `mark_pushed`（裸回答当晚生效）。
 - **注入**：`daily_info_pack` 注册 `SourceSpec("_QA", 600, 110, _build_qa)`（决策 24）；pack 单一截断点=cap（减已答组→对半减未答 key→硬截断），单行 `_qa_clip`（问 90/答 60）；空态 `- 当日无问答数据` → missing_data；detail=qa 库全量不压缩。
 
 ### 已知边界
