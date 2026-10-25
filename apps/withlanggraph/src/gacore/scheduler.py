@@ -590,11 +590,22 @@ def run_job(
                 )
                 deliver_reply = reply
             # 投递后审计钩子（决策 2：只标记不阻断，位置在 save_delivered 与 _deliver 之间）
+            audit_day = for_day or datetime.now(UTC).astimezone().date().isoformat()
             try:
-                _audit_delivered(cfg, for_day or datetime.now(UTC).astimezone().date().isoformat())
+                _audit_delivered(cfg, audit_day)
             except Exception as e:  # noqa: BLE001 — audit must never break delivery
                 logger.error(
                     "report audit hook failed",
+                    job=name,
+                    error_type=type(e).__name__,
+                    stack_trace=str(e),
+                )
+            # 想问你种入 qa 库（P3）：回答回路的数据源，同样 best-effort
+            try:
+                _seed_qa(cfg, audit_day, deliver_reply)
+            except Exception as e:  # noqa: BLE001 — qa seeding must never break delivery
+                logger.error(
+                    "qa seed hook failed",
                     job=name,
                     error_type=type(e).__name__,
                     stack_trace=str(e),
@@ -798,6 +809,15 @@ def _audit_delivered(cfg: Config, day: str) -> None:
         findings=len(result.findings),
         errors=sum(1 for f in result.findings if f.severity == "error"),
     )
+
+
+def _seed_qa(cfg: Config, day: str, delivered: str) -> None:
+    """把投递正文「想问你」节种入 qa 库（P3 spec §5.3）；正文无该节则无事发生。"""
+    from gacore import qa_store
+
+    bullets = [line.strip() for line in delivered.splitlines() if line.strip().startswith("- [想问你-")]
+    if bullets:
+        qa_store.seed_questions(cfg, day, bullets)
 
 
 def _onboard_pack_path(cfg: Config) -> Path:

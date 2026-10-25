@@ -20,6 +20,17 @@
       "prompt": "请生成本周总结。搜索最近 7 天的每日笔记（用 search_daily 工具搜索关键词），汇总本周的关键进展、反复出现的问题、学到的重要教训。输出 markdown 格式。",
       "enabled": true,
       "max_turns": 20
+    },
+    {
+      "name": "daily-questions",
+      "schedule": "08:30",
+      "type": "proactive",
+      "scene": "questions",
+      "window": "08:00-09:30",
+      "cooldown_minutes": 720,
+      "prompt": "把昨日日报「想问你」的问题转述给主人并邀请回答（问题清单已由系统注入，逐条原样转述）。",
+      "enabled": true,
+      "max_turns": 15
     }
   ]
 }

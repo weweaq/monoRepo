@@ -976,6 +976,7 @@ def build_proactive_prompt(
     topic: str = "",
     insight: str = "",
     emotion: str = "",
+    questions: list[str] | None = None,
 ) -> str:
     """Assemble the proactive-outreach prompt for the headless agent.
 
@@ -990,6 +991,10 @@ def build_proactive_prompt(
 
     P2 emotion (design doc §5.6): a non-``normal`` ``emotion`` tag injects a concern
     hint so 韩立 can follow the persona and care gently — never prying or lecturing.
+
+    P3 questions scene (eval design §5.3): ``questions`` are the daily report's open
+    想问你 items; they must be relayed verbatim with [Qn] numbering — the QQ capture
+    path matches replies by that numbering, so paraphrasing breaks the loop.
     """
     scene = _scene_of(job)
     base = (job.prompt or "").strip()
@@ -997,6 +1002,12 @@ def build_proactive_prompt(
     now_line = now.strftime("%Y-%m-%d %H:%M:%S")
 
     recall_lines: list[str] = []
+    if questions:
+        q_block = "\n".join(f"[Q{i}] {q}" for i, q in enumerate(questions, 1))
+        recall_lines.append(
+            "今日日报「想问你」的问题（必须逐条原样转述，保留 [Q 编号] 与依据，"
+            "禁止改写、合并、新增或删减；结尾提醒主人可直接回复「[Q1] 你的答案」）：\n" + q_block
+        )
     if topic:
         recall_lines.append(f"最近话题（主人上次抛出、还没说完）：{topic}")
     if insight:
@@ -1247,6 +1258,12 @@ def run_proactive_job(
     jitter = _jitter_minutes(guard)
     targets = _target_users(job)
 
+    # P3 questions scene: relay the daily report's open 想问你 items. No open
+    # questions means no push at all (0 条合法，不为凑数打扰).
+    from gacore import qa_store
+
+    open_qa: list[dict] = []
+
     result: dict = {
         "job": job.name,
         "scene": scene,
@@ -1260,6 +1277,13 @@ def run_proactive_job(
         logger.warning("proactive job skipped: no known users", job=job.name)
         result["skipped"].append({"user": "", "reason": "no_known_users"})
         return result
+
+    if scene == "questions":
+        open_qa = qa_store.open_questions(resolved_cfg)
+        if not open_qa:
+            logger.info("proactive: questions scene skipped, no open questions", job=job.name)
+            result["skipped"].append({"user": "", "reason": "no_open_questions"})
+            return result
 
     # P1: job-level jitter — with probability p skip this whole tick so the outreach
     # does not fire on a rigid schedule (config/proactive.json guard.jitter_minutes).
@@ -1346,6 +1370,7 @@ def run_proactive_job(
                 topic=topic,
                 insight=insight,
                 emotion=emotion if concern_due else "",
+                questions=[q["question"] for q in open_qa] if open_qa else None,
             )
             exit_reason, reply, qq_results = _headless_run(job, resolved_cfg, prompt, job.max_turns)
             if not qq_results:
@@ -1370,6 +1395,13 @@ def run_proactive_job(
                 continue
             _mark_sent(resolved_cfg, uid, scene, now)
             result["sent"] += 1
+            # P3 questions scene: count this as one re-ask per open question, then
+            # archive the ones that already exceeded the re-ask budget (用户不关心).
+            if open_qa:
+                qa_store.mark_pushed(resolved_cfg, [q["question_key"] for q in open_qa])
+                archived = qa_store.archive_stale(resolved_cfg)
+                if archived:
+                    logger.info("proactive: stale questions archived", job=job.name, count=archived)
             # P3: once delivered, write the turn back into the user's main thread so
             # 韩立 sees his own proactive message in the next turn's context and chat
             # records keep a complete "定时任务触发 → AI 回复" alternation. Best-effort:

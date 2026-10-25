@@ -103,6 +103,7 @@ from gacore.heartbeat import DEFAULT_INTERVAL_SECONDS, Heartbeat, run_dir
 from gacore.llm import get_llm
 from gacore.jsonl_logger import get_logger
 from gacore.proactive import record_last_active, record_user_emotion
+from gacore.qa_store import try_answer
 
 from gacore.state import new_state
 from gacore.tools.daily_notes import load_recent_daily_summaries
@@ -1127,6 +1128,19 @@ class QQApp:
             #      An active clarification session also routes ANY message back to the
             #      feedback loop, since the user's answer may not carry intent keywords.
             route = feedback_route(content)
+
+            # 3.6) 想问你回答捕获（P3，决策 8：不走订正阶梯）：显式 [Qn] 引用或唯一
+            #      开放问题时的裸短答，命中即确认并 return，不进 feedback、不进 agent 轮。
+            try:
+                qa_reply = try_answer(Config.default(), content, allow_bare=route is None)
+            except Exception:  # noqa: BLE001 — qa 捕获失败绝不影响正常聊天
+                qa_reply = None
+            if qa_reply is not None:
+                asyncio.create_task(
+                    self.send_text(chat_id, qa_reply, msg_id=msg_id, is_group=is_group)
+                )
+                return
+
             if route is not None or user_id in self._feedback_sessions:
                 asyncio.create_task(
                     self._handle_feedback(chat_id, content, user_id, route, msg_id=msg_id, is_group=is_group)
