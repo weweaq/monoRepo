@@ -712,6 +712,20 @@ def run_job(
                     )
             for_day = week  # 邮件主题与下游统一用 week id
         _deliver(job, cfg, deliver_reply, error, for_day=for_day)
+        # 日报正文同步推 QQ（邮件=存档，QQ=交互面）：正文分段 + 想问你随行 + 回复指引，
+        # 推送成功即对当日问题计一次触达（裸回答当晚生效）。best-effort，绝不影响邮件。
+        if error is None and _is_daily_job(job) and (deliver_reply or "").strip():
+            qq_day = for_day or datetime.now(UTC).astimezone().date().isoformat()
+            try:
+                _push_daily_to_qq(cfg, qq_day, deliver_reply)
+            except Exception as e:  # noqa: BLE001 — QQ 推送失败绝不影响投递
+                logger.error(
+                    "daily qq push hook failed",
+                    job=name,
+                    day=qq_day,
+                    error_type=type(e).__name__,
+                    stack_trace=str(e),
+                )
     else:
         logger.info("delivery skipped (deliver=False)", job=name)
 
@@ -919,6 +933,65 @@ def _seed_qa(cfg: Config, day: str, delivered: str) -> None:
     bullets = [line.strip() for line in delivered.splitlines() if line.strip().startswith("- [想问你-")]
     if bullets:
         qa_store.seed_questions(cfg, day, bullets)
+
+
+# QQ C2C 文本消息的保守段长（富余到平台字节上限之下），按行边界累积切段
+_QQ_SEGMENT_CHARS: Final = 600
+
+
+def _split_for_qq(body: str, limit: int = _QQ_SEGMENT_CHARS) -> list[str]:
+    """把日报正文切成 QQ 消息段：行边界累积不腰斩行；多段时每段带〔日报 i/N〕标头。"""
+    segments: list[str] = []
+    cur: list[str] = []
+    cur_len = 0
+    for line in body.splitlines():
+        add = len(line) + 1
+        if cur and cur_len + add > limit:
+            segments.append("\n".join(cur))
+            cur, cur_len = [], 0
+        cur.append(line)
+        cur_len += add
+    if cur:
+        segments.append("\n".join(cur))
+    if len(segments) > 1:
+        total = len(segments)
+        return [f"〔日报 {i}/{total}〕\n{seg}" for i, seg in enumerate(segments, 1)]
+    return segments
+
+
+def _push_daily_to_qq(cfg: Config, day: str, body: str) -> int:
+    """日报正文分段推 QQ；成功后当日开放问题计一次触达（asks+1，裸回答当晚生效）。"""
+    import asyncio
+
+    from gacore import qa_store
+    from gacore.langTrack.qq_push import load_known_users, send_c2c
+
+    targets = list(load_known_users())
+    if not targets:
+        logger.info("daily qq push skipped: no known users", day=day)
+        return 0
+    segments = _split_for_qq(body)
+    segments[-1] += "\n\n〔回复指引〕「想问你」直接回 [Q1] 你的答案；要订正正文回「订正 …」。"
+    sent_total = 0
+    for seg in segments:
+        try:
+            result = asyncio.run(send_c2c(seg, targets, is_sandbox=False))
+            sent_total += int(result.get("ok") or 0)
+        except Exception as exc:  # noqa: BLE001 — 单段失败即止，避免半途轰炸
+            logger.error(
+                "daily qq push failed",
+                day=day,
+                segment=segments.index(seg) + 1,
+                error_type=type(exc).__name__,
+                stack_trace=str(exc),
+            )
+            break
+    if sent_total:
+        keys = [q["question_key"] for q in qa_store.open_questions(cfg) if q.get("day") == day]
+        if keys:
+            qa_store.mark_pushed(cfg, keys)
+    logger.info("daily qq pushed", day=day, segments=len(segments), sent=sent_total)
+    return sent_total
 
 
 def _onboard_pack_path(cfg: Config) -> Path:
