@@ -317,7 +317,10 @@ def test_write_audit_freezes_v1(tmp_path):
     p2 = write_audit(cfg, audit_report(cfg, "2026-10-20"))
     assert p1.name == "2026-10-20.v1.json"
     assert p2.name == "2026-10-20.v2.json"
-    assert json.loads(p1.read_text(encoding="utf-8"))["score"] == 75
+    v1 = json.loads(p1.read_text(encoding="utf-8"))
+    assert v1["score"] == 75
+    # 决策 23：v1 冻结投递原文，last_seen 读历史日报一律走 v1 口径
+    assert v1["report_text"] == "# 关键变化\n- [关键变化-1] 硬件线半年沉寂后重新点火\n"
 
 def test_backfill_skips_existing_v1(tmp_path):
     cfg = Config.for_tests(tmp_path)
@@ -340,7 +343,7 @@ Expected: FAIL，`ImportError: cannot import name 'write_audit'`
 
 - [ ] **Step 3: 实现**
 
-- `write_audit`：目录 `cfg.logs_dir / "report_audit"`；找同日期现有 `*.v*.json`，新版本号 = 最大 + 1（无则 1）；写 `dataclasses.asdict` + `ensure_ascii=False, indent=2`。
+- `write_audit`：目录 `cfg.logs_dir / "report_audit"`；找同日期现有 `*.v*.json`，新版本号 = 最大 + 1（无则 1）；写 `dataclasses.asdict` + `ensure_ascii=False, indent=2`；`AuditResult` 增加 `report_text: str` 字段（投递原文快照，决策 23：`last_seen` 读历史日报一律走 v1 的 `report_text`，不读被订正重写的当前文件）。
 - `backfill`：遍历 `delivered_report/*.md` 按文件名排序；若 `{date}.v1.json` 已存在则跳过；否则 `audit_report` + `write_audit`；汇总 `{"reports", "claims", "bare", "conflicts"}`。
 - CLI：`argparse`，`--backfill` 时 `load_dotenv(); cfg = Config.default(); summary = backfill(cfg)`，用 `json.dumps(..., ensure_ascii=False)` 打印到 stdout（这是 CLI 输出，不是日志，允许 `print`）。
 
