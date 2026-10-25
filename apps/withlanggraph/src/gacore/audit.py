@@ -12,6 +12,9 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import date, datetime
+
+from gacore.config import Config
 
 # ---------------------------------------------------------------- Task 1: 断言抽取
 
@@ -136,3 +139,100 @@ def extract_claims(report_text: str) -> list[Claim]:
                 )
             )
     return claims
+
+
+# ------------------------------------------------------- Task 2: 主题识别与 last_seen 基线查询
+
+# 初值来自 P0 探针的两条硬冲突主题；漏配 fail-open（查不到不判冲突），新主题持续补充
+TOPIC_SYNONYMS: dict[str, tuple[str, ...]] = {
+    "硬件": ("硬件", "ESP32", "STM32", "单片机", "嵌入式", "开发板"),
+    "工学椅": ("工学椅", "人体工学椅", "西昊", "永艺", "黑白调"),
+    "显示器": ("显示器", "MateView", "屏"),
+    "桌面升级": ("桌面升级", "扩展坞", "升降桌"),
+}
+
+_GLOBAL_FILES: tuple[str, ...] = ("global_mem_insight.txt", "global_mem_facts.txt")
+_DATE_PREFIX_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2})")
+_SNIPPET_RADIUS = 40
+
+
+@dataclass(frozen=True, slots=True)
+class LastSeen:
+    found: bool
+    date: str | None
+    gap_days: int | None
+    source: str
+    snippet: str
+
+
+def find_topic(text: str) -> str | None:
+    """返回文本命中的第一个主题名（按词表声明顺序）；无命中返回 None。"""
+    for topic, synonyms in TOPIC_SYNONYMS.items():
+        if any(syn in text for syn in synonyms):
+            return topic
+    return None
+
+
+def _snippet_around(line: str, synonyms: tuple[str, ...]) -> str:
+    idx = -1
+    for syn in synonyms:
+        idx = line.find(syn)
+        if idx >= 0:
+            break
+    if idx < 0:
+        return line.strip()
+    start = max(0, idx - _SNIPPET_RADIUS)
+    end = min(len(line), idx + _SNIPPET_RADIUS)
+    return line[start:end].strip()
+
+
+def _scan_daily(cfg: Config, synonyms: tuple[str, ...], before_date: str) -> list[tuple[str, str, str]]:
+    """扫 memory/daily/*.md：日期取文件名前 10 位，返回 (date, source, snippet)。"""
+    hits: list[tuple[str, str, str]] = []
+    daily_dir = cfg.memory_dir / "daily"
+    if not daily_dir.is_dir():
+        return hits
+    for f in sorted(daily_dir.glob("*.md")):
+        day = f.name[:10]
+        if len(day) != 10 or day[4] != "-" or day >= before_date:
+            continue
+        try:
+            text = f.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if any(syn in line for syn in synonyms):
+                hits.append((day, f"memory/daily/{f.name}", _snippet_around(line, synonyms)))
+                break
+    return hits
+
+
+def _scan_global(cfg: Config, synonyms: tuple[str, ...], before_date: str) -> list[tuple[str, str, str]]:
+    """扫 global_mem_*.txt：日期取行首 [YYYY-MM-DD]，返回 (date, source 带行号, snippet)。"""
+    hits: list[tuple[str, str, str]] = []
+    for name in _GLOBAL_FILES:
+        path = cfg.memory_dir / name
+        if not path.is_file():
+            continue
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        for lineno, line in enumerate(lines, start=1):
+            m = _DATE_PREFIX_RE.match(line)
+            if not m or m.group(1) >= before_date:
+                continue
+            if any(syn in line for syn in synonyms):
+                hits.append((m.group(1), f"memory/{name}:{lineno}", _snippet_around(line, synonyms)))
+    return hits
+
+
+def last_seen(cfg: Config, topic: str, before_date: str) -> LastSeen:
+    """在记忆库三源里查主题最近一次出现日期（严格早于 before_date）；查不到 found=False。"""
+    synonyms = TOPIC_SYNONYMS.get(topic, (topic,))
+    hits = _scan_daily(cfg, synonyms, before_date) + _scan_global(cfg, synonyms, before_date)
+    if not hits:
+        return LastSeen(found=False, date=None, gap_days=None, source="", snippet="")
+    day_str, source, snippet = max(hits, key=lambda h: h[0])
+    gap = (datetime.strptime(before_date, "%Y-%m-%d").date() - date.fromisoformat(day_str)).days
+    return LastSeen(found=True, date=day_str, gap_days=gap, source=source, snippet=snippet)
