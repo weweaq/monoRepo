@@ -17,6 +17,7 @@ from langchain_core.tools import InjectedToolCallId, tool
 from langgraph.types import Command
 
 from gacore.config import Config
+from gacore.runtime import as_of_day
 
 
 @tool
@@ -58,6 +59,13 @@ def start_long_term_update(topic: str, _cfg: Config | None = None) -> dict:
     back to Config.default() and tests inject Config.for_tests(tmp_path).
     """
     cfg = _cfg or Config.default()
+    if _as_of := as_of_day():
+        # 历史日重跑栅栏：目标日原运行已做过画像蒸馏，重跑再追加会重复入库；跳过。
+        return {
+            "skipped": "rerun",
+            "date": _as_of,
+            "msg": f"历史日重跑模式（今天={_as_of}）：长期画像写入跳过，原始画像保持不变",
+        }
     now = datetime.now(UTC).astimezone()
     timestamp = now.isoformat(timespec="seconds")
     day = now.date().isoformat()

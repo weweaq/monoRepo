@@ -345,7 +345,9 @@ def test_memory_bg_rule_appended_only_once(
 ) -> None:
     """The memory-background rule must appear exactly once even with daily + card both injected."""
     _set_card(monkeypatch, _FAKE_CARD_WITH_CONTENT)
-    monkeypatch.setattr(ctx, "load_recent_daily_summaries", lambda cfg_: "8月30日：昨日开会，讨论了日程")
+    monkeypatch.setattr(
+        ctx, "load_recent_daily_summaries", lambda cfg_, as_of=None: "8月30日：昨日开会，讨论了日程"
+    )
 
     prompt = build_system_prompt(_state([HumanMessage(content="hi")]), cfg_with_assets)
 

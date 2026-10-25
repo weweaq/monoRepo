@@ -41,6 +41,7 @@ from gacore.config import Config, load_dotenv
 from gacore.feedback import save_delivered, stamp_report_bullets
 from gacore.heartbeat import Heartbeat, run_dir
 from gacore.jsonl_logger import get_logger
+from gacore.runtime import as_of_context, as_of_day, week_sunday
 from gacore.langTrack.extract import RunResult, run_extract
 from gacore.proactive import PROACTIVE_POOL, proactive_due, run_proactive_job
 
@@ -535,6 +536,20 @@ def _build_job_prompt(job: Job, cfg: Config, for_day: str | None = None, for_wee
                 error_type=type(e).__name__,
                 stack_trace=str(e),
             )
+    # 历史重跑铁律（配合 runtime.as_of 栅栏）：把"模拟视角"在用户消息层再钉一次，
+    # 双保险防目标日之后的信息（笔记/问答/实时数据）渗入正文。
+    if for_day:
+        prompt += (
+            f"\n\n〔重跑铁律〕本任务为 {for_day} 的历史重跑（模拟视角：今天={for_day}，此刻={for_day} 23:59）："
+            f"信息包、记忆与一切“今日”口径均以 {for_day} 为准；{for_day} 之后发生的一切"
+            "（每日笔记、问答、实时统计、候选答案）都是未来信息，严禁写入正文；明日计划按目标日的次日书写。"
+        )
+    elif for_week:
+        _sunday = week_sunday(for_week)
+        prompt += (
+            f"\n\n〔重跑铁律〕本任务为 {for_week} 周报的历史重跑（模拟视角：今天=周日 {_sunday}，此刻=23:59）："
+            f"数字区、候选与回看均以该周为窗口；{_sunday} 之后的一切均属未来，严禁写入。"
+        )
     return prompt
 
 
@@ -558,8 +573,24 @@ def run_job(
     deliver: when False, skip channel delivery (email etc.) — output archive and daily
     note are still written. Used by `python -m gacore.rerun --no-email`.
 
+    Historical runs (for_day/for_week) execute inside an "as-of" fence (runtime.as_of_context):
+    the clock anchor, get_time, memory-note injection and memory writes all treat the target
+    day as "today", so post-target events can never leak into the regenerated report.
+
     The reply is extracted from the final state's last AIMessage content.
     """
+    with as_of_context(for_day or week_sunday(for_week)):
+        return _run_job(job, cfg, graph_runner, for_day, for_week, deliver)
+
+
+def _run_job(
+    job: Job,
+    cfg: Config,
+    graph_runner: Callable[[str, Config, int], str | None] | None = None,
+    for_day: str | None = None,
+    for_week: str | None = None,
+    deliver: bool = True,
+) -> ScheduleResult:
     start = time.monotonic()
     name = job.name
     logger.info("Job started", job=name, schedule=job.schedule)
@@ -734,10 +765,15 @@ def run_job(
     # to consume on the first message of the new day. Best-effort only — a failure
     # here must never block the report itself.
     if error is None and _is_daily_job(job):
-        try:
-            _export_onboard_pack(cfg)
-        except Exception as e:  # noqa: BLE001 — pack export must never break the job
-            logger.error("onboard pack export failed", job=name, error_type=type(e).__name__, stack_trace=str(e))
+        if as_of_day():
+            # 历史重跑不刷新跨日 rollover 包：原日运行已导出过，且 as_of 窗口的摘要把
+            # 明天真实首条消息的记忆喂错成历史窗口。
+            logger.info("onboard pack export skipped (historical rerun)", job=name, as_of=as_of_day())
+        else:
+            try:
+                _export_onboard_pack(cfg)
+            except Exception as e:  # noqa: BLE001 — pack export must never break the job
+                logger.error("onboard pack export failed", job=name, error_type=type(e).__name__, stack_trace=str(e))
 
     logger.info(
         "Job finished",
@@ -884,6 +920,14 @@ def _write_daily_note(cfg: Config, job: Job, reply: str, error: str | None) -> N
     # Try to append; if the note exists, append via last-line replacement.
     # If it doesn't exist, create it with the bullet.
     existing = edit_daily.func(date=today, old_str="", new_str=bullet, _cfg=cfg)
+    if isinstance(existing, dict) and existing.get("skipped") == "rerun":
+        # 历史重跑栅栏：run 轨迹不落 daily note（重跑不改写记忆）；归档仍在 logs/scheduled/。
+        logger.info(
+            "daily note write skipped (historical rerun fence)",
+            job=job.name,
+            as_of=existing.get("date"),
+        )
+        return
     if isinstance(existing, dict) and existing.get("error") == "empty_old_str":
         # Note already exists — append by replacing the header's trailing content.
         # Simplest: read, append, write (daily_notes doesn't have a pure append mode,

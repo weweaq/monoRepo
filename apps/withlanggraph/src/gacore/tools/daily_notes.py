@@ -24,6 +24,7 @@ from typing import Any, Final
 from langchain_core.tools import tool
 
 from gacore.config import Config
+from gacore.runtime import as_of_day
 
 _DAILY_SUBDIR: Final = "daily"
 _DATE_RE: Final = re.compile(r"^\d{4}-\d{2}-\d{2}$")
@@ -86,7 +87,7 @@ def read_daily(
         does not exist yet.
     """
     cfg = _cfg or Config.default()
-    resolved = _resolve_date(date)
+    resolved = _resolve_date(date, as_of_day())
     err = _validate_date(resolved)
     if err:
         return {"error": "invalid_date", "msg": err}
@@ -123,7 +124,15 @@ def edit_daily(
         A status dict with the date, operation performed, and path.
     """
     cfg = _cfg or Config.default()
-    resolved = _resolve_date(date)
+    if _as_of := as_of_day():
+        # 历史日重跑栅栏：重跑只重生成正文，不重写历史归档（目标日原运行已归档过一次，
+        # 二次写入会污染 daily note）。跳过消息向模型说明口径，让它继续产出正文。
+        return {
+            "skipped": "rerun",
+            "date": _as_of,
+            "msg": f"历史日重跑模式（今天={_as_of}）：记忆写入跳过，原始归档保持不变；请继续产出日报正文",
+        }
+    resolved = _resolve_date(date, as_of_day())
     err = _validate_date(resolved)
     if err:
         return {"error": "invalid_date", "msg": err}
@@ -191,13 +200,22 @@ def search_daily(
     return {"query": query, "matches": len(results), "results": results}
 
 
-def _resolve_date(date: str) -> str:
+def _resolve_date(date: str, as_of: str | None = None) -> str:
     """Resolve date shortcuts: 'today' / 'yesterday' to ISO date strings.
 
     Computed on the fixed Asia/Shanghai (UTC+8) clock so the resolved date always
     matches the East-8 user's perception of "now", regardless of the server's local
-    timezone or UTC.
+    timezone or UTC. When ``as_of`` is set (historical rerun fence, see
+    gacore.runtime), "today"/"yesterday" resolve against that simulated day
+    instead of the real clock, so tool reads never wander into post-target days.
     """
+    if as_of:
+        base = datetime.strptime(as_of, "%Y-%m-%d").date()
+        if date == "today":
+            return base.isoformat()
+        if date == "yesterday":
+            return (base - timedelta(days=1)).isoformat()
+        return date
     now = datetime.now(_TZ)
     if date == "today":
         return now.date().isoformat()
@@ -206,7 +224,7 @@ def _resolve_date(date: str) -> str:
     return date
 
 
-def load_recent_daily_summaries(cfg: Config, days: int = 2) -> str:
+def load_recent_daily_summaries(cfg: Config, days: int = 2, as_of: str | None = None) -> str:
     """Load summaries (heading lines) from the most recent N days of daily notes.
 
     Used by context.build_system_prompt to inject a compact recap into the per-turn
@@ -217,6 +235,8 @@ def load_recent_daily_summaries(cfg: Config, days: int = 2) -> str:
     Args:
         cfg: Runtime configuration (provides memory_dir).
         days: How many recent days to look back (default 2 = today + yesterday).
+        as_of: Historical rerun fence (see gacore.runtime) — anchor the window at
+            this day instead of the real today, so post-target notes never inject.
 
     Returns:
         A formatted string block, or empty string if no notes found.
@@ -225,10 +245,10 @@ def load_recent_daily_summaries(cfg: Config, days: int = 2) -> str:
     if not daily_dir.is_dir():
         return ""
 
-    now = datetime.now(_TZ)
+    base = datetime.strptime(as_of, "%Y-%m-%d").date() if as_of else datetime.now(_TZ).date()
     blocks: list[str] = []
     for offset in range(days):
-        date = (now - timedelta(days=offset)).date().isoformat()
+        date = (base - timedelta(days=offset)).isoformat()
         path = daily_dir / f"{date}.md"
         if not path.is_file():
             continue

@@ -18,6 +18,7 @@ from gacore.character import card_prompt
 from gacore.config import Config
 from gacore.jsonl_logger import get_logger
 from gacore.langTrack import fact_card
+from gacore.runtime import as_of_day
 from gacore.state import GAState
 from gacore.tools.daily_notes import load_recent_daily_summaries
 
@@ -222,7 +223,7 @@ def build_system_prompt(state: GAState, cfg: Config) -> str:
         role_text = card_prompt(cfg, card_id)
         if role_text:
             prompt += f"\n\n{ROLE_HEADER}\n{role_text}{_ROLE_TOOL_BRIDGE}"
-    daily = load_recent_daily_summaries(cfg)
+    daily = load_recent_daily_summaries(cfg, as_of=as_of_day())
     injected_bg = False
     if daily:
         prompt += f"\n{DAILY_HEADER}\n{stamp_daily_history(daily)}"
@@ -244,7 +245,7 @@ def build_system_prompt(state: GAState, cfg: Config) -> str:
     _fact_text = ""
     try:
         _fact_card = fact_card.build(
-            day=state.get("target_day") or None, detail="compact", outlet="prompt"
+            day=state.get("target_day") or as_of_day() or None, detail="compact", outlet="prompt"
         )
         _fact_text = fact_card.render_compact(_fact_card)
     except Exception:  # noqa: BLE001 - 缺库/损坏一律不弄死 QQ
@@ -282,10 +283,25 @@ def build_system_prompt(state: GAState, cfg: Config) -> str:
         prompt += "\n[Periodic hints]\n" + "\n".join(f"- {hint}" for hint in hints)
     # Final time anchor: rebuilt fresh every turn and pinned at the very end of the
     # prompt so it sits closest to the user's message. This is the ONLY valid "now".
-    _now_dt = datetime.now(_TZ)
+    # Historical reruns pin the clock to the target day's 23:59 (simulated view) so
+    # the model's "today" can never be the real (later) today.
+    _as_of = as_of_day()
+    if _as_of:
+        _y, _m, _d = (int(p) for p in _as_of.split("-"))
+        _now_dt = datetime(_y, _m, _d, 23, 59, 59, tzinfo=_TZ)
+    else:
+        _now_dt = datetime.now(_TZ)
     _now_str = _now_dt.strftime("%Y-%m-%d %H:%M:%S")
+    _rerun_rule = (
+        f"〔历史日重跑·模拟视角〕本次是在重跑 {_as_of} 的历史任务：一切“今天”均指 {_as_of}；"
+        f"{_as_of} 之后（次日起）的时间、事件、每日笔记、问答与实时数据均属未来，"
+        "严禁写入产出或当作已发生。get_time 与本锚点同源，均为此模拟时钟。\n"
+        if _as_of
+        else ""
+    )
     prompt += (
         f"\n\n【当前真实时间】{_now_str} {_WEEKDAY_CN[_now_dt.weekday()]}（Asia/Shanghai, UTC+8）\n"
+        f"{_rerun_rule}"
         "[历史时间禁令] 对话历史、历史记忆、每日笔记、昨日记忆注入中出现的任何时间/日期/数字，"
         "均为陈旧记录，严禁当作当下时刻作答；当下只以上面这行【当前真实时间】为准。"
         "凡涉及当前时间/日期/星期/时段/班次/剩余时长的问题，先调用 get_time 工具以官方时钟作答；"

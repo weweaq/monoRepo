@@ -547,13 +547,27 @@ def _build_ncm(date: str, cfg: Config) -> tuple[str, str, str]:
         return title, f"- 该源失败/跳过：{exc}", ""
 
 
-def _latest_prev_report(cfg: Config) -> tuple[str, str] | None:
-    """读 logs/scheduled/ 下最新一份 daily-report 输出（昨日/最近一次），返回 (时间戳, Reply 全文)。"""
+def _latest_prev_report(cfg: Config, before: str | None = None) -> tuple[str, str] | None:
+    """读 logs/scheduled/ 下最新一份 daily-report 输出（昨日/最近一次），返回 (时间戳, Reply 全文)。
+
+    before（YYYY-MM-DD，历史重跑栅栏）：只考虑该日**之前**落盘的报告，防止目标日的包把
+    "未来"的报告（如重跑日次日的日报）当"前日日报"注入。
+    """
+
+    def _file_day(name: str) -> str | None:
+        m = re.match(r"daily-report_(\d{8})_\d{6}\.md$", name)
+        if not m:
+            return None
+        s = m.group(1)
+        return f"{s[:4]}-{s[4:6]}-{s[6:]}"
+
     scheduled_dir = cfg.logs_dir / "scheduled"
     if not scheduled_dir.is_dir():
         return None
-    files = sorted(
-        (p for p in scheduled_dir.glob("daily-report_*.md")),
+    files = [p for p in scheduled_dir.glob("daily-report_*.md") if _file_day(p.name)]
+    if before:
+        files = [p for p in files if str(_file_day(p.name)) < before]
+    files.sort(
         key=lambda p: (p.stat().st_mtime if hasattr(p.stat(), "st_mtime") else 0, p.name),
         reverse=True,
     )
@@ -585,7 +599,7 @@ def _build_memory(date: str, cfg: Config) -> tuple[str, str, str]:
     """记忆信号：前日日报摘要（可选，零成本）。pack=260 字摘要（现行为），detail=1000 字更长摘要。"""
     title = "〔记忆·前日日报〕"
     try:
-        prev = _latest_prev_report(cfg)
+        prev = _latest_prev_report(cfg, before=date)
         if prev is None:
             return title, "- 无历史日报输出可作基准（首次运行）", ""
         ts, body = prev

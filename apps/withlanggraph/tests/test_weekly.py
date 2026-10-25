@@ -219,7 +219,9 @@ def test_build_job_prompt_honors_for_week(tmp_path, monkeypatch):
     prompt = _build_job_prompt(job, Config.for_tests(tmp_path), for_week="2026-W42")
     assert "〔周报数字区·2026-W42〕" in prompt
     assert "2026-W41.md" in prompt  # 上期回看锚定到重跑周的前一周
-    assert prompt.endswith("周报指令")
+    # 历史重跑铁律后缀钉在 job.prompt 之后（见 runtime.as_of 栅栏）
+    assert "〔重跑铁律〕" in prompt
+    assert prompt.index("周报指令") < prompt.index("〔重跑铁律〕")
 
 
 def test_rerun_cli_week_dispatch(tmp_path, monkeypatch, capsys):

@@ -14,6 +14,8 @@ from typing import Final
 
 from langchain_core.tools import tool
 
+from gacore.runtime import as_of_day
+
 _TZ: Final = timezone(timedelta(hours=8))
 """Asia/Shanghai, UTC+8 — the project's canonical timezone."""
 
@@ -40,6 +42,16 @@ def get_time() -> str:
     注入的 [Current time] 同源，是时间铁律认定的唯一合法依据。
     """
     now = datetime.now(_TZ)
+    if as_of := as_of_day():
+        # 历史日重跑栅栏：与 prompt 末尾的时间锚同源切到模拟时钟（目标日 23:59），
+        # 使"现在几点/今天几号"的权威回答永远不会越过目标日。
+        y, m, d = (int(p) for p in as_of.split("-"))
+        now = datetime(y, m, d, 23, 59, 59, tzinfo=_TZ)
+        return (
+            f"{now.strftime('%Y-%m-%d')} {_WEEKDAYS[now.weekday()]} "
+            f"{now.strftime('%H:%M:%S')} (Asia/Shanghai, UTC+8)"
+            f"〔历史日重跑·模拟视角：今天={as_of}，此后为未来〕"
+        )
     return (
         f"{now.strftime('%Y-%m-%d')} {_WEEKDAYS[now.weekday()]} "
         f"{now.strftime('%H:%M:%S')} (Asia/Shanghai, UTC+8)"
