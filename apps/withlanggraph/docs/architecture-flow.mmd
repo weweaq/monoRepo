@@ -24,7 +24,7 @@ flowchart TD
             subgraph PR["③ process = create_agent 子图<br/>(gacore_core)·核心智能"]
                 direction LR
                 MD["model 节点<br/>调用 LLM"]
-                TN[("tool 节点<br/>30 个工具轮询")]
+                TN[("tool 节点<br/>31 个工具轮询")]
                 MD <-->|"reAct 循环<br/>until END/tool 结束"| TN
             end
 
