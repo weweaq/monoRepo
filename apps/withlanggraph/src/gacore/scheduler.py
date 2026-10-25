@@ -981,6 +981,23 @@ def _qq_targets() -> list[str]:
     return targets
 
 
+def _qq_reply_guidance(cfg: Config, day: str, body: str) -> str:
+    """按当日问答状态生成回复指引：正文没带问题时，开放问题复述进指引（不留悬空的 [Q1] 话术）。"""
+    from gacore import qa_store
+
+    correction = "要订正正文回「订正 …」。"
+    if "- [想问你-" in body:
+        return f"\n\n〔回复指引〕「想问你」直接回 [Q1] 你的答案；{correction}"
+    opens = [q for q in qa_store.open_questions(cfg) if q.get("day") == day]
+    if opens:
+        listed = "；".join(
+            f"[Q{str(q.get('anchor', '')).rsplit('-', 1)[-1]}] {q.get('question', '')}"
+            for q in opens
+        )
+        return f"\n\n〔回复指引〕正文未带新问题，此前问过的：{listed}——直接回 [Qn] 你的答案；{correction}"
+    return f"\n\n〔回复指引〕{correction}"
+
+
 def _push_daily_to_qq(cfg: Config, day: str, body: str) -> int:
     """日报正文分段推 QQ；成功后当日开放问题计一次触达（asks+1，裸回答当晚生效）。"""
     import asyncio
@@ -993,7 +1010,7 @@ def _push_daily_to_qq(cfg: Config, day: str, body: str) -> int:
         logger.info("daily qq push skipped: no valid users", day=day)
         return 0
     segments = _split_for_qq(_plain_for_qq(body))
-    segments[-1] += "\n\n〔回复指引〕「想问你」直接回 [Q1] 你的答案；要订正正文回「订正 …」。"
+    segments[-1] += _qq_reply_guidance(cfg, day, body)
     sent_total = 0
     for seg in segments:
         try:

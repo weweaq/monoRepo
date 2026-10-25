@@ -69,6 +69,41 @@ def test_push_daily_no_users_noop(tmp_path, monkeypatch):
     assert _push_daily_to_qq(cfg, "2026-10-25", "# 今日状态\n- ok\n") == 0
 
 
+def test_guidance_restates_open_questions_when_body_has_none(tmp_path, monkeypatch):
+    """正文没带「想问你」但当日有开放问题：指引把问题复述出来，[Q1] 不再悬空。"""
+    cfg = Config.for_tests(tmp_path)
+    from gacore.qa_store import seed_questions
+
+    seed_questions(cfg, "2026-10-25", ["- [想问你-1] 马鞍山医生怎么说？（依据：10-24 报告）"])
+    calls: list[str] = []
+
+    async def fake_send(content, targets, is_sandbox):
+        calls.append(content)
+        return {"ok": len(targets), "failures": [], "errors": {}, "ids": {}}
+
+    monkeypatch.setattr("gacore.langTrack.qq_push.send_c2c", fake_send)
+    monkeypatch.setattr("gacore.langTrack.qq_push.load_known_users", lambda: {"A" * 32: {}})
+    _push_daily_to_qq(cfg, "2026-10-25", "# 今日状态\n- ok\n")
+    assert "[Q1] 马鞍山医生怎么说？（依据：10-24 报告）" in calls[-1]
+    assert "直接回 [Qn] 你的答案" in calls[-1]
+
+
+def test_guidance_drops_question_clause_when_no_open_questions(tmp_path, monkeypatch):
+    """正文没带问题且当日无开放问题：指引只剩订正，不提「想问你」也不提 [Q1]。"""
+    cfg = Config.for_tests(tmp_path)
+    calls: list[str] = []
+
+    async def fake_send(content, targets, is_sandbox):
+        calls.append(content)
+        return {"ok": len(targets), "failures": [], "errors": {}, "ids": {}}
+
+    monkeypatch.setattr("gacore.langTrack.qq_push.send_c2c", fake_send)
+    monkeypatch.setattr("gacore.langTrack.qq_push.load_known_users", lambda: {"A" * 32: {}})
+    _push_daily_to_qq(cfg, "2026-10-25", "# 今日状态\n- ok\n")
+    assert "订正" in calls[-1]
+    assert "想问你" not in calls[-1] and "[Q1]" not in calls[-1]
+
+
 def test_push_daily_filters_placeholder_targets(tmp_path, monkeypatch):
     """known_users 里的占位残留（user-1/admin-1）不是合法 openid，推送只发真实格式目标。"""
     cfg = Config.for_tests(tmp_path)
