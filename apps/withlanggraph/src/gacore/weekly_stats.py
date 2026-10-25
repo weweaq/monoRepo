@@ -112,12 +112,13 @@ def _audit_scores(cfg: Config, days: list[str]) -> dict[str, int]:
 
 
 def _qa_counts(cfg: Config, days: list[str]) -> dict[str, int]:
-    from gacore.qa_store import all_rows
+    from gacore.qa_store import _day_as_date, all_rows
 
     asked: Counter[str] = Counter()
     answered: Counter[str] = Counter()
     for r in all_rows(cfg):
-        day = str(r.get("day", ""))
+        # 周报提问的日锚是 `YYYY-Www`，折算到周日才能落进本周窗口（决策 39）
+        day = _day_as_date(str(r.get("day", ""))) or str(r.get("day", ""))
         if day in days:
             asked[day] += 1
             if r.get("status") == "answered":

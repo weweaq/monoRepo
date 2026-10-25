@@ -13,7 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +28,15 @@ _MAX_ASKS: int = 2  # 未答最多重问 2 期（spec §5.3）
 _SIMILAR_JACCARD: float = 0.6  # 同期 token(2-gram) 重合阈值
 _BARE_ANSWER_MAX_CHARS: int = 30
 _ANCHOR_RE = re.compile(r"^\s*-\s*\[想问你-(\d+)\]\s*(.*)$")
-_EXPLICIT_RE = re.compile(r"^\s*(?:\[\s*)?(?:想问你-|[Qq])\s*(\d+)\s*\]?\s*(.+)$")
+# 显式回答：必须带方括号（裸 `Q3 财报什么时候发？` 这类正常消息不得被吞成答案）
+_BRACKET_RE = re.compile(r"^\s*\[\s*(想问你-|[Qq])\s*(\d+)\s*\]\s*(.*)$")
+_BARE_ANCHOR_RE = re.compile(r"^\s*想问你-\s*(\d+)\s*(.*)$")
+_ANSWER_WORD_RE = re.compile(r"[0-9A-Za-z\u4e00-\u9fff]")
+# 像问句的内容不是答案：裸答只在"唯一待答"时兜底，不能把「Q3 财报什么时候发？」记成回答
+_LOOKS_LIKE_QUESTION_RE = re.compile(r"[?？]\s*$|吗\s*$|什么|怎么|为什么|为啥|哪|谁|多少|是不是|有没有")
+# 周报交互前缀：识别到就交回周报解析器，绝不进裸答（否则「评分 5 5」会被记成问题答案）
+_WEEKLY_CMD_RE = re.compile(r"^\s*(?:评分|打分|候选)")
+_WEEK_ID_RE = re.compile(r"^\d{4}-W\d{2}$")
 _NOISE_RE = re.compile(r"[\d\s，。？！？、:：;；()（）\[\]【】,.\-—/\"'“”‘’]+")
 
 
@@ -106,13 +114,57 @@ def _similar(a: str, b: str) -> bool:
     return len(ba & bb) / len(ba | bb) > _SIMILAR_JACCARD
 
 
+def _day_as_date(day: str) -> str:
+    """把行的日锚归一成 ISO 日期：`YYYY-Www`（周报提问）折算到该周周日，其余非日期返回空串。"""
+    if _WEEK_ID_RE.match(day):
+        year, num = day.split("-W")
+        try:
+            monday = date.fromisocalendar(int(year), int(num), 1)
+        except ValueError:
+            return ""
+        return (monday + timedelta(days=6)).isoformat()
+    return day if len(day) == 10 and day[4] == "-" else ""
+
+
+def _load_open_state(cfg: Config) -> dict[str, Any]:
+    path = _qa_dir(cfg) / "open_state.json"
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def set_prompt_order(cfg: Config, keys: list[str]) -> None:
+    """记录本次推送的编号顺序：[Q1]..[Qn] 与用户看到的消息顺序一一对应（解析入口用它）。"""
+    state = _load_open_state(cfg)
+    state["day"] = _today()
+    state["keys"] = list(keys)
+    state.setdefault("question_key", "")
+    path = _qa_dir(cfg) / "open_state.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
+
+
 def _refresh_open_state(cfg: Config) -> None:
     open_ = [r for r in _read_rows(cfg) if r.get("status") == "open"]
     single = open_[0]["question_key"] if len(open_) == 1 else ""
+    prev = _load_open_state(cfg)
+    # keys 是「用户看到的那条消息」的不可变快照：只由 set_prompt_order 整体替换。
+    # 这里若按 open 集合过滤，答掉 Q1 后编号会整体前移，后续 [Q2] 就会指到第 3 题。
     path = _qa_dir(cfg) / "open_state.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps({"day": _today(), "question_key": single}, ensure_ascii=False),
+        json.dumps(
+            {
+                "day": prev.get("day") or _today(),
+                "question_key": single,
+                "keys": list(prev.get("keys") or []),
+            },
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
 
@@ -160,8 +212,11 @@ def seed_questions(cfg: Config, day: str, bullets: list[str]) -> dict[str, int]:
     return counts
 
 
-def open_questions(cfg: Config) -> list[dict[str, Any]]:
+def open_questions(cfg: Config, *, before_date: str | None = None) -> list[dict[str, Any]]:
+    """未答问题（按日锚+锚点排序）；`before_date` 为 as-of 栅栏（周报取本周口径用）。"""
     rows = [r for r in _read_rows(cfg) if r.get("status") == "open"]
+    if before_date:
+        rows = [r for r in rows if (_day_as_date(str(r.get("day", ""))) or "") < before_date]
     return sorted(rows, key=lambda r: (r.get("day", ""), int(re.sub(r"\D", "", r.get("anchor", "")) or 0)))
 
 
@@ -220,18 +275,61 @@ def archive_stale(cfg: Config, max_asks: int = _MAX_ASKS) -> int:
     return n
 
 
+def _resolve_explicit(
+    cfg: Config, kind: str, idx: int, open_: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """把 `[Qn]` / `[想问你-N]` 解析到具体问题（决策 29）。
+
+    - `[想问你-N]`：锚点属于某一份正文，取**最近一期**含该锚点的问题（按归一日期比较，
+      周报的 `YYYY-Www` 折算到周日）。
+    - `[Qn]`：按推送时落盘的展示顺序（`set_prompt_order`，不可变快照）解析；没有快照时
+      退化为"最近一期正文的第 n 条"。
+    - 点名的编号已答/越界时**返回 None**，绝不 fall-through 到别的题（静默答错比不捕获更糟）。
+    """
+    if kind == "Q":
+        keys = list(_load_open_state(cfg).get("keys") or [])
+        if keys:
+            if not 1 <= idx <= len(keys):
+                return None
+            key = keys[idx - 1]
+            return next((r for r in open_ if r["question_key"] == key), None)
+    same = [
+        r for r in open_
+        if int(re.sub(r"\D", "", r.get("anchor", "")) or 0) == idx
+    ]
+    if not same:
+        return None
+    return max(same, key=lambda r: _day_as_date(str(r.get("day", ""))) or "")
+
+
 def try_answer(cfg: Config, content: str, *, allow_bare: bool = True) -> str | None:
     """QQ 捕获入口（决策 8：不走订正阶梯）。命中返回确认文本，未命中返回 None。"""
     content = (content or "").strip()
+    if _WEEKLY_CMD_RE.match(content):
+        # 评分/候选是周报交互的领地：即使本次不适用（已评分/无 pending）也不能被裸答吞掉
+        return None
     open_ = open_questions(cfg)
-    m = _EXPLICIT_RE.match(content)
+    kind: str | None = None
+    idx = 0
+    text = ""
+    m = _BRACKET_RE.match(content)
     if m:
-        idx = int(m.group(1))
-        text = m.group(2).strip()
-        if 1 <= idx <= len(open_) and text:
-            row = record_answer(cfg, open_[idx - 1]["question_key"], text)
-            if row:
-                return f"✅ 已记下你对 [Q{idx}] 的回答，会进下一期日报。"
+        kind = "想问你" if m.group(1).startswith("想问你") else "Q"
+        idx = int(m.group(2))
+        text = (m.group(3) or "").strip()
+    else:
+        m2 = _BARE_ANCHOR_RE.match(content)
+        if m2:
+            kind = "想问你"
+            idx = int(m2.group(1))
+            text = (m2.group(2) or "").strip()
+    if kind is not None:
+        if not _ANSWER_WORD_RE.search(text):
+            # 只发了锚点/标点：不当作裸回答吞掉（交回普通对话，由助手追问）
+            return None
+        row = _resolve_explicit(cfg, kind, idx, open_)
+        if row and record_answer(cfg, row["question_key"], text):
+            return f"✅ 已记下你对 [Q{idx}] 的回答，会进下一期日报。"
         return None
     if (
         allow_bare
@@ -239,6 +337,7 @@ def try_answer(cfg: Config, content: str, *, allow_bare: bool = True) -> str | N
         and len(open_) == 1
         and int(open_[0].get("asks") or 0) > 0
         and 0 < len(content) <= _BARE_ANSWER_MAX_CHARS
+        and not _LOOKS_LIKE_QUESTION_RE.search(content)
     ):
         row = record_answer(cfg, open_[0]["question_key"], content)
         if row:
@@ -300,14 +399,27 @@ def stats(cfg: Config) -> dict[str, Any]:
 def qa_brief(
     cfg: Config, *, before_date: str | None = None, recent_days: int = 7
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """`_QA` 信息源取数（决策 24）：近 N 天已回答问答（新→旧）+ 全部未答问题。"""
+    """`_QA` 信息源取数（决策 24）：近 N 天已回答问答（新→旧）+ 未答问题。
+
+    as-of 栅栏（决策 30）：只取 `answer_day <= before_date` 的回答、`day < before_date`
+    的未答问题；否则历史重跑会把之后才发生的问答当成已知事实注入。
+    """
     rows = _read_rows(cfg)
     anchor = before_date or _today()
     horizon = (datetime.fromisoformat(anchor) - timedelta(days=recent_days)).date().isoformat()
     answered = sorted(
-        (r for r in rows if r.get("status") == "answered" and str(r.get("answer_day", "")) > horizon),
+        (
+            r
+            for r in rows
+            if r.get("status") == "answered"
+            and horizon < str(r.get("answer_day", "")) <= anchor
+        ),
         key=lambda r: str(r.get("answer_day", "")),
         reverse=True,
     )
-    open_ = [r for r in rows if r.get("status") == "open"]
+    open_ = [
+        r
+        for r in rows
+        if r.get("status") == "open" and (_day_as_date(str(r.get("day", ""))) or "") < anchor
+    ]
     return answered, open_

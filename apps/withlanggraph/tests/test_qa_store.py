@@ -4,11 +4,15 @@ from __future__ import annotations
 
 from gacore.config import Config
 from gacore.qa_store import (
+    _day_as_date,
+    all_rows,
     archive_stale,
     mark_pushed,
     open_questions,
+    qa_brief,
     record_answer,
     seed_questions,
+    set_prompt_order,
     stats,
     try_answer,
 )
@@ -175,9 +179,9 @@ def test_qa_source_renders_answered_and_open(tmp_path, monkeypatch):
     cfg = Config.for_tests(tmp_path)
     _seed_day(
         cfg,
-        "2026-10-25",
+        "2026-10-24",
         [
-            "- [想问你-1] 你是在读还是上班？（依据：10-25）",
+            "- [想问你-1] 你是在读还是上班？（依据：10-24）",
             "- [想问你-2] 工学椅还买吗？（依据：长期画像）",
         ],
     )
@@ -213,3 +217,115 @@ def test_qa_source_truncates_to_cap(tmp_path, monkeypatch):
     title, pack, detail = dip._build_qa("2026-10-26", cfg)
     assert len(pack) <= 120
     assert dip.classify_body(pack)[0] == "ok"
+
+
+# ------------------------------------------ P3 修复：编号解析、as-of 栅栏、周 id 日锚
+
+
+def test_explicit_q_index_follows_latest_day_anchor(tmp_path):
+    """[Q1] 有旧问题未答时仍指向最近一期正文的 Q1（决策 29）。"""
+    cfg = Config.for_tests(tmp_path)
+    _seed_day(cfg, "2026-10-19", ["- [想问你-1] 旧问题甲（依据：10-19）"])
+    _seed_day(cfg, "2026-10-20", ["- [想问你-1] 今天的问题丙（依据：10-20）"])
+    assert try_answer(cfg, "[Q1] 我的答案") is not None
+    rows = {r["question"]: r for r in all_rows(cfg)}
+    assert rows["今天的问题丙（依据：10-20）"]["status"] == "answered"
+    assert rows["旧问题甲（依据：10-19）"]["status"] == "open"
+
+
+def test_prompt_order_drives_q_numbering(tmp_path):
+    """[Qn] 优先按推送时记录的展示顺序解析（决策 29）。"""
+    cfg = Config.for_tests(tmp_path)
+    _seed_day(cfg, "2026-10-19", ["- [想问你-1] 旧问题甲（依据：10-19）"])
+    _seed_day(cfg, "2026-10-20", ["- [想问你-1] 今天的问题丙（依据：10-20）"])
+    opens = open_questions(cfg)
+    set_prompt_order(cfg, [opens[1]["question_key"], opens[0]["question_key"]])
+    assert try_answer(cfg, "[Q1] 我的答案") is not None
+    rows = {r["question"]: r for r in all_rows(cfg)}
+    assert rows["今天的问题丙（依据：10-20）"]["status"] == "answered"
+
+
+def test_anchor_only_reply_is_not_swallowed_as_bare_answer(tmp_path):
+    cfg = Config.for_tests(tmp_path)
+    _seed_day(cfg, "2026-10-25", ["- [想问你-1] 你是在读还是上班？（依据：10-25）"])
+    mark_pushed(cfg, [open_questions(cfg)[0]["question_key"]])
+    assert try_answer(cfg, "[Q1]") is None
+    assert len(open_questions(cfg)) == 1
+
+
+def test_qa_brief_fences_future_answers_and_questions(tmp_path):
+    """as-of 栅栏（决策 30）：重跑 10-20 不得看到 10-22 之后的问答。"""
+    cfg = Config.for_tests(tmp_path)
+    _seed_day(cfg, "2026-10-19", ["- [想问你-1] 旧问题（依据：10-19）"])
+    _seed_day(cfg, "2026-10-22", ["- [想问你-1] 未来的问题（依据：10-22）"])
+    future = [q for q in open_questions(cfg) if q["day"] == "2026-10-22"][0]
+    record_answer(cfg, future["question_key"], "未来才知道的答案")
+    answered, open_ = qa_brief(cfg, before_date="2026-10-20")
+    assert answered == []
+    assert [r["day"] for r in open_] == ["2026-10-19"]
+
+
+def test_prompt_order_survives_answer_and_archive(tmp_path):
+    """展示顺序是不可变快照：答掉 Q1 后 [Q2] 仍必须指用户看到的第 2 条（决策 29）。
+
+    回归用例：早先实现把 keys 按 open 集合过滤，答掉 Q1 后编号整体前移，[Q2] 会指到第 3 题。
+    """
+    cfg = Config.for_tests(tmp_path)
+    _seed_day(cfg, "2026-10-25", [
+        "- [想问你-1] 问题甲（依据：10-25）",
+        "- [想问你-2] 问题乙（依据：10-25）",
+        "- [想问你-3] 问题丙（依据：10-25）",
+    ])
+    opens = open_questions(cfg)
+    set_prompt_order(cfg, [q["question_key"] for q in opens])
+    assert try_answer(cfg, "[Q1] 答案一") is not None
+    assert try_answer(cfg, "[Q2] 答案二") is not None
+    rows = {r["question"]: r for r in all_rows(cfg)}
+    assert rows["问题甲（依据：10-25）"]["status"] == "answered"
+    assert rows["问题乙（依据：10-25）"]["status"] == "answered"
+    assert rows["问题丙（依据：10-25）"]["status"] == "open"
+
+
+def test_out_of_range_q_number_is_not_guessed(tmp_path):
+    """点名的编号越界/已答：返回 None，绝不 fall-through 到别的题。"""
+    cfg = Config.for_tests(tmp_path)
+    _seed_day(cfg, "2026-10-25", [
+        "- [想问你-1] 问题甲（依据：10-25）",
+        "- [想问你-2] 问题乙（依据：10-25）",
+    ])
+    opens = open_questions(cfg)
+    set_prompt_order(cfg, [q["question_key"] for q in opens])
+    assert try_answer(cfg, "[Q3] 我的答案") is None
+    assert try_answer(cfg, "[Q1] 答案一") is not None
+    # Q1 已答：再发 [Q1] 不猜，也不落到 Q2
+    assert try_answer(cfg, "[Q1] 补一句") is None
+    assert [r["status"] for r in all_rows(cfg) if r["question"] == "问题乙（依据：10-25）"] == ["open"]
+
+
+def test_bare_q_without_brackets_is_not_swallowed(tmp_path):
+    """`Q3 财报什么时候发？` 是正常对话，不是对第 3 题的答案（只有 [Qn] 才算）。"""
+    cfg = Config.for_tests(tmp_path)
+    _seed_day(cfg, "2026-10-25", ["- [想问你-1] 你是在读还是上班？（依据：10-25）"])
+    mark_pushed(cfg, [open_questions(cfg)[0]["question_key"]])
+    assert try_answer(cfg, "Q3 财报什么时候发？") is None
+    assert open_questions(cfg)[0]["status"] == "open"
+
+
+def test_weekly_prefixed_command_is_not_swallowed_as_answer(tmp_path):
+    """`评分 5 5` / `候选 1` 归周报解析器：即便本次不适用也不能被裸答记成问题答案。"""
+    cfg = Config.for_tests(tmp_path)
+    _seed_day(cfg, "2026-10-25", ["- [想问你-1] 你是在读还是上班？（依据：10-25）"])
+    mark_pushed(cfg, [open_questions(cfg)[0]["question_key"]])
+    assert try_answer(cfg, "评分 5 5") is None
+    assert try_answer(cfg, "候选 1") is None
+    assert open_questions(cfg)[0]["status"] == "open"
+
+
+def test_week_id_rows_map_to_sunday(tmp_path):
+    """周报提问的日锚 YYYY-Www 折算到周日，才能进 as-of 窗口（决策 39）。"""
+    cfg = Config.for_tests(tmp_path)
+    _seed_day(cfg, "2026-W43", ["- [想问你-1] 周报问题（依据：本周）"])
+    assert _day_as_date("2026-W43") == "2026-10-25"
+    assert [r["day"] for r in qa_brief(cfg, before_date="2026-10-26")[1]] == ["2026-W43"]
+    assert qa_brief(cfg, before_date="2026-10-25")[1] == []
+

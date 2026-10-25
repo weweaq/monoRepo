@@ -1132,27 +1132,32 @@ def _build_qa(date: str, cfg: Config) -> tuple[str, str, str]:
         answered, open_ = _QA_FN(cfg, before_date=date)
         if not answered and not open_:
             return title, _QA_MISSING, ""
-        open_keys = [str(r.get("question_key", "")) for r in open_]
 
-        def render(ans: list[dict[str, Any]], keys: list[str]) -> str:
-            lines = [f"- 已答 {len(answered)} 组 / 未答 {len(open_keys)} 个（近 7 天口径）"]
+        def render(ans: list[dict[str, Any]], opens: list[dict[str, Any]]) -> str:
+            lines = [f"- 已答 {len(ans)} 组 / 未答 {len(opens)} 个（近 7 天口径）"]
             for r in ans:
                 q = _qa_clip(str(r.get("question", "")), 90)
                 a = _qa_clip(str(r.get("answer", "")), 60)
                 lines.append(f"- 已答：{q} → {a}")
-            if keys:
-                lines.append("- 仍未回答（勿重复问）：" + "、".join(keys))
+            if opens:
+                # 给模型看问题原文（决策 31）：只给 question_key 哈希，模型无从知道别重复问什么
+                lines.append(
+                    "- 仍未回答（勿重复问）："
+                    + "；".join(_qa_clip(str(r.get("question", "")), 60) for r in opens)
+                )
             return "\n".join(lines)
 
-        # 单一截断点（军规②）：超 cap 依次减已答组 → 对半减未答 key → 最终硬截断兜底
+        # 单一截断点（军规②）：超 cap 依次减已答组 → 对半减未答问题 → 最终硬截断兜底
         ans = list(answered)[:_QA_MAX_ANSWERED_LINES]
-        body = render(ans, open_keys)
+        opens = list(open_)
+        body = render(ans, opens)
         while len(body) > _QA_CAP and ans:
             ans.pop()
-            body = render(ans, open_keys)
-        while len(body) > _QA_CAP and len(open_keys) > 1:
-            open_keys = open_keys[: max(1, len(open_keys) // 2)]
-            body = render(ans, open_keys)
+            body = render(ans, opens)
+        while len(body) > _QA_CAP and len(opens) > 1:
+            # 保留最新一期的问题（列表按日锚升序，取尾部）
+            opens = opens[-max(1, len(opens) // 2):]
+            body = render(ans, opens)
         body = body[:_QA_CAP]
         detail = [
             f"- [{r.get('day', '')}] {r.get('status', '')}（asks {r.get('asks', 0)}）"
