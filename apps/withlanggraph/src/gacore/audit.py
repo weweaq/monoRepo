@@ -252,10 +252,41 @@ def _scan_global(cfg: Config, synonyms: tuple[str, ...], before_date: str) -> li
     return hits
 
 
+def _scan_reports(cfg: Config, synonyms: tuple[str, ...], before_date: str) -> list[tuple[str, str, str]]:
+    """扫历史日报的 v1 冻结快照（决策 23）：只认 {date}.v1.json 的 report_text 字段。
+
+    被订正就地重写的 delivered_report 当前文件、无 report_text 的快照一律不作为证据。
+    """
+    hits: list[tuple[str, str, str]] = []
+    audit_dir = cfg.logs_dir / "report_audit"
+    if not audit_dir.is_dir():
+        return hits
+    for f in sorted(audit_dir.glob("*.v1.json")):
+        day = f.name[:10]
+        if len(day) != 10 or day[4] != "-" or day >= before_date:
+            continue
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        text = data.get("report_text") if isinstance(data, dict) else None
+        if not isinstance(text, str) or not text:
+            continue
+        for line in text.splitlines():
+            if any(syn in line for syn in synonyms):
+                hits.append((day, f"logs/report_audit/{f.name}", _snippet_around(line, synonyms)))
+                break
+    return hits
+
+
 def last_seen(cfg: Config, topic: str, before_date: str) -> LastSeen:
-    """在记忆库三源里查主题最近一次出现日期（严格早于 before_date）；查不到 found=False。"""
+    """在记忆三源 + 历史 v1 日报快照里查主题最近一次出现（严格早于 before_date）。"""
     synonyms = _load_topic_synonyms(cfg).get(topic, (topic,))
-    hits = _scan_daily(cfg, synonyms, before_date) + _scan_global(cfg, synonyms, before_date)
+    hits = (
+        _scan_daily(cfg, synonyms, before_date)
+        + _scan_global(cfg, synonyms, before_date)
+        + _scan_reports(cfg, synonyms, before_date)
+    )
     if not hits:
         return LastSeen(found=False, date=None, gap_days=None, source="", snippet="")
     day_str, source, snippet = max(hits, key=lambda h: h[0])

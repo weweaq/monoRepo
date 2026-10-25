@@ -119,6 +119,46 @@ def test_topic_table_external_config_overrides(tmp_path):
     assert got.date == "2026-10-01"
 
 
+def _write_v1(cfg, day: str, report_text: str | None) -> None:
+    audit_dir = cfg.logs_dir / "report_audit"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    payload = {"date": day, "version": 1, "score": 100, "missing": False, "findings": []}
+    if report_text is not None:
+        payload["report_text"] = report_text
+    (audit_dir / f"{day}.v1.json").write_text(
+        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def test_last_seen_reads_v1_report_snapshots(tmp_path):
+    """决策 23：历史日报作为证据源时只读 v1 冻结的 report_text。"""
+    cfg = Config.for_tests(tmp_path)
+    (cfg.memory_dir / "daily").mkdir(parents=True)  # 记忆三源无命中
+    _write_v1(cfg, "2026-10-11", "# 工作日志\n- [工作日志-1] 晚上研究工学椅扶手高度\n")
+    _write_v1(cfg, "2026-10-12", "# 今日状态\n- [今日状态-1] 无关内容\n")  # 不含主题
+    got = last_seen(cfg, "工学椅", "2026-10-15")
+    assert got.found is True
+    assert got.date == "2026-10-11"
+    assert got.source.startswith("logs/report_audit/2026-10-11.v1.json")
+
+
+def test_last_seen_skips_snapshot_without_report_text(tmp_path):
+    """无 report_text 的快照（含被订正后缺字段的历史产物）不作为证据源。"""
+    cfg = Config.for_tests(tmp_path)
+    (cfg.memory_dir / "daily").mkdir(parents=True)
+    _write_v1(cfg, "2026-10-11", None)
+    got = last_seen(cfg, "工学椅", "2026-10-15")
+    assert got.found is False
+
+
+def test_last_seen_ignores_reports_on_or_after_before_date(tmp_path):
+    cfg = Config.for_tests(tmp_path)
+    (cfg.memory_dir / "daily").mkdir(parents=True)
+    _write_v1(cfg, "2026-10-15", "- [工作日志-1] 工学椅到货\n")
+    got = last_seen(cfg, "工学椅", "2026-10-15")
+    assert got.found is False
+
+
 # ------------------------------------------------------------ Task 3: 冲突判定与单篇审计
 
 
