@@ -2287,7 +2287,8 @@ reply ─cap_questions→ gated ─stamp_report_bullets→ deliver_reply ─save
 - **投递**（run_job weekly 分支，全 best-effort）：`cap_questions(limit=3)` → `stamp_report_bullets` → `write_weekly` → `_audit_delivered(week)` → `set_pending_weekly` → `push_weekly_notice`；邮件 `for_day=week`。
 - **捕获**：`qq.py` 路由 3.55 步（先于 3.6 的 QA 捕获——pending 期间纯数字消息归周报交互；评分模式要求 pending 未评分）。
 - **job**：`schedule.json` 删 `weekly-summary`、增 `weekly-report`（Sun 20:30 · deliver_to email · 九节结构 prompt，含决策 26 的可回验预测要求）。
-- **重跑通道**：`python -m gacore.rerun --day YYYY-MM-DD [--no-email] [--job …]` 重跑日报（信息包按该日重建、正文就地重写、审计落 v2+）；`--week YYYY-Www` 重跑周报（数字区/候选/上期回看/存档/审计/pending/QQ 提醒全部锚定到该周），默认 job=weekly-report。
+- **重跑通道**：`python -m gacore.rerun --day YYYY-MM-DD [--no-email] [--job …]` 重跑日报（信息包按该日重建、正文就地重写、审计落 v2+；`--no-email` 连 delivered 落盘/审计/QQ 一并跳过，正文只在 logs/scheduled/ 归档）；`--week YYYY-Www` 重跑周报（数字区/候选/上期回看/存档/审计/pending/QQ 提醒全部锚定到该周），默认 job=weekly-report。
+- **历史日栅栏 `runtime.as_of_context`（2026-10-25 事故修复）**：`run_job` 把 for_day/for_week（周锚定到该周周日）的整个运行包进 ContextVar 栅栏——①`context` 时钟锚切到「X 日 23:59:59〔历史日重跑·模拟视角〕」并附未来禁令，`get_time` 同步返回模拟时钟；②`load_recent_daily_summaries` 窗口锚定到 X（近两天=X 与 X-1）；③事实卡 day=`state.target_day or as_of`（兜底 state 中途丢失）；④`edit_daily`/`start_long_term_update` 返回 `skipped=rerun` 不写记忆（原日已归档，重跑只重生成正文）；⑤`_latest_prev_report(before=X)` 只取 X 前落盘的报告当"前日日报"；⑥onboard rollover 导出跳过（防 as_of 窗口毒化次日真实首条消息记忆）；⑦`_build_job_prompt` 尾部追加〔重跑铁律〕后缀双保险。此前重跑只锚定信息包，时钟/记忆/工具全是"活的今天"，导致 10-23/10-24 日报被写成周日故事（10-25 修复后 10-23 重跑实测：纯正周五叙事 + 2 条有依据「想问你」，零未来信息）。
 
 ### 已知边界
 

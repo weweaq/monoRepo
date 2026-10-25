@@ -4522,3 +4522,18 @@ batterystats 实测 weiCheckApp 耗电 67.7 mAh，其中 GNSS 64.4 mAh（引擎�
 **偏差说明**：无。
 
 **待办更新**：无新增（重跑日错乱污染的 A/B/C 修复方案仍待用户拍板，见上一条记录）。
+
+## 2026-10-25 · 重跑历史日栅栏 as_of_context（A）+ 原版回写（B）——重跑日错乱根治
+
+**背景**：用户批准 A+B。三次无栅栏重跑证明污染是结构性的：rerun --day 只锚定信息包，agent 的时钟锚（【当前真实时间】=真实今天）、每日笔记注入（最近两天=10-24/10-25）、活工具查询（今晨事实卡 屏幕 0.0h·解锁 4）、前日日报源（按 mtime 取到"未来"的 10-24 报告）全是"活的今天"，10-23/10-24 两天的 delivered 都被写成周日故事（10-23 版甚至把用户 12:18 的答题当"今日复诊结果"写入）。
+
+**已完成（A，a588067）**：新增 `runtime.py`（as_of ContextVar，仿 `graph._memory_cfg` 先例——`build_tool_list` 不绑定 cfg 实例，字段方案到不了工具层）；`run_job` 薄包装进 `as_of_context(for_day or week_sunday(for_week))`。栅栏七点：时钟锚模拟 X 23:59+未来禁令；get_time 同步模拟；笔记注入窗口 ≤X；事实卡 day 兜底 `state.target_day or as_of`；edit_daily/start_long_term_update 返回 skipped=rerun 不写记忆；`_latest_prev_report(before=X)` 前日日报不越界；onboard rollover 导出跳过 + `_build_job_prompt` 尾部〔重跑铁律〕双保险。
+
+**实测验证**：`test_as_of_fence.py` 10 例（含 run_job 栅栏进入/退出复位、weekly 后缀）→ 全仓 1726 passed + ruff 绿（test_context 假 lambda 补 as_of 参数、test_weekly 尾部断言改铁律后缀，属接口演进）。真实重跑 `rerun --day 2026-10-23 --no-email`（693s）：正文纯周五叙事（躺平休整/30 元扩展坞/da66999/Moonlight/VITURE PRO2/Epic），零周日·马鞍山·激素·加班污染，明日计划为周五视角，且带 2 条有依据「想问你」；日志确认记忆写入/onboard 导出跳过、memory_maintain 报错后事实卡仍锚定 10-23（state 丢失兜底生效）。注意：`--no-email` 连 delivered 落盘与审计也跳过（正文只在 logs/scheduled/daily-report_20261025_132418.md）。
+
+**已完成（B）**：从 `logs/scheduled/daily-report_2026102{3,4}_*.md` 的 ## Reply 段提取正文 → `stamp_report_bullets` → 回写 `delivered_report/2026-10-2{3,4}.md`；10-23 与污染前原版逐字一致，10-24 恢复为真周六叙事（加班+南京检查），两文件 马鞍山/周日/激素 计数=0。污染版正文留在 report_audit/ 各版 JSON 里作对照。
+
+**偏差说明**：架构图 ENTRY.rerun 节点补栅栏标注（mermaid-viewer 测试 + check_prompt_logic.js 全过）；栅栏不拦 search_daily/file_read 等读工具——未来信息仍可被模型主动查到，靠时钟锚+重跑铁律+审计约束，若再出漏可加 C'（审计补"日历对齐"规则，本轮未做）。
+
+**待办更新**：
+- [ ] （可选）C'：审计加"日历对齐"检查——正文自称星期/事件日 vs 档位日不符标 R1
