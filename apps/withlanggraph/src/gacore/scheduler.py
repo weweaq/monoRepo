@@ -964,6 +964,11 @@ def _split_for_qq(body: str, limit: int = _QQ_SEGMENT_BYTES) -> list[str]:
 _QQ_OPENID_RE: Final = re.compile(r"^[0-9A-Fa-f]{32}$")
 
 
+def _plain_for_qq(body: str) -> str:
+    """剥掉 Markdown 强调标记：QQ 聊天不渲染 Markdown，`**加粗**` 与 `` `代码` `` 的符号会裸露成噪音。"""
+    return body.replace("**", "").replace("`", "")
+
+
 def _qq_targets() -> list[str]:
     """known users 里过滤出合法 openid 目标；占位条目跳过并计数。"""
     from gacore.langTrack.qq_push import load_known_users
@@ -987,7 +992,7 @@ def _push_daily_to_qq(cfg: Config, day: str, body: str) -> int:
     if not targets:
         logger.info("daily qq push skipped: no valid users", day=day)
         return 0
-    segments = _split_for_qq(body)
+    segments = _split_for_qq(_plain_for_qq(body))
     segments[-1] += "\n\n〔回复指引〕「想问你」直接回 [Q1] 你的答案；要订正正文回「订正 …」。"
     sent_total = 0
     for seg in segments:

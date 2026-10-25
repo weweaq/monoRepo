@@ -3,7 +3,14 @@
 from __future__ import annotations
 
 from gacore.config import Config
-from gacore.scheduler import _push_daily_to_qq, _split_for_qq
+from gacore.scheduler import _plain_for_qq, _push_daily_to_qq, _split_for_qq
+
+
+def test_plain_for_qq_strips_markdown_noise():
+    body = "- [关键变化-1] **连续两天**陪诊——`apps/<app>/docs/ROADMAP.md` 收尾"
+    out = _plain_for_qq(body)
+    assert "**" not in out and "`" not in out
+    assert "连续两天" in out and "apps/<app>/docs/ROADMAP.md" in out
 
 
 def test_split_short_body_single_segment():
