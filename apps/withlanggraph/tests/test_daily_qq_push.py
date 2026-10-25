@@ -11,16 +11,23 @@ def test_split_short_body_single_segment():
     assert _split_for_qq(body) == [body.rstrip("\n")]
 
 
-def test_split_long_body_line_boundary_and_headers():
-    line = "- " + "字" * 80
-    body = "\n".join([line] * 30)  # ~2430 字 → 4 段左右
-    segments = _split_for_qq(body, limit=600)
-    assert len(segments) > 1
+def test_split_by_bytes_long_body_splits():
+    line = "- " + "字" * 80  # 每行 ~242 字节
+    body = "\n".join([line] * 30)  # ~7.2K 字节 → 超过 6000 字节上限，切 2 段
+    segments = _split_for_qq(body)
+    assert len(segments) == 2
     for seg in segments:
-        assert len(seg) <= 600 + len("〔日报 9/9〕\n")  # 标头开销内
+        assert len(seg.encode("utf-8")) <= 6000 + len("〔日报 9/9〕\n".encode("utf-8"))
         assert "字字字" in seg  # 行不被腰斩
-    assert segments[0].startswith("〔日报 1/")
-    assert f"〔日报 1/{len(segments)}〕" in segments[0]
+    assert segments[0].startswith("〔日报 1/2〕")
+
+
+def test_typical_report_fits_single_segment():
+    """典型日报（~800 字 / ~1.7K 字节）单条送达，不再切两段。"""
+    body = "# 今日状态\n- [今日状态-1] " + "好" * 900 + "\n\n# 想问你\n- [想问你-1] q（依据：a）\n"
+    segments = _split_for_qq(body)
+    assert len(segments) == 1
+    assert "〔日报" not in segments[0]
 
 
 def test_push_daily_segments_and_marks_touch(tmp_path, monkeypatch):
@@ -43,8 +50,8 @@ def test_push_daily_segments_and_marks_touch(tmp_path, monkeypatch):
     body = "# 今日状态\n- [今日状态-1] " + "好" * 900 + "\n\n# 想问你\n- [想问你-1] 你是在读还是上班？（依据：10-25）\n"
     sent = _push_daily_to_qq(cfg, "2026-10-25", body)
     assert sent == len(calls)  # 每段成功送达 1 人，累计口径
-    assert len(calls) >= 2  # 正文分段
-    assert any("[Q1]" in c for c in calls)  # 回复指引随行
+    assert len(calls) == 1  # 典型日报 ~2.9K 字节单条送达
+    assert "[Q1]" in calls[0]  # 回复指引随行
     # 当日问题计一次触达 → 裸回答当晚可用
     assert open_questions(cfg)[0]["asks"] == 1
 

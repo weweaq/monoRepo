@@ -935,22 +935,23 @@ def _seed_qa(cfg: Config, day: str, delivered: str) -> None:
         qa_store.seed_questions(cfg, day, bullets)
 
 
-# QQ C2C 文本消息的保守段长（富余到平台字节上限之下），按行边界累积切段
-_QQ_SEGMENT_CHARS: Final = 600
+# QQ C2C 文本实测上限 ≥6000 UTF-8 字节（2026-10-25 三档探针 1740/3621/6021 均送达）；
+# 日报典型 2-6K 字节，按字节计数切在 6000 内即单条送达，超长天仍优雅分段
+_QQ_SEGMENT_BYTES: Final = 6000
 
 
-def _split_for_qq(body: str, limit: int = _QQ_SEGMENT_CHARS) -> list[str]:
-    """把日报正文切成 QQ 消息段：行边界累积不腰斩行；多段时每段带〔日报 i/N〕标头。"""
+def _split_for_qq(body: str, limit: int = _QQ_SEGMENT_BYTES) -> list[str]:
+    """把日报正文切成 QQ 消息段：按 UTF-8 字节、行边界累积不腰斩行；多段时每段带〔日报 i/N〕标头。"""
     segments: list[str] = []
     cur: list[str] = []
-    cur_len = 0
+    cur_bytes = 0
     for line in body.splitlines():
-        add = len(line) + 1
-        if cur and cur_len + add > limit:
+        add = len(line.encode("utf-8")) + 1
+        if cur and cur_bytes + add > limit:
             segments.append("\n".join(cur))
-            cur, cur_len = [], 0
+            cur, cur_bytes = [], 0
         cur.append(line)
-        cur_len += add
+        cur_bytes += add
     if cur:
         segments.append("\n".join(cur))
     if len(segments) > 1:
