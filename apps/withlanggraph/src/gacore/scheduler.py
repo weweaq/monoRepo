@@ -518,7 +518,7 @@ def _build_job_prompt(job: Job, cfg: Config, for_day: str | None = None) -> str:
             prompt = (
                 f"{numbers}\n\n〔画像候选（原样转述，禁止改写）〕\n{cand_lines}\n\n"
                 f"〔上期周报〕logs/delivered_weekly/{prev_week(week)}.md"
-                "（用 file_read 读取做回看；不存在则本篇为首期）\n\n{job.prompt}"
+                "（用 file_read 读取做回看；不存在则本篇为首期）\n\n" + job.prompt
             )
             logger.info(
                 "weekly numbers injected into user prompt",

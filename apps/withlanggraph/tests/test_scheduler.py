@@ -302,10 +302,27 @@ class TestBuildJobPrompt:
             return "不应出现的信息包"
 
         monkeypatch.setattr("gacore.daily_info_pack.build_info_pack", fake_build)
-        job = Job(name="weekly-summary", schedule="every 7d", prompt="周报指令")
+        job = Job(name="one-off", schedule="every 7d", prompt="单次指令")
         prompt = _build_job_prompt(job, cfg)
-        assert prompt == "周报指令"  # 非日报类：信息包完全不注入（隔离）
+        assert prompt == "单次指令"  # 非日报/周报类：信息包与数字区完全不注入（隔离）
         assert called == []  # 且 build_info_pack 不被调用
+
+    def test_weekly_job_injects_numbers_not_info_pack(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """P4：weekly job 注入只读数字区（不含信息包），候选与回看指引随行。"""
+        cfg = Config.for_tests(tmp_path)
+        monkeypatch.setattr("gacore.daily_info_pack.build_info_pack", lambda *a, **k: "不应出现的信息包")
+
+        def fake_numbers(cfg_, week):
+            return f"〔周报数字区·{week}〕只读"
+
+        monkeypatch.setattr("gacore.weekly_stats.collect_week_numbers", fake_numbers)
+        monkeypatch.setattr("gacore.weekly_stats.pending_candidates", lambda cfg_: [])
+        job = Job(name="weekly-report", schedule="Sun 20:30", prompt="周报指令")
+        prompt = _build_job_prompt(job, cfg)
+        assert "〔周报数字区·" in prompt and "只读" in prompt
+        assert "周报指令" in prompt
+        assert "上期周报" in prompt  # 回看指引随行
+        assert "不应出现的信息包" not in prompt  # 信息包仍只属于 daily
 
     def test_daily_job_injects_corrections_then_preferences_then_pack(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """C4③/C8：人工订正与用户偏好按优先级注入包首（订正→偏好→信息包）。"""
