@@ -202,3 +202,57 @@ def test_weekly_interaction_none_without_pending(tmp_path):
     cfg = Config.for_tests(tmp_path)
     assert try_weekly_interaction(cfg, "4 3") is None
     assert try_weekly_interaction(cfg, "1") is None
+
+
+# ------------------------------------------------ P4 补：重跑通道（--day / --week）
+
+
+def test_build_job_prompt_honors_for_week(tmp_path, monkeypatch):
+    from gacore.scheduler import Job, _build_job_prompt
+
+    def fake_numbers(cfg_, week):
+        return f"〔周报数字区·{week}〕只读"
+
+    monkeypatch.setattr("gacore.weekly_stats.collect_week_numbers", fake_numbers)
+    monkeypatch.setattr("gacore.weekly_stats.pending_candidates", lambda cfg_: [])
+    job = Job(name="weekly-report", schedule="Sun 20:30", prompt="周报指令")
+    prompt = _build_job_prompt(job, Config.for_tests(tmp_path), for_week="2026-W42")
+    assert "〔周报数字区·2026-W42〕" in prompt
+    assert "2026-W41.md" in prompt  # 上期回看锚定到重跑周的前一周
+    assert prompt.endswith("周报指令")
+
+
+def test_rerun_cli_week_dispatch(tmp_path, monkeypatch, capsys):
+    import gacore.rerun as rerun_mod
+    from gacore.scheduler import Job
+
+    captured: dict = {}
+
+    class FakeResult:
+        exit_reason = "END"
+        duration_seconds = 0.5
+        error = None
+        output_path = "x.md"
+
+    def fake_run_job(job, cfg, for_day=None, for_week=None, deliver=True):
+        captured.update(job=job.name, for_day=for_day, for_week=for_week, deliver=deliver)
+        return FakeResult()
+
+    monkeypatch.setattr(rerun_mod, "load_jobs", lambda cfg: [Job(name="weekly-report", schedule="Sun 20:30", prompt="p")])
+    monkeypatch.setattr(rerun_mod, "run_job", fake_run_job)
+    monkeypatch.setattr(rerun_mod.Config, "default", classmethod(lambda cls: Config.for_tests(tmp_path)))
+
+    assert rerun_mod.main(["--week", "2026-W42"]) == 0
+    assert captured == {"job": "weekly-report", "for_day": None, "for_week": "2026-W42", "deliver": True}
+
+    assert rerun_mod.main(["--week", "2026-W42", "--no-email"]) == 0
+    assert captured["deliver"] is False
+
+
+def test_rerun_cli_argument_validation(monkeypatch, capsys):
+    import gacore.rerun as rerun_mod
+
+    assert rerun_mod.main([]) == 2  # 什么都不给
+    assert rerun_mod.main(["--day", "2026-10-24", "--week", "2026-W42"]) == 2  # 二选一
+    assert rerun_mod.main(["--week", "not-a-week"]) == 2  # 格式非法
+    assert rerun_mod.main(["--week", "2026-W99"]) == 2  # 不存在的 ISO 周

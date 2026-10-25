@@ -400,7 +400,7 @@ def is_due(job: Job, state: JobState, now: datetime) -> bool:
     return now >= nxt
 
 
-def _build_job_prompt(job: Job, cfg: Config, for_day: str | None = None) -> str:
+def _build_job_prompt(job: Job, cfg: Config, for_day: str | None = None, for_week: str | None = None) -> str:
     """Compose the user prompt for one job.
 
     For the daily-report job, prepend the precomputed "当日信息包" (daily info pack) as
@@ -503,10 +503,11 @@ def _build_job_prompt(job: Job, cfg: Config, for_day: str | None = None) -> str:
             )
     if _is_weekly_job(job):
         # P4 周报：数字区（程序填）+ 候选清单 + 上期回看指引 前置注入；铁律=数字只读。
+        # for_week：历史周重跑（rerun --week）时以该周为窗口，否则取本周。
         try:
             from gacore.weekly_stats import collect_week_numbers, pending_candidates, prev_week, week_now
 
-            week = week_now()
+            week = for_week or week_now()
             numbers = collect_week_numbers(cfg, week)
             cands = pending_candidates(cfg)
             if cands:
@@ -542,6 +543,7 @@ def run_job(
     cfg: Config,
     graph_runner: Callable[[str, Config, int], str | None] | None = None,
     for_day: str | None = None,
+    for_week: str | None = None,
     deliver: bool = True,
 ) -> ScheduleResult:
     """Execute one job: run the agent headless, capture reply, write output + daily note.
@@ -569,7 +571,7 @@ def run_job(
     exit_reason: str | None = None
     prompt = job.prompt
     try:
-        prompt = _build_job_prompt(job, cfg, for_day)
+        prompt = _build_job_prompt(job, cfg, for_day, for_week=for_week)
         # 失败自动重试一次：首次仅得残渣/空正文（INCOMPLETE/EMPTY）→ 换硬约束 prompt 重跑。
         # 信息包在第一次 prompt 里已装配，重试只追加约束后缀，不重复组装信息包。
         active_prompt = prompt
@@ -678,7 +680,7 @@ def run_job(
             from gacore.weekly_eval import push_weekly_notice, set_pending_weekly
             from gacore.weekly_stats import week_now, write_weekly
 
-            week = week_now()
+            week = for_week or week_now()
             try:
                 gated, questions_gated = cap_questions(reply, limit=3)
                 if questions_gated:
