@@ -2238,24 +2238,26 @@ reply ─cap_questions→ gated ─stamp_report_bullets→ deliver_reply ─save
 |---|---|
 | `data/qa/{date}.jsonl` | 每行一问：`question_key/question/anchor/day/status(open·answered·archived)/answer/answer_day/asks/created_at/updated_at` |
 | `data/qa/candidates.jsonl` | 回答落画像候选：`question_key/question/answer/status(pending·confirmed·rejected)` |
-| `data/qa/open_state.json` | 裸回答指针：有且仅有 1 条待答时指向它 |
+| `data/qa/open_state.json` | 裸回答指针 + 展示顺序：有且仅有 1 条待答时 `question_key` 指向它；`keys` 存最近一次 QQ 推送的 `[Q1]..[Qn]` 顺序（决策 29） |
 
 | 符号 | 说明 |
 |---|---|
 | `question_key(cfg, question)` | `sha1(topic + 意图)[:16]`：topic 取 `config/audit_topics.json` 命中（无则空串），意图 = 去数字/日期/标点后归一 |
 | `seed_questions(cfg, day, bullets)` | 投递正文种入；已答 key 永不重开（决策 11）、同期 2-gram Jaccard > 0.6 语义去重 |
 | `mark_pushed` / `archive_stale` | 推送后 `asks+1`；未答 `asks > 2` 归档（用户不关心），不再注入/推送 |
-| `try_answer(cfg, content, allow_bare)` | QQ 捕获入口（决策 8）：显式 `[Qn]`/`Qn`/`想问你-n` 命中第 n 条开放问题；裸回答仅在「唯一开放 + 已推送（asks>0）+ ≤30 字 + allow_bare」时归给该问题 |
-| `qa_brief(cfg, before_date)` | `_QA` 源取数：近 7 天已答（新→旧）+ 全部开放问题 |
+| `set_prompt_order(cfg, keys)` / `_load_open_state(cfg)` | 推送后落盘展示顺序（决策 29）；`_refresh_open_state` 只保留仍 open 的 key |
+| `try_answer(cfg, content, allow_bare)` | QQ 捕获入口（决策 8/29）：`[想问你-N]` 取**最近一期**含该锚点的问题（周 id 折算周日比较）；`[Qn]` 先按 `set_prompt_order` 的顺序，无记录时按最近一期锚点、再退回全局位置；只发锚点不带答案不吞；裸回答仅在「唯一开放 + 已推送（asks>0）+ ≤30 字 + allow_bare」时归给该问题 |
+| `qa_brief(cfg, before_date)` | `_QA` 源取数：近 7 天已答（新→旧）+ 未答问题；**双端 as-of 栅栏**（`horizon < answer_day <= before_date`、`day < before_date`，决策 30） |
+| `open_questions(cfg, before_date=None)` | 未答问题（按日锚+锚点排序）；`before_date` 给周报取「本周口径」用 |
 | `stats(cfg)` | 每期提问数 / 回答率 / 归档数 |
 
 ### 接线
 
 - **种入**：`scheduler._seed_qa(cfg, day, deliver_reply)` 在 `save_delivered` 后执行（审计钩子旁，best-effort），从已 stamp 的 `- [想问你-N]` 行种入。
-- **推送**：`schedule.json` 的 `daily-questions` job（type=proactive·08:30·scene=questions·window 08:00-09:30）；`run_proactive_job` 无开放问题整 job 跳过（`no_open_questions`，0 条不推）；问题清单注入 `build_proactive_prompt(questions=...)` 并强制**逐条原样转述、保留 [Qn] 编号**（编号是捕获配对键）；push 成功后 `asks+1` + 归档超限。
+- **推送**：`schedule.json` 的 `daily-questions` job（type=proactive·08:30·scene=questions·window 08:00-09:30）；`run_proactive_job` 无开放问题整 job 跳过（`no_open_questions`，0 条不推）；问题清单注入 `build_proactive_prompt(questions=...)` 并强制**逐条原样转述、保留 [Qn] 编号**（编号是捕获配对键）；push 成功后先 `set_prompt_order` 记录展示顺序、再 `asks+1` + 归档超限。
 - **捕获**：`qq.py on_message` 路由 3.6 步（`feedback_route` 判定后、feedback 分发前）调 `try_answer`，命中回确认消息并 return——不进订正阶梯、不进 agent 轮（决策 8）；`allow_bare=route is None` 防止吞掉订正关键词。
-- **日报 QQ 推送**：`scheduler._push_daily_to_qq`——正文先过 `_plain_for_qq`（剥 `**` 与反引号：QQ 聊天不渲染 Markdown，符号裸露成噪音；邮件版保留原样），再 `_split_for_qq` 6000 UTF-8 字节/段行边界切段（多段带〔日报 i/N〕标头），尾段追加 `_qq_reply_guidance`（按当日问答状态三态：正文带「想问你」→ 短指引；正文没带但当日有开放问题 → 指引复述问题原文再给 [Qn] 话术；两者皆无 → 只留订正），挂 `_deliver` 邮件后 best-effort；成功即对当日问题 `mark_pushed`（裸回答当晚生效）。
-- **注入**：`daily_info_pack` 注册 `SourceSpec("_QA", 600, 110, _build_qa)`（决策 24）；pack 单一截断点=cap（减已答组→对半减未答 key→硬截断），单行 `_qa_clip`（问 90/答 60）；空态 `- 当日无问答数据` → missing_data；detail=qa 库全量不压缩。
+- **日报 QQ 推送**：`scheduler._push_daily_to_qq`——正文先过 `_strip_questions`（**剥掉 `# 想问你` 整节**，决策 40：提问只在次日 08:30 单独推，避免 9 小时内重复打扰与 `asks` 双计数）与 `_plain_for_qq`（剥 `**` 与反引号：QQ 聊天不渲染 Markdown，符号裸露成噪音；邮件版保留原样），再 `_split_for_qq` 6000 UTF-8 字节/段行边界切段（多段带〔日报 i/N〕标头），尾段追加 `_qq_reply_guidance`（只留订正话术；正文带过问题则加一句「明早 08:30 单独推」），挂 `_deliver` 邮件后 best-effort；**夜间不再 `mark_pushed`**。
+- **注入**：`daily_info_pack` 注册 `SourceSpec("_QA", 600, 110, _build_qa)`（决策 24）；pack 单一截断点=cap（减已答组→对半减未答问题→硬截断），单行 `_qa_clip`（问 90/答 60）；未答清单给**问题原文**而非 `question_key`（决策 31）；空态 `- 当日无问答数据` → missing_data；detail=qa 库全量不压缩。
 
 ### 已知边界
 
@@ -2275,16 +2277,18 @@ reply ─cap_questions→ gated ─stamp_report_bullets→ deliver_reply ─save
 | `weekly_stats.collect_week_numbers(cfg, week)` | 只读数字区：git 提交/日（一次 `git log` 取 7 天）、屏幕小时/睡眠分钟（daily_stats `mode=ro`）、审计分/日+周均（v1 口径）、QA 提问/回答计数、环比、缺数据标注；头部带铁律声明 |
 | `weekly_stats.write_weekly / pending_candidates` | 存档 `logs/delivered_weekly/{week}.md`；candidates.jsonl pending ≤3 条 |
 | `weekly_eval.set_pending_weekly / load_pending` | `data/eval/human/pending.json`（week + 候选清单 + rated 标记，3 天过期） |
-| `weekly_eval.try_weekly_interaction(cfg, content)` | 评分 `4 3`（可带第三数字=最不像条目与自由文本）→ `{week}.json`（`rubric_version:1`，决策 17/22，已评分不重复吞）；候选 `1`/`-2`/`0`（决策 27）→ `set_candidate_status`，confirmed 追加 `global_mem_facts.txt` |
-| `weekly_eval.push_weekly_notice(cfg, week)` | 投递后确定性 QQ 提醒（评分与候选操作说明，best-effort） |
+| `weekly_eval.try_weekly_interaction(cfg, content)` | 评分 **`评分 4 3`**（可带第三数字=最不像条目与自由文本）→ `{week}.json`（`rubric_version:1`，决策 17/22/35，已评分不重复吞）；候选 **`候选 1 3`** / **`候选 -2`** / **`候选 0`**（决策 35；裸数字不再被吞，留给日报裸答）→ `set_candidate_status`，confirmed 追加 `global_mem_facts.txt` |
+| `weekly_eval.push_weekly_notice(cfg, week)` | 投递后确定性 QQ 提醒（`评分 4 3` / `候选 1 3` / `[想问你-1] 答案` 三段操作说明，best-effort） |
+| `audit.cap_weekly(reply, limit=1200)` | 周报长度硬闸（决策 34）：超限从尾部整节删减，保护首节与核心节（三条变化/打分/想问你/画像候选）；仍超时只压缩最长节正文并保留标题，最后硬截断，结果严格 `<= limit` |
 | `scheduler.next_run_time` weekday 形态 | `Sun 20:30`/`周日 20:30`；既有 `HH:MM`/`every N<d/h/m>` 不变。**到期语义（2026-10-25 首跑事故修复）**：槽位已过但本周未跑 → 原样返回已过槽位（`now >= slot` 即到期，迟到补跑，与 `HH:MM` 同语义）；只有 `last_run >= slot`（本周已跑过）才翻下周——修复前槽位一过无条件 +7 天，30s 轮询的到期窗口零宽，job 永不触发 |
 | `audit._report_path / _anchor_day` | week id → `delivered_weekly/{week}.md`；last_seen 基线锚点 = 周日；R5 对周报 fail-open |
 | `audit.cap_questions(reply, limit=…)` | 日报 limit=5（默认）、周报 limit=3 |
 
 ### 接线
 
-- **注入**：weekly job 的 prompt 前置 `collect_week_numbers` 数字区 + 候选清单（原样转述约束）+ 上期周报 `file_read` 回看指引。
-- **投递**（run_job weekly 分支，全 best-effort）：`cap_questions(limit=3)` → `stamp_report_bullets` → `write_weekly` → `_audit_delivered(week)` → `set_pending_weekly` → `push_weekly_notice`；邮件 `for_day=week`。
+- **注入**：weekly job 的 prompt 前置 `collect_week_numbers` 数字区 + **本周笔记摘要**（`load_recent_daily_summaries(days=7, as_of=周日)`，决策 33：系统 prompt 只给 2 天笔记，周报要写「三条变化」必须看满 7 天）+ **本周未答提问**（`open_questions(before_date=周日)`）+ 候选清单（原样转述约束）+ 上期周报 `file_read` 回看指引。
+- **投递**（run_job weekly 分支，全 best-effort）：`cap_questions(limit=3)` → `cap_weekly(1200)` → `stamp_report_bullets` → `write_weekly` → `_audit_delivered(week)` → `_seed_qa(week, deliver_reply)` → `set_pending_weekly` → `push_weekly_notice`；邮件 `for_day=week`（week id 不进「重生成 vN」版本计数）。
+- **周报不写 daily note**（决策 32）：`_write_daily_note` 对 weekly job 直接返回，正文片段不会污染 `last_seen` 证据与次日日报上下文。
 - **捕获**：`qq.py` 路由 3.55 步（先于 3.6 的 QA 捕获——pending 期间纯数字消息归周报交互；评分模式要求 pending 未评分）。
 - **job**：`schedule.json` 删 `weekly-summary`、增 `weekly-report`（Sun 20:30 · deliver_to email · 九节结构 prompt，含决策 26 的可回验预测要求）。
 - **重跑通道**：`python -m gacore.rerun --day YYYY-MM-DD [--no-email] [--job …]` 重跑日报（信息包按该日重建、正文就地重写、审计落 v2+；`--no-email` 连 delivered 落盘/审计/QQ 一并跳过，正文只在 logs/scheduled/ 归档）；`--week YYYY-Www` 重跑周报（数字区/候选/上期回看/存档/审计/pending/QQ 提醒全部锚定到该周），默认 job=weekly-report。
@@ -2293,5 +2297,68 @@ reply ─cap_questions→ gated ─stamp_report_bullets→ deliver_reply ─save
 ### 已知边界
 
 - confirmed 候选直写 `global_mem_facts.txt`（不走 persist_entry 唯一写入口），向量同步靠记忆维护全量兜底——若画像不一致改走 persist_entry。
-- 周报想问你未种入 qa 库（避免与日报问题混入同一 08:30 推送列表），首期观察后定。
+- 周报提问以 week id（`YYYY-Www`）落 qa 库，`qa_brief`/`weekly_stats._qa_counts` 内部折算到周日（决策 39），不会与周日日报的 `[想问你-1]` 撞锚；同一周日若周报与日报都有 Q1，`[想问你-1]` 取日期更晚的那期（日报）。
 - R5 跨周对照未实现（fail-open）；周报首期无回看节内容时写「首期无回看」。
+
+## 9.38 评测闭环检视修复：编号错位 / as-of 泄漏 / 周报缺语料（2026-10-25）
+
+> 触发：P1–P4 全量实现后的一次代码检视（8 条 Must / 5 条 Should / 2 条 Nice），三条 bug 已用脚本实证：`[Q1]` 答到 10-19 的旧问题、`1 3` 被记成评分、`qa_brief(before 10-20)` 返回 10-25 的回答与 10-22 的未答问题。对应 spec 决策 29–40。
+
+### 修复矩阵
+
+| 问题 | 根因 | 修复 |
+|---|---|---|
+| `[Qn]` 跨天错位 | `try_answer` 用 `open_[idx-1]`（全局位置），而 `[Qn]` 是**那一期正文**的编号 | `set_prompt_order` 在每次 QQ 推送后**整体替换** `open_state.json.keys`；`[Qn]` 只认该快照，无快照时退「最近一期含该锚点」；越界/已答返回 `None`（不 fall-through） |
+| 数字协议歧义 | 评分 `4 3`、候选 `1 3`、日报裸答共用输入空间 | 评分必须 `评分 4 3`；候选必须 `候选 1 3` / `候选 -2` / `候选 0`；裸数字只留给日报裸答（`_RATING_RE`/`_CAND_RE` 双前缀，`候选 0` 与确认混写视为无效）；`评分`/`候选` 前缀在 `try_answer` 之前拦截 |
+| 重跑泄漏未来问答 | `qa_brief` 的已答无上界、未答无日期过滤 | 双端 as-of 栅栏：`horizon < answer_day <= before_date`、`day < before_date` |
+| 周报缺 7 天语料 | 系统 prompt 只注入近 2 天笔记 | 周报 prompt 前置 `load_recent_daily_summaries(days=7, as_of=周日)` + 本周未答提问 |
+| 周报问题无捕获通道 | 周报 `# 想问你` 未种入 qa 库 | 投递后 `_seed_qa(cfg, week, deliver_reply)`；日锚用 week id，读取时折算周日 |
+| 周报问题撞锚 | 周日周报与周日日报都有 `[想问你-1]` | `_day_as_date()` 统一折算后比较，取日期更晚的一期 |
+| 首期周报标题「重生成 v2」 | `_deliver_email` 对任意 `for_day != today` 递增版本 | `_WEEK_ID_RE` 命中则跳过版本计数（审计仍按 `write_audit` 落 vN） |
+| 问题 9 小时内推两次 | 23:50 正文带 `# 想问你` + 08:30 再推；两次都 `mark_pushed` | 夜间 `_strip_questions` 剥整节、不再 `mark_pushed`；`asks` 只在 08:30 计一次 |
+| `last_seen` 不认 as-of | 工具未用 `runtime.as_of_day()`，重跑按真实今天查表 | 显式 `before_date` 校验 `YYYY-MM-DD`；缺省用 `as_of_day()` |
+| 基线证据误导 | 只报最近一次命中（10-06 顺带提工学椅） | `LastSeen.alt` 带次近 1–2 个日期进 evidence；基线文案「实际 N 天」→「最近提及 N 天」 |
+| backfill 二次跑汇总归零 | 汇总只累加本次新审计的 v1 | 汇总口径改为扫全部 `*.v1.json`（决策 38） |
+| 无锚清单锚点重复 | `c['text']` 已含 `- [锚点]` 前缀 | 渲染时剥掉重复前缀 |
+
+### 二轮检视补修（同日，决策 41–44）
+
+| 问题 | 根因 | 修复 |
+|---|---|---|
+| 编号仍会错位 | `_refresh_open_state` 每次按 open 集合**过滤** `keys`：答掉 Q1 后编号前移，`[Q2]` 指到第 3 题 | `keys` 改为不可变快照（只由 `set_prompt_order` 整体替换）；`_refresh_open_state` 原样保留；越界/已答返回 `None`，删掉全局位置兜底 |
+| 第 3 次推送当天不可答 | `mark_pushed` 后立刻 `archive_stale`，`asks>2` 的题刚展示就被归档 | `archive_stale` 移到 `open_questions` 之前（推送前归档）；第 3 次展示仍 open，下一轮才归档 |
+| 裸答吞正常对话 | 裸答只看「唯一待答 + 已推送 + ≤30 字」 | 追加「不像问句」护栏（`?`/`吗`/`什么`/`怎么`/`为什么`/`哪`/`谁`/`多少`/`是不是`/`有没有`）；显式回答必须带方括号，`Q3 财报什么时候发？` 不再命中 |
+| `cap_weekly` 删掉交互节 / 越界 1 字 | 只认 `# ` 一级标题、保护集只有首节+打分节；硬截断 `limit-1 + "…"` = limit+1 | 认 `#`/`##`/`###`；保护首节 + 三条变化/打分/想问你/画像候选；删无可删时压缩最长节正文（保留标题），最后硬截断，结果严格 `<= limit` |
+| 周报指令静默丢失 | 已评分/窗口关闭时 `try_weekly_interaction` 返回 `None`，消息落进 agent 或被裸答吞 | 前缀命中但不可用 → 明确回「已评分/窗口已关闭」；`try_answer` 见 `评分|候选` 前缀直接 `return None` |
+| 越界候选半成功 | 边写边判越界，前面的候选已 confirmed 但不写 facts | 先全量校验编号，越界整条拒绝并回执 |
+| backfill 口径打架 | `reports` 只数 `delivered_report/*.md`，claims 数全部 v1 | `reports` = 全部 `*.v1.json`，`dailies` 单独计数 |
+| 非补零日期崩 | `strptime("%Y-%m-%d")` 放行 `2026-1-5`，随后 `fromisoformat` 抛错 | 直接用 `date.fromisoformat` 严格校验，非法直接返回 `error` |
+| `_build_qa` 计数误导/保留最旧 | 表头用截断前的数量；对半减时保留列表头部（最旧） | 表头按实际渲染数量；保留尾部（最新一期） |
+| `## 想问你` 漏闸 | `cap_questions` / `_strip_questions` 只认 `# 想问你` | 共用「去掉 `#` 后等于「想问你」」的判定 |
+| 全量套件偶发 `WinError 5` | `proactive.save_state` 的 `os.replace` 被杀毒/索引器瞬时占用（60 次连写必现） | 重试 5 次（20/40/60/80ms 退避），仍失败才抛；`test_save_state_retries_transient_permission_error` 覆盖 |
+
+### 数据流（夜间与早晨两条推送）
+
+```mermaid
+sequenceDiagram
+    participant S as scheduler 23:50
+    participant Q as qa_store
+    participant QQ as QQ 用户
+    participant P as proactive 08:30
+    S->>Q: _seed_qa(day, 已 stamp 正文)
+    S->>QQ: 正文（_strip_questions 剥掉「想问你」）+ 订正指引
+    Note over QQ: 夜间不计 asks、不编号
+    P->>Q: open_questions()（唯一来源）
+    P->>Q: set_prompt_order([key...])  ← [Q1]..[Qn] 与消息同序
+    P->>QQ: 逐条问题（编号 + 原文）
+    P->>Q: mark_pushed(asks+1) → archive_stale
+    QQ->>Q: [Q1] 答案 / [想问你-1] 答案 / 裸答（唯一待答且已推送）
+    Q-->>S: 次日 qa_brief(before_date=明日) 注入 _QA 源
+```
+
+### 测试与实测
+
+- 新增/改写测试：`test_qa_store.py`（跨天 `[Q1]`、展示顺序快照、答后编号不前移、越界不猜、`Q3 …` 不被吞、`评分/候选` 不被吞、锚点裸发不吞、as-of 栅栏、week id 折算）、`test_weekly.py`（`评分/候选` 前缀、裸数字不撞车、重复评分回执、周报种子、7 天语料注入）、`test_audit.py`（`alt` 次近命中、`cap_weekly` 短/长/`##` 标题/硬截断、backfill 二次跑与周报 v1 口径、非 ISO 日期报错）、`test_daily_qq_push.py`（夜间剥问题节且 `asks` 不涨、`## 想问你`、只剩问题节不推）、`test_proactive_questions.py`（第 3 次推送当天仍可答、下一轮归档）。
+- 全量：`1674 passed, 1 skipped`（`pytest -p no:randomly`）；`ruff check` 全绿。
+- 真实数据核对：`last_seen('工学椅','2026-10-12')` → 10-06（6 天），`alt` 带 09-22/09-20；`last_seen('硬件','2026-10-20')` → 10-07（13 天），冲突仍成立。
+- 已知口径差异：59 篇 v1 快照是 P1 期冻结的，当时 `_scan_reports` 尚未接入，故 10-20 的 v1 证据是 10-03；今天重算会得到 10-07（仍冲突）。审计结果 JSON 没有 `auditor_version` 字段，混版本快照无法区分（遗留项）。

@@ -4442,7 +4442,7 @@ batterystats 实测 weiCheckApp 耗电 67.7 mAh，其中 GNSS 64.4 mAh（引擎�
 - confirmed 候选直接追加 `global_mem_facts.txt`（`[date] fact: …（周报候选确认）`），未走记忆维护的 `persist_entry` 唯一写入口——向量同步靠记忆维护的全量 sync 兜底；记入已知偏差，若画像不一致再改走 persist_entry。
 - 旧 `weekly-summary` job 直接删除（其"搜近 7 天笔记做总结"的能力被 weekly-report 的结构化周报取代），未保留开关。
 - R5 跨周对照未实现（周报锚点=周日，`_yesterday_claims` 找不到"上周六日报"自然跳过），fail-open。
-- 周报审计的 `_seed_qa` 未挂（周报想问你 ≤3 与日报共用 qa 库时，种入会与日报问题混在 open 列表被 08:30 推送——首期先不种入周报提问，观察后定）。
+- 周报审计的 `_seed_qa` 未挂（周报想问你 ≤3 与日报共用 qa 库时，种入会与日报问题混在 open 列表被 08:30 推送——首期先不种入周报提问，观察后定）。**2026-10-25 已修复，见「评测闭环检视修复」条目。**
 
 **待办更新**：
 - [x] 评测设计 P0–P4 全部落地（2026-10-25 单日完成）
@@ -4549,3 +4549,61 @@ batterystats 实测 weiCheckApp 耗电 67.7 mAh，其中 GNSS 64.4 mAh（引擎�
 **偏差说明**：无（跨周漏跑不追——错过整天则下周再跑，与数据窗周一 00:00~周日 20:00 的口径可接受）。
 
 **待办更新**：无新增。
+
+## 2026-10-25 · 评测闭环检视修复（编号错位 / as-of 泄漏 / 周报缺语料 / 协议歧义）
+
+**背景**：P1–P4 全量落地后做代码检视，发现 8 条 Must（`[Qn]` 跨天错位、数字协议歧义、重跑泄漏未来问答、周报缺 7 天语料、周报问题无捕获通道、`last_seen` 不认 as-of、首期周报标题「重生成 v2」、问题 9 小时内推两次）+ 5 条 Should + 2 条 Nice。三条 bug 已用脚本实证：`[Q1]` 答到 10-19 的旧问题、`1 3` 被记成评分、`qa_brief(before 10-20)` 返回 10-25 的回答与 10-22 的未答问题。spec 决策 29–40 已同步。
+
+**已完成**（未提交，等指示）：
+- `qa_store.py`：`set_prompt_order` 落盘展示顺序 + `open_state.json.keys`；`[Qn]` 按顺序解析、无记录退「最近一期锚点」；`[想问你-N]` 按最近一期锚点（周 id 折算周日）；只发锚点不带答案不吞；`qa_brief` 双端 as-of 栅栏；`open_questions(before_date=)`；`_day_as_date()`。
+- `scheduler.py`：夜间 QQ 正文 `_strip_questions` 剥掉「想问你」整节且不再 `mark_pushed`；`_qq_reply_guidance` 重写（只留订正 + 明早预告）；周报 `_seed_qa(week, …)`、7 天笔记 + 本周未答注入、`cap_weekly`、跳过 daily note、week id 不进版本计数。
+- `weekly_eval.py`：`评分 4 3` / `候选 1 3` / `候选 -2` / `候选 0` 前缀协议；`候选 0` 与确认混写判无效；提醒文案同步。
+- `audit.py`：`LastSeen.alt` 次近命中进 evidence；`cap_weekly`（保首节与打分节）；backfill 汇总改读全部 v1；无锚清单剥重复锚点；基线文案「最近提及」。
+- `tools/audit_tools.py`：`before_date` 校验 + 缺省走 `runtime.as_of_day()`，返回 `alt`。
+- `weekly_stats.py`：`_qa_counts` 用 `_day_as_date` 把 week id 折到周日。
+- `daily_info_pack.py`：`_QA` 未答清单给问题原文（cap 截断同步改为按条减问题）。
+- `config/schedule.json`：周报 prompt 的打分/候选操作说明改成前缀格式。
+
+**二轮检视补修（同日，3 个并行检视 agent 全 FAIL 后逐条修）**：
+- **编号仍会错位**（检视实测）：`_refresh_open_state` 按 open 集合过滤 `keys`，答掉 Q1 后编号前移，`[Q2]` 指到第 3 题 → `keys` 改为**不可变快照**（只由 `set_prompt_order` 整体替换），越界/已答返回 `None`，删掉全局位置兜底。
+- **第 3 次推送当天不可答**：`mark_pushed` 后立刻 `archive_stale`，刚展示就被归档 → 归档移到 `open_questions` 之前，第 3 次仍 open，下一轮才归档。
+- **裸答吞正常对话**：`Q3 财报什么时候发？` 被记成答案 → 显式回答必须带方括号；裸答追加「不像问句」护栏（`?`/`吗`/`什么`/`怎么`/`为什么`/`哪`/`谁`/`多少`/`是不是`/`有没有`）。
+- **`cap_weekly` 删掉交互节 / 越界 1 字**：只认 `# `、保护集缺 `想问你`/`画像候选`，硬截断 `limit-1 + …` = limit+1 → 认 `#`/`##`/`###`，保护首节 + 三条变化/打分/想问你/画像候选，删无可删时压缩最长节正文（保留标题），严格 `<= limit`。
+- **周报指令静默丢失**：已评分/窗口关闭返回 `None`，消息落进 agent 或被裸答吞 → 明确回执；`try_answer` 见 `评分|候选` 前缀直接返回 `None`。
+- **越界候选半成功**：先全量校验编号再落库，越界整条拒绝并回执。
+- **backfill 口径打架**：`reports` 只数日报 md，claims 数全部 v1 → `reports` = 全部 `*.v1.json`，`dailies` 单独计数。
+- **非补零日期崩**：`strptime` 放行 `2026-1-5` 后 `fromisoformat` 抛错 → 直接用 `date.fromisoformat` 严格校验。
+- **`## 想问你` 漏闸**：`cap_questions` / `_strip_questions` 共用「去掉 `#` 后等于「想问你」」判定；只剩问题节时剥完为空不推（不抛 IndexError）。
+- **`_build_qa`**：表头按实际渲染数量；对半减时保留尾部（最新一期）。
+
+**实测验证**：
+- 新增/改写测试：一轮 12 例（跨天 `[Q1]`、展示顺序、锚点裸发、as-of 栅栏、week id 折算、前缀协议、裸数字不撞车、周报种子、7 天语料注入、`alt`、`cap_weekly`、夜间剥节）+ 二轮 12 例（答后编号不前移、越界不猜、`Q3 …` 不被吞、`评分/候选` 不被吞、`##` 标题切节、硬截断 ≤limit、非 ISO 日期报错、backfill 周报 v1 口径、只剩问题节不推、第 3 次仍可答、候选越界整条拒绝、`os.replace` 重试）。
+- 全量 `pytest -p no:randomly`：**1674 passed, 1 skipped**；`ruff check` 全绿。
+- 真实数据：`last_seen('工学椅','2026-10-12')` → 10-06（6 天，alt 09-22/09-20）；`last_seen('硬件','2026-10-20')` → 10-07（13 天），两条 R2 冲突仍成立。
+- 真实周报首期（2026-W43）20:48 由旧代码产出（3995 字节、含 3 条提问 + 1 条候选），**未带 7 天语料、未种入 qa 库、用的是旧回复格式**——修复需重启 gacore 后对 W43 重跑才生效。
+
+**偏差说明**：
+- 59 篇 v1 快照是 P1 期冻结的（当时 `_scan_reports` 未接入），10-20 的 v1 证据是 10-03，今天重算得 10-07（仍冲突）；审计 JSON 无 `auditor_version` 字段，混版本快照无法区分（遗留项）。
+- `test_proactive_p2::test_answered_topics_lru_trimmed` 全量跑偶发失败（3 次全量里 2 次，含 `-p no:randomly`），单跑/同组跑通过。**已定位根因并修复**：`proactive.save_state` 的 `os.replace` 在 Windows 上被杀毒/索引器瞬时占用抛 `WinError 5`（该用例连写 60 次必现），已加 5 次退避重试；复跑全量 1674 passed 全绿。
+- 按用户指示本轮**未提交**。
+
+**待办更新**：
+- [ ] 重启 gacore 让本轮修复生效（当前进程仍是 20:44 加载的旧代码 + 旧 schedule.json）
+- [ ] （可选）`python -m gacore.rerun --week 2026-W43` 用新链路重生成首期周报
+- [ ] 审计结果 JSON 补 `auditor_version` 字段（区分混版本 v1）
+- [x] `proactive.save_state` 的 `os.replace` 加退避重试（修全量套件偶发 `WinError 5`）
+
+## 2026-10-25 · KG 实体合并 P1 落地（kg-entity-registry-design §5.1/§4.3/§8.1）
+
+**背景**：用户确认设计方向（§5.2.6 名字约束并入设计稿），按 P1→P3 顺序推进。此前 P1-P5 代码零起点。
+
+**已完成**：①`extract/schema.py`——`_migrate_kg_alias_review_cols`（kg_aliases 补 reviewer/reason，存在性探测幂等，不占 user_version）+ `ensure_entity_views`（kg_alias_active / kg_entity_map 递归链 / kg_resolved_node_members / kg_resolved_nodes / kg_resolved_edges / kg_resolved_edges_agg / kg_resolved_relations 七视图，DROP+CREATE 刷新定义）；②`langTrack/entity_merge.py`——list_candidates（exact/fuzzy 行 + 同 label 组 + 共享显式 alias 三源，去重、排 active/rejected pair）/ preview_merge（纯读校验 + 影响统计）/ merge_nodes（terminal 解析 + 单事务 manual 行）/ reject_merge / revoke_merge（自指行 + superseded_by 反向指针，链式恢复）/ resolve_node + CLI（--list/--preview/--merge/--reject/--revoke/--db）。
+
+**实测验证**：`test_entity_merge.py` 10 例（T1 迁移幂等 raw 不变/T2 审计列/T3 视图覆盖/T5 manual 合并折叠+raw 不变+幂等/T6 链式合并与撤销恢复/T7 reject 抑制候选/T8 同点·类型·缺失·环守卫/T9 自环过滤/T10 聚合代表取最新非 MAX/候选三源与排除/CLI）→ 全仓 1740 passed + ruff 绿。修两处实现缺陷：dt==keep_id 误判环（实为已合并幂等态）、同秒 manual run_id PK 冲突（时间戳+进程序号）。
+
+**偏差说明**：视图族含设计 §4.3 提到的 kg_resolved_relations（设计标注"第一版至少接上"）；ROADMAP 本条与并行会话的评测修订记录同文件，随其工作区改动一并入库。
+
+**待办更新**：
+- [ ] P2：self 回填 + resolve_alias 只认 manual/self/linker + kg_view/日报切 resolved（T4/T11/T12）
+- [ ] P3：抽取硬约束 prompt v2 + validator + linker + grounded（T13/T14/T14b/T14c）
+- [ ] P4：/kg audit 合并 UI
