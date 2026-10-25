@@ -9,6 +9,7 @@ from gacore.audit import (
     audit_report,
     backfill,
     cap_questions,
+    cap_weekly,
     extract_claims,
     find_topic,
     is_conflict,
@@ -186,6 +187,17 @@ def test_last_seen_tool_resolves_via_config_default(tmp_path, monkeypatch):
     assert out["date"] == "2026-10-03"
 
 
+def test_last_seen_tool_rejects_non_iso_date(tmp_path, monkeypatch):
+    """非补零日期（2026-1-5）必须直接报 error，不能放行后崩在 fromisoformat。"""
+    cfg = Config.for_tests(tmp_path)
+    monkeypatch.setattr(Config, "default", classmethod(lambda cls: cfg))
+    from gacore.tools.audit_tools import last_seen as last_seen_tool
+
+    out = last_seen_tool.invoke({"topic": "硬件", "before_date": "2026-1-5"})
+    assert out["found"] is False
+    assert "error" in out
+
+
 def test_daily_report_prompt_carries_audit_contract():
     """schedule.json 的 daily-report prompt 必须带查表契约与想问你节（P2 接入，防回归）。"""
     schedule = Path(__file__).resolve().parents[1] / "config" / "schedule.json"
@@ -356,6 +368,90 @@ def test_backfill_skips_existing_v1(tmp_path):
     assert summary["reports"] == 2
     assert summary["conflicts"] == 1
     assert (cfg.logs_dir / "report_audit" / "2026-10-20.v1.json").is_file()
+    # 第二次跑（全部命中已有 v1）汇总仍须与 baseline 一致（决策 38）
+    again = backfill(cfg)
+    assert again["conflicts"] == 1
+    assert again["claims"] == summary["claims"]
+
+
+def test_backfill_reports_counts_all_v1_not_just_dailies(tmp_path):
+    """周报 v1 也在 report_audit 下：reports 口径 = 全部 v1 快照，dailies 单独计数。"""
+    cfg = Config.for_tests(tmp_path)
+    reports = cfg.logs_dir / "delivered_report"
+    reports.mkdir(parents=True)
+    (reports / "2026-10-19.md").write_text("# 今日状态\n- [今日状态-1] 一切正常\n", encoding="utf-8")
+    audit_dir = cfg.logs_dir / "report_audit"
+    audit_dir.mkdir(parents=True)
+    (audit_dir / "2026-W42.v1.json").write_text(
+        json.dumps({"date": "2026-W42", "claims": [], "findings": []}), encoding="utf-8"
+    )
+    summary = backfill(cfg)
+    assert summary["dailies"] == 1
+    assert summary["reports"] == 2
+
+
+def test_last_seen_reports_alternative_hits(tmp_path):
+    """回溯提及会把"最近提及"拉近；alt 带上次近日期供人判断（决策 37）。"""
+    cfg = Config.for_tests(tmp_path)
+    daily = cfg.memory_dir / "daily"
+    daily.mkdir(parents=True)
+    (daily / "2026-09-15.md").write_text("工学椅又看了\n", encoding="utf-8")
+    (cfg.memory_dir / "global_mem_facts.txt").write_text(
+        "[2026-10-06] insight: 桌面升级（顺带提到工学椅）\n", encoding="utf-8"
+    )
+    seen = last_seen(cfg, "工学椅", "2026-10-12")
+    assert seen.date == "2026-10-06" and seen.gap_days == 6
+    assert seen.alt and seen.alt[0].startswith("2026-09-15")
+
+
+def test_cap_weekly_drops_tail_sections_but_keeps_rating():
+    body = (
+        "# 本周一句话\n- 一句话\n\n"
+        "# 三条变化\n" + "- 变化 " + "长" * 900 + "\n\n"
+        "# 给这周打分\n- 回复「评分 4 3」\n"
+    )
+    gated, dropped = cap_weekly(body, limit=300)
+    # 三条变化是核心节：宁可压缩正文也不整节删（dropped 只计整节删除）
+    assert dropped == 0
+    assert len(gated) <= 300
+    assert "# 本周一句话" in gated
+    assert "# 三条变化" in gated
+    assert "# 给这周打分" in gated
+    assert "评分 4 3" in gated
+
+
+def test_cap_weekly_short_body_untouched():
+    body = "# 本周一句话\n- 短\n"
+    assert cap_weekly(body, limit=300) == (body, 0)
+
+
+def test_cap_weekly_h2_headings_still_keep_interactive_sections():
+    """模型把标题降级成 `##` 时也要按节删减，且三个交互节不能被删。"""
+    body = (
+        "## 本周一句话\n- 一句话\n\n"
+        "## 三条变化\n" + "- 变化 " + "长" * 600 + "\n\n"
+        "## 想问你\n- [想问你-1] 问题（依据：10-25）\n\n"
+        "## 画像候选\n- [候选-1] 候选\n\n"
+        "## 给这周打分\n- 回复「评分 4 3」\n"
+    )
+    gated, dropped = cap_weekly(body, limit=300)
+    assert dropped == 0
+    assert len(gated) <= 300
+    assert "## 给这周打分" in gated
+    assert "评分 4 3" in gated
+    assert "想问你-1" in gated and "候选-1" in gated
+
+
+def test_cap_weekly_hard_truncate_keeps_rating_within_limit():
+    """首节自身超限时：压缩首节、保住打分节，且结果严格 <= limit（含省略号）。"""
+    body = (
+        "# 本周一句话\n" + "- " + "长" * 800 + "\n\n"
+        "# 给这周打分\n- 回复「评分 4 3」\n"
+    )
+    gated, _dropped = cap_weekly(body, limit=200)
+    assert len(gated) <= 200
+    assert "# 给这周打分" in gated
+    assert "评分 4 3" in gated
 
 
 # ------------------------------------------------------ Task 5: 基线报告

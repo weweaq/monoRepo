@@ -14,8 +14,9 @@ import argparse
 import json
 import re
 from dataclasses import asdict, dataclass, replace
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
+from typing import Final
 
 from gacore.config import Config, load_dotenv
 from gacore.jsonl_logger import get_logger
@@ -167,6 +168,7 @@ class LastSeen:
     gap_days: int | None
     source: str
     snippet: str
+    alt: tuple[str, ...] = ()
 
 
 def find_topic(text: str) -> str | None:
@@ -280,7 +282,11 @@ def _scan_reports(cfg: Config, synonyms: tuple[str, ...], before_date: str) -> l
 
 
 def last_seen(cfg: Config, topic: str, before_date: str) -> LastSeen:
-    """在记忆三源 + 历史 v1 日报快照里查主题最近一次出现（严格早于 before_date）。"""
+    """在记忆三源 + 历史 v1 日报快照里查主题最近一次出现（严格早于 before_date）。
+
+    `alt` 带上次近的 1-2 个命中日期（决策 37）：全局记忆里的回溯提及会把"最近提及"
+    拉得很近，单看一个日期会误导（如 10-06 顺带提到工学椅 vs 真实上次事件 9-15）。
+    """
     synonyms = _load_topic_synonyms(cfg).get(topic, (topic,))
     hits = (
         _scan_daily(cfg, synonyms, before_date)
@@ -289,9 +295,18 @@ def last_seen(cfg: Config, topic: str, before_date: str) -> LastSeen:
     )
     if not hits:
         return LastSeen(found=False, date=None, gap_days=None, source="", snippet="")
-    day_str, source, snippet = max(hits, key=lambda h: h[0])
-    gap = (datetime.strptime(before_date, "%Y-%m-%d").date() - date.fromisoformat(day_str)).days
-    return LastSeen(found=True, date=day_str, gap_days=gap, source=source, snippet=snippet)
+    ordered = sorted(hits, key=lambda h: h[0], reverse=True)
+    day_str, source, snippet = ordered[0]
+    base = date.fromisoformat(before_date)
+    days: list[str] = []
+    for d, _, _ in ordered:
+        if d not in days:
+            days.append(d)
+    alt = tuple(f"{d}（{(base - date.fromisoformat(d)).days} 天）" for d in days[1:3])
+    gap = (base - date.fromisoformat(day_str)).days
+    return LastSeen(
+        found=True, date=day_str, gap_days=gap, source=source, snippet=snippet, alt=alt
+    )
 
 
 # ------------------------------------------------------- Task 3: 冲突判定与单篇审计
@@ -382,7 +397,8 @@ def _audit_claims(cfg: Config, claims: list[Claim], before_date: str) -> tuple[F
                     Finding(
                         rule="R2", severity="error", section=claim.section, anchor=claim.anchor,
                         claim=claim.text, claimed_days=claim.claimed_days,
-                        actual_last_seen=seen.date, actual_gap_days=seen.gap_days, evidence=seen.source,
+                        actual_last_seen=seen.date, actual_gap_days=seen.gap_days,
+                        evidence=seen.source + (f"；次近 {'、'.join(seen.alt)}" if seen.alt else ""),
                     )
                 )
                 continue
@@ -449,7 +465,12 @@ logger = get_logger("audit")
 
 # 想问你硬闸（spec §5.3）：P2 只做条数上限与依据锚检查；key 去重随 P3 qa 落库一起
 QUESTION_LIMIT: int = 5
-_QUESTION_HEADING = "# 想问你"
+
+
+def _is_question_heading(line: str) -> bool:
+    """`# 想问你` / `## 想问你` 都认（模型常把标题降级，不认就会漏闸）。"""
+    stripped = line.strip()
+    return stripped.startswith("#") and stripped.lstrip("#").strip() == "想问你"
 
 
 def cap_questions(reply: str, *, limit: int = QUESTION_LIMIT) -> tuple[str, bool]:
@@ -464,7 +485,7 @@ def cap_questions(reply: str, *, limit: int = QUESTION_LIMIT) -> tuple[str, bool
     i = 0
     while i < len(lines):
         line = lines[i]
-        if line.strip() != _QUESTION_HEADING:
+        if not _is_question_heading(line):
             out.append(line)
             i += 1
             continue
@@ -492,6 +513,80 @@ def cap_questions(reply: str, *, limit: int = QUESTION_LIMIT) -> tuple[str, bool
     return result, changed
 
 
+WEEKLY_LIMIT: int = 1200  # 周报正文硬上限（spec §5.4：丰富在结构不在字数）
+_SECTION_RE: Final = re.compile(r"^#{1,3}\s")
+# 核心节：删掉它们等于把「这周发生了什么 / 评分 / 提问 / 画像候选」四条主线打断，长度再紧也要保
+_WEEKLY_KEEP_HINTS: Final = ("三条变化", "给这周打分", "想问你", "画像候选")
+
+
+def _split_sections(reply: str) -> list[tuple[str, list[str]]]:
+    """按 `#`/`##`/`###` 标题切节；首个标题前的引言单独成节（head=""）。"""
+    sections: list[tuple[str, list[str]]] = []
+    for line in reply.splitlines():
+        if _SECTION_RE.match(line):
+            sections.append((line, [line]))
+        elif sections:
+            sections[-1][1].append(line)
+        else:
+            sections.append(("", [line]))
+    return sections
+
+
+def _render_sections(sections: list[tuple[str, list[str]]], keep: list[bool]) -> str:
+    out: list[str] = []
+    for flag, (_, body) in zip(keep, sections):
+        if flag:
+            out.extend(body)
+    return "\n".join(out).strip() + "\n"
+
+
+def cap_weekly(reply: str, *, limit: int = WEEKLY_LIMIT) -> tuple[str, int]:
+    """周报长度硬闸（决策 34）：超 `limit` 时从尾部整节删减，再按最长节压缩正文，最后硬截断。
+
+    保护首节与核心节（`三条变化` / `给这周打分` / `想问你` / `画像候选`）——删节从尾部往前，
+    先牺牲纯信息节（数字、一条你可能没注意到的、上周回看、本周未解）。仍超时**只压缩最长节
+    的正文并保留其标题**（不整节删核心内容），极端情况才硬截断。返回 (正文, 删掉的节数)；
+    保证 `len(正文) <= limit`。
+    """
+    if len(reply) <= limit:
+        return reply, 0
+    sections = _split_sections(reply)
+    protected = {0} | {
+        i
+        for i, (head, _) in enumerate(sections)
+        if any(hint in head for hint in _WEEKLY_KEEP_HINTS)
+    }
+    keep = [True] * len(sections)
+    dropped = 0
+    for i in range(len(sections) - 1, -1, -1):
+        if len(_render_sections(sections, keep)) <= limit:
+            break
+        if i in protected:
+            continue
+        keep[i] = False
+        dropped += 1
+    body = _render_sections(sections, keep)
+    if len(body) <= limit:
+        return body, dropped
+    # 仍超：压缩"最长的那一节正文"，每次至少砍 40 字，保留标题（结构不丢）
+    for _ in range(200):
+        if len(body) <= limit:
+            return body, dropped
+        candidates = [i for i, (_, lines) in enumerate(sections) if keep[i] and len(lines) > 1]
+        if not candidates:
+            break
+        idx = max(candidates, key=lambda i: len("\n".join(sections[i][1])))
+        lines = sections[idx][1]
+        text = "\n".join(lines[1:])
+        cut = max(len(body) - limit, 40)
+        keep_len = max(0, len(text) - cut)
+        lines[1:] = ([text[:keep_len].rstrip() + "…"] if keep_len > 0 else [])
+        body = _render_sections(sections, keep)
+    if len(body) <= limit:
+        return body, dropped
+    return body[: limit - 2].rstrip() + "…\n", dropped
+
+
 _VERSION_RE_CACHE: dict[str, re.Pattern[str]] = {}
 
 
@@ -514,20 +609,35 @@ def write_audit(cfg: Config, result: AuditResult) -> Path:
 
 
 def backfill(cfg: Config) -> dict[str, int]:
-    """遍历全部已投递日报：无 v1 快照的审计并落 v1；已有 v1 的跳过（历史基线只认 v1）。"""
-    summary = {"reports": 0, "claims": 0, "bare": 0, "conflicts": 0}
+    """遍历全部已投递日报：无 v1 快照的审计并落 v1；已有 v1 的跳过（历史基线只认 v1）。
+
+    汇总口径 = 全部 v1 快照（决策 38）：第二次跑也要给出与 baseline 一致的数字，
+    否则 `claims=0/conflicts=0` 会让人误以为基线空了。
+    """
+    summary = {"reports": 0, "dailies": 0, "claims": 0, "bare": 0, "conflicts": 0}
     reports_dir = cfg.logs_dir / "delivered_report"
-    if not reports_dir.is_dir():
-        return summary
-    for f in sorted(reports_dir.glob("*.md")):
-        summary["reports"] += 1
-        if (cfg.logs_dir / "report_audit" / f"{f.stem}.v1.json").is_file():
-            continue
-        result = audit_report(cfg, f.stem)
-        write_audit(cfg, result)
-        summary["claims"] += len(result.claims)
-        summary["bare"] += sum(1 for c in result.claims if not c.anchored)
-        summary["conflicts"] += sum(1 for x in result.findings if x.rule == "R2")
+    audit_dir = cfg.logs_dir / "report_audit"
+    if reports_dir.is_dir():
+        for f in sorted(reports_dir.glob("*.md")):
+            summary["dailies"] += 1
+            if (audit_dir / f"{f.stem}.v1.json").is_file():
+                continue
+            result = audit_report(cfg, f.stem)
+            write_audit(cfg, result)
+    if audit_dir.is_dir():
+        for f in sorted(audit_dir.glob("*.v1.json")):
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(data, dict):
+                continue
+            summary["reports"] += 1
+            claims = [c for c in data.get("claims", ()) if isinstance(c, dict)]
+            findings = [x for x in data.get("findings", ()) if isinstance(x, dict)]
+            summary["claims"] += len(claims)
+            summary["bare"] += sum(1 for c in claims if not c.get("anchored"))
+            summary["conflicts"] += sum(1 for x in findings if x.get("rule") == "R2")
     logger.info("audit backfill finished", **summary)
     return summary
 
@@ -568,13 +678,17 @@ def render_baseline(cfg: Config) -> str:
     for day, score, x in conflicts:
         lines.append(
             f"- **{day}**（score {score}）R2：{x.get('claim', '')}"
-            f" —— 声称 {x.get('claimed_days')} 天，实际 {x.get('actual_gap_days')} 天"
+            f" —— 声称 {x.get('claimed_days')} 天，最近提及 {x.get('actual_gap_days')} 天"
             f"（{x.get('actual_last_seen')}，{x.get('evidence')}）"
         )
     lines += ["", "## 无锚断言清单（最多 50 条）", ""]
     for day, c in bare[:50]:
         anchor = f"[{c['anchor']}] " if c.get("anchor") else ""
-        lines.append(f"- {day} {anchor}{c.get('text', '')}")
+        text = str(c.get("text", ""))
+        prefix = f"- [{c['anchor']}] " if c.get("anchor") else ""
+        if prefix and text.startswith(prefix):
+            text = text[len(prefix):]
+        lines.append(f"- {day} {anchor}{text}")
     return "\n".join(lines) + "\n"
 
 
