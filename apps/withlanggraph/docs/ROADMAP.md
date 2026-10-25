@@ -4339,3 +4339,32 @@ batterystats 实测 weiCheckApp 耗电 67.7 mAh，其中 GNSS 64.4 mAh（引擎�
 - [x] 其余三个 app 路书迁入各自 `docs/ROADMAP.md`
 - [x] 根规则 R5 / `buildApp` skill / `monorepo-guide` / `check.ps1` 指针全量对齐
 - [x] 约定变更记入 ADR-0002
+
+## 2026-10-25 · 日报断言基线闸 P1（audit 离线审计落地）
+
+**背景**：P0 探针（2026-10-24）实测 58 篇已投递日报：30 条时间量级断言、17 条无锚（56.7%）、2 条与记忆库硬冲突（10-20「硬件线半年沉寂」实际 17 天、10-12「工学椅时隔两个月」实际 ≤27 天）。根因：数字靠语感不靠查表。评测设计（`docs/superpowers/specs/2026-10-24-daily-report-eval-design.md`，28 条决策）与 P1 实施计划（`docs/superpowers/plans/2026-10-24-daily-report-audit-p1.md`）已定稿入库，本轮按计划 TDD 执行 P1：离线审计产品化，**不改日报生成与投递逻辑**。
+
+**已完成**（按 Task 分 6 笔提交）：
+- `src/gacore/audit.py`（新增约 380 行）：`parse_duration_days` 中文量级→天数；`extract_claims` 遮蔽 `《》「」“”`/`**…**`/HH:MM/第N期后**同子句**（中间无句读标点）配对量级与断言词（距离 ≤12）；`find_topic` + `last_seen`（只读记忆三源 `memory/daily/*.md` + `global_mem_insight.txt` + `global_mem_facts.txt`，严格早于报告日，source 带行号）；`is_conflict` 容差带（claimed ≥ 2×actual 且差 ≥ 14 天，决策 14）；`_audit_claims` 规则闸 R2>R4>R1 单断言单 finding；`write_audit` 版本化落盘（v1 永不覆盖 + `report_text` 冻结，决策 13/23）；`backfill` + `render_baseline` + `python -m gacore.audit --backfill` CLI。
+- `config/audit_topics.json`：主题词表外置（决策 28），存在时整体覆盖内置初值，改词表不动代码。
+- `tests/test_audit.py` 15 例封闭测试（`Config.for_tests` 临时语料，含词表覆盖用例）。
+- 架构图 `AUD` 节点 + 两条边（SC -.已投递日报.-> AUD、MM -.记忆基线.-> AUD）；mermaid-viewer 断言行号同步（FB 95 / 日报正文 122）并 ALL PASS。
+- tech 文档新增 §9.34（接口表 / 数据流小图 / v1 冻结语义 / 实测表）。
+
+**实测验证**：
+- `uv run pytest apps/withlanggraph/tests/test_audit.py -q` → **15 passed**；ruff 全绿；`node apps/mermaid-viewer/tests/check_prompt_logic.js` → ALL PASS。
+- 真实语料 backfill：`{"reports": 59, "claims": 29, "bare": 16, "conflicts": 2}`；59 个 `{date}.v1.json` + `baseline.md`（v1 均分 98）落 `logs/report_audit/`；二次运行全跳过（v1 只写一次）。
+- 两条硬冲突命中且带证据链：**10-20** 声称 180 天 vs 实际 17 天（`memory/daily/2026-10-03.md`）；**10-12** 声称 60 天 vs 实际 **6 天**（`memory/global_mem_facts.txt:51`——10-06 仍在提工学椅，比设计文档估的 27 天更实锤）。
+
+**偏差说明**：
+- 计划写 58 篇，实测 **59**（10-24 深夜又投递一篇）；claims 29 / bare 16 与 P0 的 30 / 17 同量级，无锚少的那 1 条即 P0 唯一误报「养老口号 40 年」——本轮新增「句读分隔不算同子句」规则将其排除（计划文字未写该规则，Task 1 测试要求排除引文量级，属实现补全）。
+- 接口偏差：`AuditResult` 较计划多 `report_text`（决策 23）与 `claims`（backfill 计数与 baseline 无锚清单需要）两字段；规则闸按单断言单 finding（R2>R4>R1）执行，避免同一断言被 R1/R4 双计扣分。
+- 决策 28 的词表外置计划原文写「P1 从记忆库高频主题导出初版」；实际初值沿用计划的 4 主题（硬件/工学椅/显示器/桌面升级），「高频导出 + 人工过一遍」留待观察漏报后扩充。
+- 本会话无 codemap skill 可调用，架构图按「节点可回溯真实符号」原则人工核对 AUD 节点全部符号（`extract_claims`/`parse_duration_days`/`last_seen`/`is_conflict`/`write_audit`/`render_baseline` 均存在）后落盘。
+- `logs/report_audit/` 为运行时产物不入库（R11）。
+
+**待办更新**：
+- [x] P1 验收全绿：15 测试通过、真实 backfill 跑通、两条硬冲突命中、baseline.md 生成、`scheduler.py` 零改动
+- [ ] P2：`schedule.json` 加 `last_seen` 契约 + `# 想问你` 节 + `save_delivered` 后挂审计钩子（默认只标记）+ R5 跨篇规则 + `last_seen` 读历史日报走 v1 `report_text`
+- [ ] P3：proactive job（次日 08:30 QQ 推送，决策 25）+ `proactive_qa` 处理器 + `data/qa/` 落库 + `_QA` 源（cap 600 字，决策 24）
+- [ ] P4：周报（程序填数字 + 模型写叙事）+ 评分两问 + 周趋势；周报同样过 `_audit_claims`

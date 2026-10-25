@@ -2135,3 +2135,61 @@ uv run python -m gacore.langTrack.kg_view --out-dir data/kg_view
 - 时间轴按 `kg_runs.day`，不是事件真实发生时间；`kg_edges.event_time` 尚未用于回放。
 - `day_stats.new_edges` 按去重边的“保留日”（该 `(from,to,relation)` 最后一次再确认日）计数，不是首见日；因此某天的“新增边”可能包含旧关系的再确认。若后续要严格首见语义，需在快照里补 `first_day`/`last_day`。
 - 关系链视图未进首版，`links` 已预留。
+
+## 9.34 日报断言基线闸：audit 离线审计 + v1 冻结 + 基线报告（2026-10-25）
+
+> 设计：`docs/superpowers/specs/2026-10-24-daily-report-eval-design.md`（28 条决策）；实施计划：`docs/superpowers/plans/2026-10-24-daily-report-audit-p1.md`。P1 只做离线审计，**不改日报生成与投递**（`scheduler.py` 零改动）。
+
+### 定位
+
+`gacore/audit.py` 是纯离线模块：读已投递日报与记忆库文件，输出带分数的审计 JSON 与历史基线报告。不联网、不调 LLM、不写业务库；所有输入经 `Config` 注入（测试用 `Config.for_tests(tmp_path)`）。
+
+### 数据流
+
+```mermaid
+flowchart LR
+    R["logs/delivered_report/{date}.md"] --> EC["extract_claims<br/>遮蔽引文/时刻→同子句配对<br/>量级×断言词 距离≤12"]
+    EC --> RULES["_audit_claims<br/>R2 容差带(≥2×且≥14d) error<br/>R1 量级无锚 / R4 首现无先例 warn<br/>单断言单 finding R2>R4>R1"]
+    M["memory/daily/*.md<br/>global_mem_insight.txt<br/>global_mem_facts.txt"] --> LS["last_seen(topic, before_date)<br/>严格早于报告日的最近出现<br/>source 带文件行号"]
+    LS --> RULES
+    RULES --> WA["write_audit<br/>logs/report_audit/{date}.vN.json<br/>v1 冻结 report_text(决策 23)"]
+    WA --> BL["render_baseline<br/>baseline.md 总览+冲突+无锚"]
+```
+
+### 接口
+
+| 符号 | 说明 |
+|---|---|
+| `parse_duration_days(text) -> int \| None` | 「半年」180 /「两个月」60 /「三周」21 /「4 日」4；「几周」等换算不了返回 None |
+| `extract_claims(report_text) -> list[Claim]` | 按行扫：`#` 节标题、`-[锚-N]` bullet 锚点；遮蔽 `《》「」“”`、`` `…` ``、`**…**`、`HH:MM`、`第N期/集/话/章` 后，量级与断言词**同子句**（中间无句读标点）且距离 ≤12 才算断言；`anchored` = 行内含日期 / 上次 / 第 N 天 / 至今等基线锚 |
+| `TOPIC_SYNONYMS` / `find_topic(text)` | 内置主题词表（硬件/工学椅/显示器/桌面升级）；漏配 fail-open（查不到不判冲突） |
+| `config/audit_topics.json` | 决策 28：主题词表外置，存在时**整体覆盖**内置初值（改词表不动代码），解析失败回退内置 |
+| `last_seen(cfg, topic, before_date) -> LastSeen` | 记忆三源只读；`found/date/gap_days/source/snippet`，snippet 取命中前后各 40 字 |
+| `is_conflict(claimed_days, actual_gap_days) -> bool` | 容差带（决策 14）：`claimed ≥ 2×actual` 且 `claimed − actual ≥ 14` |
+| `audit_report(cfg, date) -> AuditResult` | 单篇审计；文件缺失返回 `missing=True` 占位不抛异常；分数 `max(0, 100 − 25×error − 5×warn)` |
+| `write_audit(cfg, result) -> Path` | 版本化落盘：同日期已有 vN 写 v(N+1)，**v1 永不覆盖**；JSON 含 `report_text`（投递原文冻结）与 `claims` 全量 |
+| `backfill(cfg) -> dict` | 遍历全部已投递日报，已有 v1 跳过；汇总 `reports/claims/bare/conflicts` |
+| `render_baseline(cfg) -> str` | 读全部 v1 汇总：总览（篇数/断言/无锚/冲突/v1 均分）+ 硬冲突清单（按分数升序）+ 无锚清单（≤50 条） |
+
+CLI：`uv run python -m gacore.audit --backfill`（stdout 打印汇总 JSON 属 CLI 结果输出，允许 `print`；运行日志走 `get_logger("audit")`）。
+
+### v1 冻结语义（审计冻结点）
+
+`logs/delivered_report/{date}.md` 会被订正就地重写，因此审计按版本落 `{date}.v{n}.json`；**v1 是首次审计快照并冻结投递原文**（`report_text` 字段，决策 13/23），历史基线与周均值一律用 v1。`last_seen` 的记忆三源不受此影响；P2 的 `last_seen` 若读历史日报，只读 v1 的 `report_text`，不读被订正的当前文件。
+
+### 实测（2026-10-25，真实语料）
+
+`{"reports": 59, "claims": 29, "bare": 16, "conflicts": 2}`，v1 均分 98。两条 R2 硬冲突：
+
+| 日期 | 断言 | 声称 | 实际 | 证据 |
+|---|---|---|---|---|
+| 2026-10-12 | 工学椅调研时隔两个月重启 | 60 天 | 6 天（2026-10-06） | memory/global_mem_facts.txt:51 |
+| 2026-10-20 | 硬件线半年沉寂后重新点火 | 180 天 | 17 天（2026-10-03） | memory/daily/2026-10-03.md |
+
+与 P0 探针（58 篇：30 断言 / 17 无锚 / 2 冲突）同量级；多出的 1 篇是 10-24 深夜新投递，无锚少的 1 条是 P0 唯一误报「养老口号 40 年」（被同子句规则排除）。
+
+### 已知边界
+
+- 主题词表只覆盖 4 主题，新主题不补 `config/audit_topics.json` 则 R2 漏报（fail-open 不误报）。
+- R5（计数自相矛盾，跨篇语料）P1 不实现，随 P2 做。
+- 阻断开关不存在（决策 2：P1 只标记）；连续 3 期 error 升级机制随 P2 的 `save_delivered` 钩子一起评估。

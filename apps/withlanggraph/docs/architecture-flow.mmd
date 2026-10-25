@@ -69,6 +69,7 @@ flowchart TD
         EX["KG 抽取层 langTrack/extract<br/>python -m gacore.langTrack.extract<br/>material.load_material(day,cfg)<br/>channels/{events,relations,todos,emotions,patterns,worldview}.SPEC<br/>runner.run_extract：六通道并发 gather<br/>+ 逐通道素材路由 Material.select(spec.sources)<br/>+ 单通道超时兜底(KG_EXTRACT_CHANNEL_TIMEOUT,默认900s)<br/>抽取 LLM 预算(gacore.llm·KG_EXTRACT_LLM_TIMEOUT默认600s·max_retries=0)<br/>+ 落库前按通道替换当日旧行(_clear_channel_rows·day+src·同事务)·空/0行保旧<br/>运行级日志 run_start/run_end + 通道 _log_channel→logs/&lt;day&gt;/app.jsonl + kg_runs.channel_stats(含 long_term_share·≥0.6 落 kg_material_long_term_dominant 告警·只体检不改配比)<br/>+ _extract_channel 内被删 triple 精确 reclose_intervals<br/>→ resolve.resolve_entities + intervals.reclose_day(当日) (后处理)"]
         KG[("langTrack.db kg_* 表<br/>kg_runs/kg_nodes/kg_edges<br/>kg_relations/kg_aliases<br/>kg_emotions/kg_patterns/kg_worldview<br/>schema.migrate_extract_tables")]
         KV["KG 可视化 kg_view<br/>GET /kg?view=overview / timeline / audit<br/>python -m gacore.langTrack.kg_view --out-dir data/kg_view<br/>load_kg_snapshot 只读 SELECT · render_kg_html 三视图<br/>cytoscape 3.30.2 与快照 JSON 内联（无 CDN）"]
+        AUD["日报断言基线闸 gacore/audit.py<br/>python -m gacore.audit --backfill (P1 离线·不改生成与投递)<br/>extract_claims 遮蔽引文/时刻→同子句量级×断言词 距离≤12<br/>parse_duration_days 中文量级→天数<br/>TOPIC_SYNONYMS·find_topic→last_seen 记忆三源基线<br/>R2 容差带(claimed≥2×actual且差≥14d)·R1/R4 warn·单断言单finding(R2&gt;R4&gt;R1)<br/>write_audit {date}.vN.json 冻结 report_text(决策23·v1 永不覆盖)<br/>render_baseline→logs/report_audit/baseline.md(59篇·29断言/16无锚/2硬冲突/均分98)"]
         OC["opencode 免费模型适配器 gacore/opencode_llm.py<br/>OpencodeChatModel(BaseChatModel) · bind_tools 非空即拒绝<br/>POST /session → POST /session/{id}/message → DELETE /session/{id}<br/>_session_payload 只发 title（显式 permission 触发 403 FreeTierError）<br/>消息体只发 model/parts(/system/agent) · 无 tools 映射<br/>UA 默认不发（OPENCODE_CLIENT_UA 显式 opt-in；opencode/&lt;version&gt; 有条款/403 风险）<br/>model.variant=OPENCODE_VARIANT（抽取层 low，空=模型默认档）<br/>空 parts → OpencodeEmptyResponse(is_retryable=True) → runner 重试<br/>→ 本地 opencode serve 127.0.0.1:4096"]
     end
 
@@ -148,6 +149,8 @@ flowchart TD
     SIP -. "回退: build_info_pack_report detail_body (material._build_fresh)" .-> EX
     EX --> KG
     KG --> KV
+    SC -. "已投递日报 logs/delivered_report/*.md<br/>P1 离线 CLI 读取 · P2 挂 save_delivered 审计钩子" .-> AUD
+    MM -. "last_seen 只读基线<br/>memory/daily/*.md + global_mem_insight.txt + global_mem_facts.txt" .-> AUD
     KG -. "只读 kg_* 当日图摘要 (daily_info_pack._build_kg·_KG 源灰度开启)" .-> SIP
     SC -. "kg-extract job (type=extract·23:30)<br/>run_loop→EXTRACT_POOL→run_extract_job(day)<br/>不投递/不写日报" .-> EX
     EX -. "KG_EXTRACT_LLM_PROVIDER=opencode → runner._resolve_llm 建 OpencodeChatModel（交互 agent 仍按 LLM_PROVIDER）" .-> OC
@@ -194,7 +197,7 @@ flowchart TD
     class MDW side
     class TR,JD,AP,AU,TRN mem
     class T1,T2,T3,T4,T5,T6 tools
-    class IG,RW,ET,OU,EX,OC,KV lang
+    class IG,RW,ET,OU,EX,OC,KV,AUD lang
     class LG,RD,OPS out
     class FB bnd
     class KG state
