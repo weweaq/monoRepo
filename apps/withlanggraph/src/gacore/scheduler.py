@@ -36,6 +36,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Final
 
+from gacore.audit import audit_report, cap_questions, write_audit
 from gacore.config import Config, load_dotenv
 from gacore.feedback import save_delivered, stamp_report_bullets
 from gacore.heartbeat import Heartbeat, run_dir
@@ -572,7 +573,11 @@ def run_job(
             # 投递正文统一打 [节-序号] 锚点并落真相源：用户按锚点回指订正，
             # 反馈读写与邮件/QQ 看到的是同一份正文。钉锚失败绝不影响投递。
             try:
-                deliver_reply = stamp_report_bullets(reply)
+                # 想问你硬闸（spec §5.3）：>5 截断、无依据条删除，只动该节
+                gated, questions_gated = cap_questions(reply)
+                if questions_gated:
+                    logger.warning("report questions gated", job=name)
+                deliver_reply = stamp_report_bullets(gated)
                 save_delivered(
                     cfg, for_day or datetime.now(UTC).astimezone().date().isoformat(), deliver_reply
                 )
@@ -584,6 +589,16 @@ def run_job(
                     stack_trace=str(e),
                 )
                 deliver_reply = reply
+            # 投递后审计钩子（决策 2：只标记不阻断，位置在 save_delivered 与 _deliver 之间）
+            try:
+                _audit_delivered(cfg, for_day or datetime.now(UTC).astimezone().date().isoformat())
+            except Exception as e:  # noqa: BLE001 — audit must never break delivery
+                logger.error(
+                    "report audit hook failed",
+                    job=name,
+                    error_type=type(e).__name__,
+                    stack_trace=str(e),
+                )
         _deliver(job, cfg, deliver_reply, error, for_day=for_day)
     else:
         logger.info("delivery skipped (deliver=False)", job=name)
@@ -770,6 +785,19 @@ def _sync_episodic(cfg: Config, for_day: str | None) -> None:
     day = (for_day or datetime.now(UTC).astimezone().date().isoformat())
     result = vector_store.sync_episodic_daily(cfg, day)
     logger.info("episodic embedded for day", day=day, lines=result.get("lines"), stored=result.get("stored"))
+
+
+def _audit_delivered(cfg: Config, day: str) -> None:
+    """投递后离线审计（spec 决策 2：只标记不阻断）；结果按版本落盘，v1 冻结 report_text。"""
+    result = audit_report(cfg, day)
+    write_audit(cfg, result)
+    logger.info(
+        "report audited",
+        day=day,
+        score=result.score,
+        findings=len(result.findings),
+        errors=sum(1 for f in result.findings if f.severity == "error"),
+    )
 
 
 def _onboard_pack_path(cfg: Config) -> Path:

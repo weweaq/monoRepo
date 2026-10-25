@@ -427,6 +427,50 @@ def audit_report(cfg: Config, date: str) -> AuditResult:
 
 logger = get_logger("audit")
 
+# 想问你硬闸（spec §5.3）：P2 只做条数上限与依据锚检查；key 去重随 P3 qa 落库一起
+QUESTION_LIMIT: int = 5
+_QUESTION_HEADING = "# 想问你"
+
+
+def cap_questions(reply: str) -> tuple[str, bool]:
+    """对 `# 想问你` 节做确定性硬闸：条数 >5 截断、缺「依据」锚的条删除、清零则整节省略。
+
+    只动该节，其余正文逐字不变（_diff_gate 纪律）。返回 (处理后的正文, 是否发生改动)。
+    """
+    lines = reply.splitlines()
+    out: list[str] = []
+    changed = False
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.strip() != _QUESTION_HEADING:
+            out.append(line)
+            i += 1
+            continue
+        j = i + 1
+        bullets: list[str] = []
+        while j < len(lines) and not lines[j].lstrip().startswith("#"):
+            if lines[j].strip().startswith("- "):
+                bullets.append(lines[j].strip())
+            j += 1
+        kept = [b for b in bullets if "依据" in b][:QUESTION_LIMIT]
+        if len(kept) != len(bullets):
+            changed = True
+        if kept:
+            out.append(line)
+            out.extend(kept)
+        else:
+            changed = True
+            # 整节省略时顺带吃掉节后紧邻空行，避免遗留双空行
+            if j < len(lines) and lines[j].strip() == "":
+                j += 1
+        i = j
+    result = "\n".join(out)
+    if reply.endswith("\n"):
+        result += "\n"
+    return result, changed
+
+
 _VERSION_RE_CACHE: dict[str, re.Pattern[str]] = {}
 
 

@@ -8,6 +8,7 @@ from pathlib import Path
 from gacore.audit import (
     audit_report,
     backfill,
+    cap_questions,
     extract_claims,
     find_topic,
     is_conflict,
@@ -237,6 +238,55 @@ def test_r5_topic_unrecognized_fails_open(tmp_path):
     (reports / "2026-10-20.md").write_text("# 工作日志\n- [工作日志-1] 肉鸽连续第 5 天在刷\n", encoding="utf-8")
     got = audit_report(cfg, "2026-10-20")
     assert [f for f in got.findings if f.rule == "R5"] == []
+
+
+# --------------------------------------------- P2 Task 5: 想问你硬闸 + 审计钩子
+
+
+def test_cap_questions_truncates_and_drops_baseless():
+    bullets = [f"- [想问你-{i}] 铺垫{i}？（依据：10-24 数据）" for i in range(1, 8)]
+    bullets.append("- [想问你-8] 今天天气怎么样？")
+    reply = "# 今日状态\n- [今日状态-1] 正文A\n\n# 想问你\n" + "\n".join(bullets) + "\n\n# 明日计划\n- [明日计划-1] B\n"
+    capped, changed = cap_questions(reply)
+    assert changed is True
+    assert capped.count("- [想问你-") == 5
+    assert "天气" not in capped
+    # 其余正文逐字不动
+    assert "- [今日状态-1] 正文A" in capped
+    assert "- [明日计划-1] B" in capped
+
+
+def test_cap_questions_no_section_unchanged():
+    reply = "# 今日状态\n- [今日状态-1] 正文\n"
+    out, changed = cap_questions(reply)
+    assert out == reply
+    assert changed is False
+
+
+def test_cap_questions_all_dropped_removes_section():
+    reply = "# 想问你\n- [想问你-1] 今天心情如何？\n\n# 明日计划\n- [明日计划-1] x\n"
+    out, changed = cap_questions(reply)
+    assert changed is True
+    assert "# 想问你" not in out
+    assert "[明日计划-1] x" in out
+
+
+def test_cap_questions_within_limit_untouched():
+    reply = "# 想问你\n- [想问你-1] q1（依据：a）\n- [想问你-2] q2（依据：b）\n"
+    out, changed = cap_questions(reply)
+    assert out == reply
+    assert changed is False
+
+
+def test_scheduler_audit_delivered_writes_v1(tmp_path):
+    from gacore import scheduler
+
+    cfg = Config.for_tests(tmp_path)
+    reports = cfg.logs_dir / "delivered_report"
+    reports.mkdir(parents=True)
+    (reports / "2026-10-20.md").write_text("# 今日状态\n- [今日状态-1] ok\n", encoding="utf-8")
+    scheduler._audit_delivered(cfg, "2026-10-20")
+    assert (cfg.logs_dir / "report_audit" / "2026-10-20.v1.json").is_file()
 
 
 # ------------------------------------------------------------ Task 3: 冲突判定与单篇审计
