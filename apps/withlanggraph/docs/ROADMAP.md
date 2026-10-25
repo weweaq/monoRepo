@@ -4475,3 +4475,16 @@ batterystats 实测 weiCheckApp 耗电 67.7 mAh，其中 GNSS 64.4 mAh（引擎�
 
 **待办更新**：
 - [ ] 今晚 23:50 首次真实推送验证（分段数、送达、回复捕获）
+
+## 2026-10-25 · QQ 推送占位目标过滤（首推实测发现的 404）
+
+**背景**：日报 QQ 推送首跑（10-24 重跑 v3）：真实 openid 收到 2 段、审计 100 分、`asks=1` 触达计数生效，但 botpy 连续 404——`qq_known_users.json` 里 8 月底的占位残留 `user-1`/`admin-1` 不是合法 openid，每次推送都对着它们报错。
+
+**已完成**：`scheduler._qq_targets()`（32 位十六进制 openid 过滤，跳过计数入日志），`_push_daily_to_qq` 与 `weekly_eval.push_weekly_notice` 共用。
+
+**实测验证**：`test_daily_qq_push.py` +占位过滤例（3 用户只发真实格式 1 个）→ 相关 100 passed；ruff 绿。
+
+**偏差说明**：proactive 的 `_target_users` 仍用全量 known_users（晨安问候对占位条目同样 404），属既有行为，本次不动——观察到 `user-1`/`admin-1` 的 `last_seen` 仍被更新（有东西在喂它们），值得另查来源后一并清理。
+
+**待办更新**：
+- [ ] 查 `user-1`/`admin-1` 的 last_seen 更新来源并清理 known_users 残留
