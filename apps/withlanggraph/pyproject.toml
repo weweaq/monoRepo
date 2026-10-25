@@ -50,6 +50,9 @@ vector = [
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+gacore = ["langTrack/static/*"]
+
 # pytest 配置统一由仓库根 pyproject.toml 提供：应用级若保留 [tool.pytest.ini_options]，
 # pytest 跑 apps/withlanggraph 时会改用应用配置、绕开根配置的 --basetemp，
 # 从而踩 %TEMP% 遗留 ACL 坏符号链接的崩溃。

@@ -12,6 +12,9 @@ dist/
 .mypy_cache/
 tmp_pytest/
 
+# pytest basetemp 残留（kg_view 测试等，勿入库）
+.kgview_tmp/
+
 # Runtime data (DBs, logs, exports) — only the README is tracked
 data/*
 !data/README.md

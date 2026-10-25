@@ -1,4 +1,4 @@
-"""FastAPI 应用：POST /ingest 接收上报，GET /health 健康检查，GET /dashboard 仪表盘。"""
+"""FastAPI 应用：POST /ingest 接收上报，GET /health 健康检查，GET /dashboard 仪表盘，GET /kg KG 可视化。"""
 from __future__ import annotations
 
 import asyncio
@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 from contextlib import asynccontextmanager, suppress
+from html import escape
 from pathlib import Path
 from typing import Final
 
@@ -20,6 +21,7 @@ from gacore.heartbeat import DEFAULT_INTERVAL_SECONDS, Heartbeat, run_dir
 from gacore.jsonl_logger import get_logger
 from gacore.langTrack.dashboard import DB_PATH, build_map_day_data, render_dashboard_html
 from gacore.langTrack.etl import canonical_device_id
+from gacore.langTrack.kg_view import render_kg_html
 from gacore.langTrack.schemas import IngestRequest
 from gacore.langTrack.storage import Storage
 from gacore.ops import read_heartbeats
@@ -368,6 +370,36 @@ def create_app(storage: Storage, *, heartbeat_dir: Path | None = None) -> FastAP
             return render_dashboard_html(conn, day)
         finally:
             conn.close()
+
+    @app.get("/kg", response_class=HTMLResponse)
+    def kg(view: str = "overview") -> HTMLResponse:
+        """只读 KG 可视化：overview / timeline / audit 三视图。"""
+        conn: sqlite3.Connection | None = None
+        try:
+            conn = sqlite3.connect(f"{Path(DB_PATH).resolve().as_uri()}?mode=ro", uri=True)
+            return HTMLResponse(render_kg_html(conn, view))
+        except FileNotFoundError as exc:
+            logger.warning(
+                "kg view asset missing",
+                view=view,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+            )
+            return HTMLResponse("<h1>KG 视图暂不可用</h1><pre>前端资产缺失</pre>", status_code=503)
+        except sqlite3.Error as exc:
+            logger.warning(
+                "kg view query failed",
+                view=view,
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+            )
+            return HTMLResponse(
+                f"<h1>KG 视图暂不可用</h1><pre>{escape(str(exc))}</pre>",
+                status_code=503,
+            )
+        finally:
+            if conn is not None:
+                conn.close()
 
     @app.post("/etl/run")
     def etl_run() -> dict:
