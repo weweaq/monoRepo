@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import json
+
 from gacore.audit import (
     audit_report,
+    backfill,
     extract_claims,
     find_topic,
     is_conflict,
     last_seen,
     parse_duration_days,
+    write_audit,
 )
 from gacore.config import Config
 
@@ -131,3 +135,38 @@ def test_audit_report_missing_file(tmp_path):
     got = audit_report(cfg, "2026-01-01")
     assert got.missing is True
     assert got.findings == ()
+
+
+# --------------------------------------------------- Task 4: 版本化落盘与 backfill CLI
+
+
+def test_write_audit_freezes_v1(tmp_path):
+    cfg = Config.for_tests(tmp_path)
+    (cfg.logs_dir / "delivered_report").mkdir(parents=True)
+    (cfg.logs_dir / "delivered_report" / "2026-10-20.md").write_text(
+        "# 关键变化\n- [关键变化-1] 硬件线半年沉寂后重新点火\n", encoding="utf-8"
+    )
+    (cfg.memory_dir / "daily").mkdir(parents=True)
+    (cfg.memory_dir / "daily" / "2026-10-03.md").write_text("硬件", encoding="utf-8")
+    p1 = write_audit(cfg, audit_report(cfg, "2026-10-20"))
+    p2 = write_audit(cfg, audit_report(cfg, "2026-10-20"))
+    assert p1.name == "2026-10-20.v1.json"
+    assert p2.name == "2026-10-20.v2.json"
+    v1 = json.loads(p1.read_text(encoding="utf-8"))
+    assert v1["score"] == 75
+    # 决策 23：v1 冻结投递原文，last_seen 读历史日报一律走 v1 口径
+    assert v1["report_text"] == "# 关键变化\n- [关键变化-1] 硬件线半年沉寂后重新点火\n"
+
+
+def test_backfill_skips_existing_v1(tmp_path):
+    cfg = Config.for_tests(tmp_path)
+    reports = cfg.logs_dir / "delivered_report"
+    reports.mkdir(parents=True)
+    (reports / "2026-10-19.md").write_text("# 今日状态\n- [今日状态-1] 一切正常\n", encoding="utf-8")
+    (reports / "2026-10-20.md").write_text("# 关键变化\n- [关键变化-1] 硬件线半年沉寂\n", encoding="utf-8")
+    (cfg.memory_dir / "daily").mkdir(parents=True)
+    (cfg.memory_dir / "daily" / "2026-10-03.md").write_text("硬件", encoding="utf-8")
+    summary = backfill(cfg)
+    assert summary["reports"] == 2
+    assert summary["conflicts"] == 1
+    assert (cfg.logs_dir / "report_audit" / "2026-10-20.v1.json").is_file()

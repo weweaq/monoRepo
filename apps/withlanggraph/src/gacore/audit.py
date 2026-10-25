@@ -10,11 +10,15 @@
 
 from __future__ import annotations
 
+import argparse
+import json
 import re
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime
+from pathlib import Path
 
-from gacore.config import Config
+from gacore.config import Config, load_dotenv
+from gacore.jsonl_logger import get_logger
 
 # ---------------------------------------------------------------- Task 1: 断言抽取
 
@@ -330,3 +334,65 @@ def audit_report(cfg: Config, date: str) -> AuditResult:
         date=date, version=0, score=score, missing=False,
         findings=findings, report_text=text, claims=tuple(claims),
     )
+
+
+# ------------------------------------------------- Task 4: 版本化落盘与 backfill CLI
+
+logger = get_logger("audit")
+
+_VERSION_RE_CACHE: dict[str, re.Pattern[str]] = {}
+
+
+def write_audit(cfg: Config, result: AuditResult) -> Path:
+    """按版本落盘审计结果：同日期已有 vN 则写 v(N+1)，v1 永不覆盖（审计冻结点）。"""
+    out_dir = cfg.logs_dir / "report_audit"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pattern = _VERSION_RE_CACHE.setdefault(
+        result.date, re.compile(rf"{re.escape(result.date)}\.v(\d+)\.json$")
+    )
+    next_version = 1
+    for existing in out_dir.iterdir():
+        m = pattern.match(existing.name)
+        if m:
+            next_version = max(next_version, int(m.group(1)) + 1)
+    frozen = replace(result, version=next_version)
+    path = out_dir / f"{result.date}.v{next_version}.json"
+    path.write_text(json.dumps(asdict(frozen), ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def backfill(cfg: Config) -> dict[str, int]:
+    """遍历全部已投递日报：无 v1 快照的审计并落 v1；已有 v1 的跳过（历史基线只认 v1）。"""
+    summary = {"reports": 0, "claims": 0, "bare": 0, "conflicts": 0}
+    reports_dir = cfg.logs_dir / "delivered_report"
+    if not reports_dir.is_dir():
+        return summary
+    for f in sorted(reports_dir.glob("*.md")):
+        summary["reports"] += 1
+        if (cfg.logs_dir / "report_audit" / f"{f.stem}.v1.json").is_file():
+            continue
+        result = audit_report(cfg, f.stem)
+        write_audit(cfg, result)
+        summary["claims"] += len(result.claims)
+        summary["bare"] += sum(1 for c in result.claims if not c.anchored)
+        summary["conflicts"] += sum(1 for x in result.findings if x.rule == "R2")
+    logger.info("audit backfill finished", **summary)
+    return summary
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="日报断言基线闸：离线审计已投递日报")
+    parser.add_argument("--backfill", action="store_true", help="审计全部已投递日报并落 v1 快照")
+    args = parser.parse_args(argv)
+    if not args.backfill:
+        parser.print_help()
+        return 2
+    load_dotenv()
+    cfg = Config.default()
+    summary = backfill(cfg)
+    print(json.dumps(summary, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
