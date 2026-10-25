@@ -4449,3 +4449,16 @@ batterystats 实测 weiCheckApp 耗电 67.7 mAh，其中 GNSS 64.4 mAh（引擎�
 - [ ] gacore 重启：P2 查表契约/审计钩子、P3 提问回路、P4 周报调度一次性生效
 - [ ] 首周观察：审计分周均、回答率、周报评分回收率（spec §9 验收表）；4 周后按体感调权重（§7）
 - [ ] 主题词表从记忆库高频主题导出扩充（决策 28 尾巴）
+
+## 2026-10-25 · rerun 通道扩展：周报历史周重跑（--week）
+
+**背景**：用户要求预留日报/周报重跑通道，以便亲自答题、补充、打分——并以上周（2026-W42）数据为例先跑一遍周报验证全链路。日报重跑通道已存在（`python -m gacore.rerun --day`），周报缺历史周锚定。
+
+**已完成**：`run_job`/`_build_job_prompt` 增 `for_week` 参数（数字区、候选、上期回看、存档、审计、pending、QQ 提醒全部锚定到指定周）；`gacore.rerun` CLI 增 `--week YYYY-Www`（与 `--day` 互斥、格式与真实 ISO 周校验，默认 job=weekly-report），`--no-email` 沿用。
+
+**实测验证**：`test_weekly.py` 新增 3 例（for_week 注入锚定/CLI 派发与 --no-email/参数校验四场景）；相关 124 passed；ruff 绿。
+
+**偏差说明**：无。重跑周报会就地重写 `delivered_weekly/{week}.md`，审计落 v2+（v1 冻结不动）；日报重跑同理。
+
+**待办更新**：
+- [ ] 用户以 `--week 2026-W42` 实跑一遍周报（含答题/补充/打分/候选确认全回路演练）

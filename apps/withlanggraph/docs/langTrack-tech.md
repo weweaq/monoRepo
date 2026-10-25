@@ -2286,6 +2286,7 @@ reply ─cap_questions→ gated ─stamp_report_bullets→ deliver_reply ─save
 - **投递**（run_job weekly 分支，全 best-effort）：`cap_questions(limit=3)` → `stamp_report_bullets` → `write_weekly` → `_audit_delivered(week)` → `set_pending_weekly` → `push_weekly_notice`；邮件 `for_day=week`。
 - **捕获**：`qq.py` 路由 3.55 步（先于 3.6 的 QA 捕获——pending 期间纯数字消息归周报交互；评分模式要求 pending 未评分）。
 - **job**：`schedule.json` 删 `weekly-summary`、增 `weekly-report`（Sun 20:30 · deliver_to email · 九节结构 prompt，含决策 26 的可回验预测要求）。
+- **重跑通道**：`python -m gacore.rerun --day YYYY-MM-DD [--no-email] [--job …]` 重跑日报（信息包按该日重建、正文就地重写、审计落 v2+）；`--week YYYY-Www` 重跑周报（数字区/候选/上期回看/存档/审计/pending/QQ 提醒全部锚定到该周），默认 job=weekly-report。
 
 ### 已知边界
 
