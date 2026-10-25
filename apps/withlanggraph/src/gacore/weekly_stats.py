@@ -41,7 +41,8 @@ def _days(week: str) -> list[str]:
     return [(start + timedelta(days=i)).isoformat() for i in range(7)]
 
 
-def _prev_week(week: str) -> str:
+def prev_week(week: str) -> str:
+    """上一周的 `YYYY-Www`。"""
     year, num = week.split("-W")
     monday = date.fromisocalendar(int(year), int(num), 1)
     return week_of(monday - timedelta(days=7))
@@ -127,7 +128,7 @@ def _qa_counts(cfg: Config, days: list[str]) -> dict[str, int]:
 def collect_week_numbers(cfg: Config, week: str) -> str:
     """一周确定性数字的只读 markdown（含铁律声明与环比）；任何子源失败都降级为标注行。"""
     days = _days(week)
-    prev_days = _days(_prev_week(week))
+    prev_days = _days(prev_week(week))
     commits = _git_commit_counts(cfg, days[0], days[-1])
     prev_commits = _git_commit_counts(cfg, prev_days[0], prev_days[-1])
     phone = _phone_stats(cfg, days)

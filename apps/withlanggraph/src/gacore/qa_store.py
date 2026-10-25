@@ -251,6 +251,35 @@ def all_rows(cfg: Config) -> list[dict[str, Any]]:
     return _read_rows(cfg)
 
 
+def set_candidate_status(cfg: Config, question_key: str, status: str) -> bool:
+    """更新画像候选状态（pending/confirmed/rejected）；未找到该候选返回 False。"""
+    path = _qa_dir(cfg) / "candidates.jsonl"
+    if not path.is_file():
+        return False
+    lines = path.read_text(encoding="utf-8").splitlines()
+    out: list[str] = []
+    hit = False
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            out.append(line)
+            continue
+        if isinstance(row, dict) and row.get("question_key") == question_key:
+            row["status"] = status
+            row["updated_at"] = _now()
+            hit = True
+            out.append(json.dumps(row, ensure_ascii=False))
+        else:
+            out.append(line)
+    if hit:
+        path.write_text("\n".join(out) + "\n", encoding="utf-8")
+    return hit
+
+
 def stats(cfg: Config) -> dict[str, Any]:
     """度量（spec §5.3）：每期提问数、回答率、去重命中。"""
     rows = _read_rows(cfg)

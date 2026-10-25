@@ -299,6 +299,22 @@ def last_seen(cfg: Config, topic: str, before_date: str) -> LastSeen:
 # R2 容差带（决策 14）：claimed ≥ 2×actual 且 claimed − actual ≥ 14 天才判硬冲突，约数不冤枉
 _FIRST_WORDS: tuple[str, ...] = ("首次", "第一次", "久违")
 _RUNNING_WORDS: tuple[str, ...] = ("连续", "持续")
+_WEEK_ID_RE = re.compile(r"^\d{4}-W\d{2}$")
+
+
+def _report_path(cfg: Config, report_id: str) -> Path:
+    """日报在 delivered_report/，周报（YYYY-Www）在 delivered_weekly/。"""
+    if _WEEK_ID_RE.match(report_id):
+        return cfg.logs_dir / "delivered_weekly" / f"{report_id}.md"
+    return cfg.logs_dir / "delivered_report" / f"{report_id}.md"
+
+
+def _anchor_day(report_id: str) -> str:
+    """断言基线的日期锚点：日报 = 自身；周报 = 数据窗末日（周日）。"""
+    if _WEEK_ID_RE.match(report_id):
+        year, num = report_id.split("-W")
+        return date.fromisocalendar(int(year), int(num), 7).isoformat()
+    return report_id
 
 
 def is_conflict(claimed_days: int, actual_gap_days: int) -> bool:
@@ -404,8 +420,11 @@ def _audit_claims(cfg: Config, claims: list[Claim], before_date: str) -> tuple[F
 
 
 def audit_report(cfg: Config, date: str) -> AuditResult:
-    """审计一篇已投递日报（date = YYYY-MM-DD）；文件缺失返回 missing 占位，不抛异常。"""
-    path = cfg.logs_dir / "delivered_report" / f"{date}.md"
+    """审计一篇已投递日报（YYYY-MM-DD）或周报（YYYY-Www）；文件缺失返回 missing 占位。
+
+    周报：正文在 `logs/delivered_weekly/{week}.md`；last_seen 的基线锚点 = 数据窗末日（周日）。
+    """
+    path = _report_path(cfg, date)
     if not path.is_file():
         return AuditResult(date=date, version=0, score=100, missing=True, findings=())
     try:
@@ -413,7 +432,8 @@ def audit_report(cfg: Config, date: str) -> AuditResult:
     except OSError:
         return AuditResult(date=date, version=0, score=100, missing=True, findings=())
     claims = extract_claims(text)
-    findings = _audit_claims(cfg, claims, before_date=date)
+    anchor = _anchor_day(date)
+    findings = _audit_claims(cfg, claims, before_date=anchor)
     errors = sum(1 for f in findings if f.severity == "error")
     warns = len(findings) - errors
     score = max(0, 100 - 25 * errors - 5 * warns)
@@ -432,10 +452,11 @@ QUESTION_LIMIT: int = 5
 _QUESTION_HEADING = "# 想问你"
 
 
-def cap_questions(reply: str) -> tuple[str, bool]:
-    """对 `# 想问你` 节做确定性硬闸：条数 >5 截断、缺「依据」锚的条删除、清零则整节省略。
+def cap_questions(reply: str, *, limit: int = QUESTION_LIMIT) -> tuple[str, bool]:
+    """对 `# 想问你` 节做确定性硬闸：条数超限截断、缺「依据」锚的条删除、清零则整节省略。
 
     只动该节，其余正文逐字不变（_diff_gate 纪律）。返回 (处理后的正文, 是否发生改动)。
+    日报 limit=5（QUESTION_LIMIT）；周报传 limit=3（spec §5.4）。
     """
     lines = reply.splitlines()
     out: list[str] = []
@@ -453,7 +474,7 @@ def cap_questions(reply: str) -> tuple[str, bool]:
             if lines[j].strip().startswith("- "):
                 bullets.append(lines[j].strip())
             j += 1
-        kept = [b for b in bullets if "依据" in b][:QUESTION_LIMIT]
+        kept = [b for b in bullets if "依据" in b][:limit]
         if len(kept) != len(bullets):
             changed = True
         if kept:

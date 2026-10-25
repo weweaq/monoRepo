@@ -50,6 +50,15 @@ _SCHEDULE_FILE: Final = "schedule.json"
 _STATE_FILE: Final = "schedule_state.json"
 _OUTPUT_SUBDIR: Final = "scheduled"
 _TIME_RE: Final = re.compile(r"^(\d{1,2}):(\d{2})$")
+# P4：weekday 前缀形态（"Sun 20:30" / "周日 20:30"）——周报周日 20:30 专用
+_WEEKDAY_TIME_RE: Final = re.compile(
+    r"^(Mon|Tue|Wed|Thu|Fri|Sat|Sun|周一|周二|周三|周四|周五|周六|周日|周天)\s+(\d{1,2}):(\d{2})$",
+    re.IGNORECASE,
+)
+_WEEKDAY_NUM: Final = {
+    "mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6,
+    "周一": 0, "周二": 1, "周三": 2, "周四": 3, "周五": 4, "周六": 5, "周日": 6, "周天": 6,
+}
 _INTERVAL_RE: Final = re.compile(r"^every\s+(\d+)\s*([dhm])$", re.IGNORECASE)
 _POLL_INTERVAL_SECONDS: Final = 30
 
@@ -120,6 +129,11 @@ _DAILY_JOB_MARKER: Final = "daily"
 def _is_daily_job(job: Job) -> bool:
     """日报类 job 判定（命名嗅探，命中 _DAILY_JOB_MARKER）。"""
     return _DAILY_JOB_MARKER in job.name.lower()
+
+
+def _is_weekly_job(job: Job) -> bool:
+    """周报类 job 判定（命名嗅探 weekly；P4 周报注入与投递路径的开关）。"""
+    return "weekly" in job.name.lower()
 
 
 @dataclass(slots=True)
@@ -333,6 +347,22 @@ def next_run_time(schedule: str, last_run: str | None, now: datetime) -> datetim
             candidate += delta
         return candidate
 
+    # Weekday form: "Sun 20:30" / "周日 20:30" — 该weekday的 HH:MM（P4 周报）
+    m = _WEEKDAY_TIME_RE.match(schedule)
+    if m:
+        wd = _WEEKDAY_NUM[m.group(1).lower()]
+        hour, minute = int(m.group(2)), int(m.group(3))
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return None
+        days_ahead = (wd - now.weekday()) % 7
+        slot = now.replace(hour=hour, minute=minute, second=0, microsecond=0) + timedelta(days=days_ahead)
+        if slot <= now:  # 本周槽位已过 → 下周
+            slot += timedelta(days=7)
+        last = _parse_iso(last_run) if last_run else None
+        if last and last >= slot:
+            slot += timedelta(days=7)
+        return slot
+
     # Daily time form: "HH:MM"
     m = _TIME_RE.match(schedule)
     if m:
@@ -467,6 +497,39 @@ def _build_job_prompt(job: Job, cfg: Config, for_day: str | None = None) -> str:
         except Exception as e:  # noqa: BLE001 — never let the pack break the job
             logger.warning(
                 "daily info pack build failed; falling back to plain prompt",
+                job=job.name,
+                error_type=type(e).__name__,
+                stack_trace=str(e),
+            )
+    if _is_weekly_job(job):
+        # P4 周报：数字区（程序填）+ 候选清单 + 上期回看指引 前置注入；铁律=数字只读。
+        try:
+            from gacore.weekly_stats import collect_week_numbers, pending_candidates, prev_week, week_now
+
+            week = week_now()
+            numbers = collect_week_numbers(cfg, week)
+            cands = pending_candidates(cfg)
+            if cands:
+                cand_lines = "\n".join(
+                    f"- [候选-{i}] {c['question']} → {c['answer']}" for i, c in enumerate(cands, 1)
+                )
+            else:
+                cand_lines = "- （本周无待确认候选，「画像候选」节整节省略）"
+            prompt = (
+                f"{numbers}\n\n〔画像候选（原样转述，禁止改写）〕\n{cand_lines}\n\n"
+                f"〔上期周报〕logs/delivered_weekly/{prev_week(week)}.md"
+                "（用 file_read 读取做回看；不存在则本篇为首期）\n\n{job.prompt}"
+            )
+            logger.info(
+                "weekly numbers injected into user prompt",
+                job=job.name,
+                week=week,
+                numbers_chars=len(numbers),
+                candidates=len(cands),
+            )
+        except Exception as e:  # noqa: BLE001 — 注入失败回退裸 prompt，job 照常
+            logger.warning(
+                "weekly numbers build failed; falling back to plain prompt",
                 job=job.name,
                 error_type=type(e).__name__,
                 stack_trace=str(e),
@@ -610,6 +673,42 @@ def run_job(
                     error_type=type(e).__name__,
                     stack_trace=str(e),
                 )
+        if error is None and _is_weekly_job(job) and (reply or "").strip():
+            # P4 周报投递：cap(limit=3) → stamp → delivered_weekly/{week}.md → 审计 + pending + QQ 提醒
+            from gacore.weekly_eval import push_weekly_notice, set_pending_weekly
+            from gacore.weekly_stats import week_now, write_weekly
+
+            week = week_now()
+            try:
+                gated, questions_gated = cap_questions(reply, limit=3)
+                if questions_gated:
+                    logger.warning("weekly questions gated", job=name)
+                deliver_reply = stamp_report_bullets(gated)
+                write_weekly(cfg, week, deliver_reply)
+            except Exception as e:  # noqa: BLE001 — stamping must never break delivery
+                logger.error(
+                    "weekly stamping failed; delivering raw",
+                    job=name,
+                    error_type=type(e).__name__,
+                    stack_trace=str(e),
+                )
+                deliver_reply = reply
+            for label, hook in (
+                ("weekly audit hook", lambda: _audit_delivered(cfg, week)),
+                ("weekly pending state", lambda: set_pending_weekly(cfg, week)),
+                ("weekly qq notice", lambda: push_weekly_notice(cfg, week)),
+            ):
+                try:
+                    hook()
+                except Exception as e:  # noqa: BLE001 — 周报 best-effort 钩子各自兜底
+                    logger.error(
+                        f"{label} failed",
+                        job=name,
+                        week=week,
+                        error_type=type(e).__name__,
+                        stack_trace=str(e),
+                    )
+            for_day = week  # 邮件主题与下游统一用 week id
         _deliver(job, cfg, deliver_reply, error, for_day=for_day)
     else:
         logger.info("delivery skipped (deliver=False)", job=name)

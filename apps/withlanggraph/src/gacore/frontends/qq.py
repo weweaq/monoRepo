@@ -104,6 +104,7 @@ from gacore.llm import get_llm
 from gacore.jsonl_logger import get_logger
 from gacore.proactive import record_last_active, record_user_emotion
 from gacore.qa_store import try_answer
+from gacore.weekly_eval import try_weekly_interaction
 
 from gacore.state import new_state
 from gacore.tools.daily_notes import load_recent_daily_summaries
@@ -1128,6 +1129,18 @@ class QQApp:
             #      An active clarification session also routes ANY message back to the
             #      feedback loop, since the user's answer may not carry intent keywords.
             route = feedback_route(content)
+
+            # 3.55) 周报评分/候选捕获（P4）：pending 期间「4 3」评分与「1/-2/0」候选操作，
+            #       优先于 QA 捕获（纯数字消息在 pending 期间归周报交互）。
+            try:
+                weekly_reply = try_weekly_interaction(Config.default(), content)
+            except Exception:  # noqa: BLE001 — 周报捕获失败绝不影响正常聊天
+                weekly_reply = None
+            if weekly_reply is not None:
+                asyncio.create_task(
+                    self.send_text(chat_id, weekly_reply, msg_id=msg_id, is_group=is_group)
+                )
+                return
 
             # 3.6) 想问你回答捕获（P3，决策 8：不走订正阶梯）：显式 [Qn] 引用或唯一
             #      开放问题时的裸短答，命中即确认并 return，不进 feedback、不进 agent 轮。
