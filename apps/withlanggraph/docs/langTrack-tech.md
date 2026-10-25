@@ -93,7 +93,7 @@ flowchart LR
 
 ---
 
-## 2. HTTP 接口（`server.py:76-107`）
+## 2. HTTP 接口（`server.py`）
 
 | 方法 | 路径 | 参数 | 响应 | 说明 |
 |---|---|---|---|---|
@@ -101,6 +101,7 @@ flowchart LR
 | GET | `/api/client/version` | — | `{"app_version":"1.N","latest_apk_url":""}` | 客户端版本自查（Task 14）：服务端声明期望客户端版本。请求时读 `data/client_version.json`（存在优先，缺失回退 `server.py` 常量 `_EXPECTED_CLIENT_VERSION`）——该文件由 weiCheckApp `build.ps1` 打包后自动写入，故设置页版本对比随打包自动推进，**无需重启服务端**。客户端 `VersionChecker.kt` 拉取后与 PackageManager `versionName`（`versionName="{major}.{minor}.{buildNumber}"`，如 1.0.1；buildNumber 由 `version.properties` 存储、`build.ps1` 每次构建后递增）对比，设置页「关于」显示「已是最新 / 可更新→vX.X / 检查中」 |
 | POST | `/ingest` | body=`IngestRequest` | `{"status":"ok","inserted":N,"deduplicated":bool}` | 幂等：`batch_id` 重复时返回 `{"status":"ok","inserted":0,"deduplicated":true}` |
 | GET | `/dashboard` | `?day=YYYY-MM-DD`（可选） | `text/html` | 深色单页仪表盘，调 `render_dashboard_html(conn, day)`（`dashboard.py:237`），每次请求新开只读连接；含「事实审查块」（FactCard 逐项人眼核对，不跑 ETL）；含「生活轨迹 · 时段分布」卡（小时 × 家/公司/其他 30 天矩阵，`spatial_profile._time_space_matrix`，单小时 ≥15 分钟计入、跨午夜 stay 按自然日分摊、无数据不隐藏）、「定位采集明细」卡（当日原始层 location 事件逐点：时间\|最近地点·距离\|精度\|信号源，`_render_location_points`，最近地点按 canonical 地点 WGS84 球面距离最小、显示名走 §2.6）、「当日地图」卡（高德 JS API，`_render_map_card`）与「立即转换 (ETL)」按钮 |
+| GET | `/kg` | `?view=overview\|timeline\|audit`（可选；缺省/非法回落 `overview`） | `text/html` | 只读 KG 三视图（`kg_view.render_kg_html`）：全景力导图 / 按抽取日回放 / 图谱体检。每次请求新开只读连接（`mode=ro`），只执行 SELECT；cytoscape 与快照 JSON 全部内联，无 CDN；缺库 / 缺 `kg_*` 表 / 前端资产缺失时返回 503 HTML（不抛 500） |
 | POST | `/etl/run` | — | `{"status":"started"}` / `{"status":"busy"}` | 异步触发 ETL 子进程；与周期线程共用防重入守卫（Task 12c） |
 | GET | `/etl/status` | — | `{"running":bool,"last_finished_at":...,"last_ok":bool,"last_error":str\|null,...}` | ETL 运行状态查询（Task 12c）。`last_error` 只回**脱敏摘要**（`_etl_error_summary`：`rc=N: <stderr 末行>`，压空白后 ≤200 字符；超时为 `timeout after Ns`），完整 stderr 只进 `app.jsonl`，不再经局域网接口回传原文 |
 | GET | `/api/map/day` | `?day=` `?device_id=`（均可选） | JSON：`{device_id, points[], stays[], trips[]}` 或 `{error:"ambiguous_device"\|"no_data", ...}` | 地图卡前端数据源（Task 13）。点按 `to_amap_coord` 转 GCJ02；stay 名走 §2.6；trip polyline 已是 GCJ02 原样；device_id 省略时按当日唯一设备解析，多设备返回 candidates |
@@ -2056,3 +2057,81 @@ python -m gacore.ops status --root <app-root> --run-dir <dir> --logs-dir <dir>
 - 群聊按 `user_id` 隔离，不同成员互不打断。
 
 **测试**：`tests/test_qq.py` 新增 5 例——窗口内合并、运行中取消且不重复已落库文本、checkpoint 缺失时回放、合并取消不发停止卡片、`/stop` 仍发停止卡片；该文件 27 passed / 1 skipped。全量 `pytest` 1608 passed / 5 skipped（`test_cli` 一次 `agent_graph.png` 瞬时文件锁失败，单跑 11 passed）。
+
+## 9.33 KG 可视化：三视图只读快照 + `/kg` + 静态导出（2026-10-24）
+
+### 目标与边界
+
+把 `kg_*` 表从“只能看 JSON”变成可浏览的图。首版只做原型里被选中的三个方向，**不新增表、不写库、不触发抽取**：
+
+- **overview**：全量力导图，节点按类型着色/按度数放大，边按 L1/L2/L3 区分；支持类型/层级筛选、搜节点、点节点看关联边。
+- **timeline**：按 `kg_runs.day` 回放，当天新增节点/边高亮，之后不再出现的节点淡出；左侧每日增量、右侧通道健康。
+- **audit**：实体消解生效/候选、同名 Person、孤立节点、节点/关系分布、每日运行健康。
+
+关系链最短路径（原型 demo 02）**未进首版**，避免一次把范围铺得过大；数据层 `links` 已保留一对节点一条最强边，后续加视图不需要改快照结构。
+
+### 数据流
+
+```mermaid
+flowchart LR
+    DB[("langTrack.db<br/>kg_runs / kg_nodes / kg_edges<br/>kg_relations / kg_aliases")]
+    SNAP["kg_view.load_kg_snapshot(conn)<br/>纯 SELECT · 只读"]
+    ROUTE["server.py GET /kg?view=...<br/>每次请求新开连接"]
+    CLI["python -m gacore.langTrack.kg_view<br/>--out-dir data/kg_view"]
+    PAGE["render_kg_html(conn, view)<br/>CSS/JS/cytoscape/JSON 全内联"]
+    DB --> SNAP --> PAGE
+    ROUTE --> SNAP
+    CLI --> SNAP
+    PAGE --> OV["overview 全景图"]
+    PAGE --> TL["timeline 时间演化"]
+    PAGE --> AU["audit 图谱体检"]
+```
+
+### 代码落点
+
+| 文件 | 职责 |
+| --- | --- |
+| `src/gacore/langTrack/kg_view.py` | `load_kg_snapshot(conn)`（只读快照）、`render_kg_html(conn, view, static_links=False, available_views=None)`、静态导出 `main(argv)` |
+| `src/gacore/langTrack/kg_view_assets.py` | 三个视图的 CSS/HTML/JS 字符串常量；改交互只动这里 |
+| `src/gacore/langTrack/static/cytoscape.min.js` | 固定 3.30.2，渲染时内联；来源与许可见同目录 `README.md` |
+| `src/gacore/langTrack/server.py` | 薄路由 `GET /kg`；`sqlite3.Error` / `FileNotFoundError` → 503 HTML，不把缺表/缺资产变成 500 |
+| `tests/test_langTrack_kg_view.py` | 临时库封闭测试（快照口径 / 三视图渲染 / 静态导出 / 路由） |
+
+### 快照口径（与抽取层一致）
+
+- `kg_edges` 是当日事件/待办边，`kg_relations` 是稳定关系；画图时把两者并集，稳定关系按 `(from,to,relation)` 取**最新 day** 去重，避免同日重复行把边画粗。
+- `kg_aliases` 只追加不改：某行**生效** ⟺ 没有其它行的 `superseded_by` 指向它的 `alias|day|run_id`；fuzzy 候选 `score < 0.85` 跳过（与 `resolve.resolve_alias` 同规则）。审计页把“生效”和“候选”分表展示，防止消费方直接 JOIN 误合并。
+- 孤立节点 = 并集图上 degree 为 0 的节点；默认在 overview/timeline 隐藏，audit 单独列。
+- `kg_runs` 每天取 `started_at` 最新一行；通道状态来自 `channel_stats`，`_material` 取素材字符数与来源数。
+- 快照 JSON 用 `ensure_ascii=False` 序列化，并把 `<` / `>` / `&` 转成 `\u003c` / `\u003e` / `\u0026`，避免节点 label 里的 `</script>` 穿透。
+
+### 入口
+
+```powershell
+# 实时（服务重启后生效）
+# http://127.0.0.1:8000/kg?view=overview
+# http://127.0.0.1:8000/kg?view=timeline
+# http://127.0.0.1:8000/kg?view=audit
+
+# 离线静态导出（data/ 已 gitignore）
+uv run python -m gacore.langTrack.kg_view --out-dir data/kg_view
+# 可只导一个视图：--view overview|timeline|audit
+```
+
+静态导出把导航改成相对文件名（`kg_overview.html` / `kg_timeline.html` / `kg_audit.html`），因此导出目录可整体拷走、双击打开；路由模式仍用 `/kg?view=...`。
+
+### 实测（2026-10-23 23:34 快照）
+
+- 快照：372 节点 / 354 事件待办边 / 178 稳定关系行（去重 107）/ 137 孤立节点 / 35 条 alias 行（9 个唯一 pair）/ 4 条生效消解 / 5 条候选 / 3 组同名 Person；8 个抽取日（09-08、10-16~10-23）。
+- 页面：overview 默认显示 235 节点 / 461 边（372−137 孤立；354+107 去重关系），三张 canvas 正常；timeline 滑块可回到 09-08（76 节点 / 28 边，`status=failed`）；audit KPI 与候选表/同名组/运行健康均渲染。
+- 浏览器实测无 console error；搜索首个 Person 节点可定位并显示其关联边（实测 13 条）。
+- 静态导出体积（UTF-8 文件字节）：overview 785 KB / timeline 782 KB / audit 414 KB（cytoscape 仅前两页内联）。
+- 测试：`tests/test_langTrack_kg_view.py` 9 passed；`ruff check` 通过。
+
+### 已知边界
+
+- 页面是**请求时快照**：抽取/ETL 写库后刷新页面即可看到新数据；不做 WebSocket 实时推送。
+- 每次请求把全量快照和 cytoscape 内联，页面较大（~0.8 MB）；当前数据规模可接受，后续节点上万时再考虑 `/api/kg/snapshot` + 静态资源拆分。
+- 时间轴按 `kg_runs.day`，不是事件真实发生时间；`kg_edges.event_time` 尚未用于回放。
+- `day_stats.new_edges` 按去重边的“保留日”（该 `(from,to,relation)` 最后一次再确认日）计数，不是首见日；因此某天的“新增边”可能包含旧关系的再确认。若后续要严格首见语义，需在快照里补 `first_day`/`last_day`。
+- 关系链视图未进首版，`links` 已预留。
