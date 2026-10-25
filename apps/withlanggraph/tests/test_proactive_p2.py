@@ -136,6 +136,26 @@ class TestTopicNoSecondChase:
         assert proactive._topic_answered(entry, "问题59")      # newest, kept
 
 
+def test_save_state_retries_transient_permission_error(tmp_path: Path, monkeypatch) -> None:
+    """Windows 上 os.replace 偶发 WinError 5（杀毒/索引器占用）：重试即可，不能让 job 崩。"""
+    import os
+
+    cfg = Config.for_tests(tmp_path)
+    real_replace = os.replace
+    calls = {"n": 0}
+
+    def flaky(src, dst):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise PermissionError(13, "busy")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(proactive.os, "replace", flaky)
+    proactive.save_state(cfg, {"u_u1": {"emotion": "normal"}})
+    assert calls["n"] == 3
+    assert proactive.load_state(cfg) == {"u_u1": {"emotion": "normal"}}
+
+
 # --------------------------------------------------------------------------- no second chase: concern cooldown
 
 

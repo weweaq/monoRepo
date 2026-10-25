@@ -154,25 +154,55 @@ def _open_key(cfg):
     return open_questions(cfg)[0]["question_key"]
 
 
+def test_candidate_out_of_range_rejects_whole_message(tmp_path):
+    """候选编号越界：整条拒绝并回执，不能把前面合法编号先写进 facts（半成功）。"""
+    from gacore.qa_store import open_questions, record_answer, seed_questions
+    from gacore.weekly_eval import set_pending_weekly, try_weekly_interaction
+
+    cfg = Config.for_tests(tmp_path)
+    seed_questions(
+        cfg,
+        "2026-10-20",
+        [
+            "- [想问你-1] 工学椅还买吗？（依据：长期画像）",
+            "- [想问你-2] 你在读还是上班？（依据：10-20）",
+        ],
+    )
+    for row in open_questions(cfg):
+        record_answer(cfg, row["question_key"], "先不买了")
+    pending = set_pending_weekly(cfg, "2026-W43")
+    assert len(pending["candidates"]) == 2
+
+    reply = try_weekly_interaction(cfg, "候选 1 9")
+    assert reply is not None and "超出本期" in reply
+    facts = cfg.memory_dir / "global_mem_facts.txt"
+    assert not facts.exists() or "周报候选确认" not in facts.read_text(encoding="utf-8")
+
+
 def test_rating_recorded_with_rubric_version(tmp_path):
     from gacore.weekly_eval import try_weekly_interaction
 
     cfg = _set_pending_with_one_candidate(tmp_path)
-    reply = try_weekly_interaction(cfg, "4 3")
+    reply = try_weekly_interaction(cfg, "评分 4 3")
     assert reply is not None and "4" in reply
     data = json.loads((cfg.root / "data" / "eval" / "human" / "2026-W43.json").read_text(encoding="utf-8"))
     assert data["alive"] == 4
     assert data["useful"] == 3
     assert data["rubric_version"] == 1
-    # 已评分后重复评分不再吞
-    assert try_weekly_interaction(cfg, "5 5") is None
+    # 已评分后重复评分：不改分数，但明确回一句（静默会让人以为记上了）
+    repeat = try_weekly_interaction(cfg, "评分 5 5")
+    assert repeat is not None and "已经打过" in repeat
+    again = json.loads(
+        (cfg.root / "data" / "eval" / "human" / "2026-W43.json").read_text(encoding="utf-8")
+    )
+    assert again["alive"] == 4
 
 
 def test_rating_with_least_and_free_text(tmp_path):
     from gacore.weekly_eval import try_weekly_interaction
 
     cfg = _set_pending_with_one_candidate(tmp_path)
-    assert try_weekly_interaction(cfg, "4 3 2 数字准但人味不足") is not None
+    assert try_weekly_interaction(cfg, "评分 4 3 2 数字准但人味不足") is not None
     data = json.loads((cfg.root / "data" / "eval" / "human" / "2026-W43.json").read_text(encoding="utf-8"))
     assert data["least_like_me"] == 2
     assert "数字准" in data["raw"]
@@ -182,7 +212,7 @@ def test_candidate_confirm_writes_facts(tmp_path):
     from gacore.weekly_eval import try_weekly_interaction
 
     cfg = _set_pending_with_one_candidate(tmp_path)
-    reply = try_weekly_interaction(cfg, "1")
+    reply = try_weekly_interaction(cfg, "候选 1")
     assert reply is not None and "确认" in reply
     cands = (cfg.root / "data" / "qa" / "candidates.jsonl").read_text(encoding="utf-8")
     assert '"confirmed"' in cands
@@ -194,12 +224,36 @@ def test_candidate_reject_and_zero(tmp_path):
     from gacore.weekly_eval import set_pending_weekly, try_weekly_interaction
 
     cfg = _set_pending_with_one_candidate(tmp_path)
-    assert try_weekly_interaction(cfg, "-1") is not None
+    assert try_weekly_interaction(cfg, "候选 -1") is not None
     cands = (cfg.root / "data" / "qa" / "candidates.jsonl").read_text(encoding="utf-8")
     assert '"rejected"' in cands
 
     set_pending_weekly(cfg, "2026-W44")
-    assert try_weekly_interaction(cfg, "0") is not None
+    assert try_weekly_interaction(cfg, "候选 0") is not None
+
+
+def test_bare_digits_do_not_collide_with_rating_or_candidates(tmp_path):
+    """决策 35：裸数字不再被评分/候选吞掉（日报裸答与两者共用输入空间）。"""
+    from gacore.weekly_eval import try_weekly_interaction
+
+    cfg = _set_pending_with_one_candidate(tmp_path)
+    assert try_weekly_interaction(cfg, "1 3") is None
+    assert try_weekly_interaction(cfg, "1") is None
+    assert try_weekly_interaction(cfg, "0") is None
+    assert not (cfg.root / "data" / "eval" / "human" / "2026-W43.json").exists()
+    assert '"confirmed"' not in (cfg.root / "data" / "qa" / "candidates.jsonl").read_text(encoding="utf-8")
+
+
+def test_weekly_questions_seed_into_qa_store(tmp_path):
+    """周报「想问你」也进 qa 库（决策 33）：否则周报问题无捕获通道、本周未解无数据。"""
+    from gacore.qa_store import open_questions
+    from gacore.scheduler import _seed_qa
+
+    cfg = Config.for_tests(tmp_path)
+    _seed_qa(cfg, "2026-W43", "# 想问你\n- [想问你-1] 这周还买吗？（依据：10-14）\n")
+    opens = open_questions(cfg)
+    assert [q["day"] for q in opens] == ["2026-W43"]
+    assert opens[0]["anchor"] == "想问你-1"
 
 
 def test_weekly_interaction_none_without_pending(tmp_path):
@@ -221,10 +275,22 @@ def test_build_job_prompt_honors_for_week(tmp_path, monkeypatch):
 
     monkeypatch.setattr("gacore.weekly_stats.collect_week_numbers", fake_numbers)
     monkeypatch.setattr("gacore.weekly_stats.pending_candidates", lambda cfg_: [])
+    cfg = Config.for_tests(tmp_path)
+    daily = cfg.memory_dir / "daily"
+    daily.mkdir(parents=True)
+    for day in ("2026-10-12", "2026-10-13", "2026-10-14", "2026-10-15", "2026-10-16", "2026-10-17", "2026-10-18"):
+        (daily / f"{day}.md").write_text(f"- {day} 笔记摘要\n", encoding="utf-8")
+    from gacore.qa_store import seed_questions
+
+    seed_questions(cfg, "2026-10-14", ["- [想问你-1] 这周还买吗？（依据：10-14）"])
     job = Job(name="weekly-report", schedule="Sun 20:30", prompt="周报指令")
-    prompt = _build_job_prompt(job, Config.for_tests(tmp_path), for_week="2026-W42")
+    prompt = _build_job_prompt(job, cfg, for_week="2026-W42")
     assert "〔周报数字区·2026-W42〕" in prompt
     assert "2026-W41.md" in prompt  # 上期回看锚定到重跑周的前一周
+    # 决策 33：周报要拿到整周素材与未答提问，否则「三条变化」只能编日期
+    assert "〔本周笔记摘要" in prompt and "2026-10-12 笔记摘要" in prompt
+    assert "2026-10-18 笔记摘要" in prompt
+    assert "这周还买吗" in prompt
     # 历史重跑铁律后缀钉在 job.prompt 之后（见 runtime.as_of 栅栏）
     assert "〔重跑铁律〕" in prompt
     assert prompt.index("周报指令") < prompt.index("〔重跑铁律〕")

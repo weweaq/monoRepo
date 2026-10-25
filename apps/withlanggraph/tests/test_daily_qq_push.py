@@ -37,7 +37,7 @@ def test_typical_report_fits_single_segment():
     assert "〔日报" not in segments[0]
 
 
-def test_push_daily_segments_and_marks_touch(tmp_path, monkeypatch):
+def test_push_daily_segments_and_strips_questions(tmp_path, monkeypatch):
     cfg = Config.for_tests(tmp_path)
     from gacore.qa_store import open_questions, seed_questions
 
@@ -58,9 +58,33 @@ def test_push_daily_segments_and_marks_touch(tmp_path, monkeypatch):
     sent = _push_daily_to_qq(cfg, "2026-10-25", body)
     assert sent == len(calls)  # 每段成功送达 1 人，累计口径
     assert len(calls) == 1  # 典型日报 ~2.9K 字节单条送达
-    assert "[Q1]" in calls[0]  # 回复指引随行
-    # 当日问题计一次触达 → 裸回答当晚可用
-    assert open_questions(cfg)[0]["asks"] == 1
+    # 决策 25/40：提问错峰到次日 08:30，夜间正文不带问题、也不计触达
+    assert "想问你-1" not in calls[0]
+    assert "[Q1]" not in calls[0]
+    assert "明早 08:30" in calls[0]
+    assert open_questions(cfg)[0]["asks"] == 0
+
+
+def test_strip_questions_accepts_h2_and_empty_body_noop(tmp_path, monkeypatch):
+    """`## 想问你` 也要剥；正文只剩问题节时剥完为空 → 不推、不抛 IndexError。"""
+    cfg = Config.for_tests(tmp_path)
+    calls: list[str] = []
+
+    async def fake_send(content, targets, is_sandbox):
+        calls.append(content)
+        return {"ok": len(targets)}
+
+    monkeypatch.setattr("gacore.langTrack.qq_push.send_c2c", fake_send)
+    monkeypatch.setattr("gacore.langTrack.qq_push.load_known_users", lambda: {"A" * 32: {}})
+
+    body = "# 今日状态\n- ok\n\n## 想问你\n- [想问你-1] q（依据：a）\n"
+    assert _push_daily_to_qq(cfg, "2026-10-25", body) == 1
+    assert calls and "想问你-1" not in calls[0]
+
+    calls.clear()
+    only_questions = "## 想问你\n- [想问你-1] q（依据：a）\n"
+    assert _push_daily_to_qq(cfg, "2026-10-25", only_questions) == 0
+    assert calls == []
 
 
 def test_push_daily_no_users_noop(tmp_path, monkeypatch):
@@ -69,8 +93,8 @@ def test_push_daily_no_users_noop(tmp_path, monkeypatch):
     assert _push_daily_to_qq(cfg, "2026-10-25", "# 今日状态\n- ok\n") == 0
 
 
-def test_guidance_restates_open_questions_when_body_has_none(tmp_path, monkeypatch):
-    """正文没带「想问你」但当日有开放问题：指引把问题复述出来，[Q1] 不再悬空。"""
+def test_night_body_never_restates_open_questions(tmp_path, monkeypatch):
+    """夜间正文不编号问题（决策 25/40）：有未答问题也只预告明早单独推，避免 9 小时重复打扰。"""
     cfg = Config.for_tests(tmp_path)
     from gacore.qa_store import seed_questions
 
@@ -84,8 +108,9 @@ def test_guidance_restates_open_questions_when_body_has_none(tmp_path, monkeypat
     monkeypatch.setattr("gacore.langTrack.qq_push.send_c2c", fake_send)
     monkeypatch.setattr("gacore.langTrack.qq_push.load_known_users", lambda: {"A" * 32: {}})
     _push_daily_to_qq(cfg, "2026-10-25", "# 今日状态\n- ok\n")
-    assert "[Q1] 马鞍山医生怎么说？（依据：10-24 报告）" in calls[-1]
-    assert "直接回 [Qn] 你的答案" in calls[-1]
+    assert "马鞍山医生怎么说" not in calls[-1]
+    assert "[Q1]" not in calls[-1]
+    assert "订正" in calls[-1]
 
 
 def test_guidance_drops_question_clause_when_no_open_questions(tmp_path, monkeypatch):

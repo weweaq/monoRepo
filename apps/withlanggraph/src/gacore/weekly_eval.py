@@ -1,8 +1,8 @@
 """周报评分与画像候选捕获（P4，spec §5.4，决策 17/22/27）。
 
-- 评分：QQ 回 `像不像我 有用`（0-5 两数，可带第三数字=最不像条目与自由文本），
+- 评分：QQ 回 `评分 4 3`（像不像我 / 有用，各 0-5，可带第三数字=最不像条目与自由文本），
   落 `data/eval/human/{week}.json`（`rubric_version` 版本化，锚点改动才 +1）。
-- 候选：周报渲染 `[候选-N]`，回 `N` 确认（多选 `1 3`）、`-N` 否掉、`0` 全否、
+- 候选：周报渲染 `[候选-N]`，回 `候选 1 3` 确认、`候选 -2` 否掉、`候选 0` 全否、
   未提及保持 pending（决策 27）。confirmed 追加 `global_mem_facts.txt`。
 - pending 状态（`data/eval/human/pending.json`）3 天过期；捕获在 QA 之前、订正之前。
 """
@@ -25,7 +25,9 @@ logger = get_logger("weekly_eval")
 _TZ = timezone(timedelta(hours=8))
 RUBRIC_VERSION: int = 1  # 评分锚点版本（spec：锚点一改 +1，跨版本只比趋势）
 _PENDING_TTL_DAYS: int = 3
-_RATING_RE = re.compile(r"^\s*([0-5])\s+([0-5])(?:\s+([1-9]\d?))?(?:\s+(.+))?\s*$")
+# 评分必须带前缀（决策 35）：裸数字已被日报裸答/候选确认占用，同形会互相吞消息
+_RATING_RE = re.compile(r"^\s*(?:评分|打分)\s*([0-5])\s+([0-5])(?:\s+([1-9]\d?))?(?:\s+(.+))?\s*$")
+_CAND_RE = re.compile(r"^\s*候选\s*(.+)$")
 
 
 def _eval_dir(cfg: Config) -> Path:
@@ -107,8 +109,13 @@ def _confirm_to_facts(cfg: Config, question: str, answer: str) -> None:
 
 
 def _apply_candidate_reply(cfg: Config, pending: dict[str, Any], text: str) -> str | None:
-    """解析 `1 3` / `-2` / `0` 组合（决策 27）并落到 candidates.jsonl；非候选形态返回 None。"""
-    tokens = text.split()
+    """解析「候选 1 3」/「候选 -2」/「候选 0」（决策 27/35）；非候选形态返回 None。"""
+    m = _CAND_RE.match(text)
+    if not m:
+        return None
+    tokens = m.group(1).split()
+    if "0" in tokens and len(tokens) > 1:
+        return None  # 「0」只能单独出现：既确认又全否是自相矛盾指令
     confirm: list[int] = []
     reject: list[int] = []
     all_reject = False
@@ -127,18 +134,17 @@ def _apply_candidate_reply(cfg: Config, pending: dict[str, Any], text: str) -> s
     n = len(cands)
     confirmed_qa: list[tuple[str, str]] = []
 
-    def _idx_ok(i: int) -> bool:
-        return 1 <= i <= n
+    # 先全量校验再落库：越界编号若边写边判，会把前面的候选改成 confirmed 却不写 facts、
+    # 也不给回执（静默半成功）
+    bad = [i for i in confirm + reject if not 1 <= i <= n]
+    if bad:
+        return f"⚠️ 候选编号 {bad[0]} 超出本期 {n} 条，未做任何改动。"
 
     for i in confirm:
-        if not _idx_ok(i):
-            return None
         row = cands[i - 1]
         if set_candidate_status(cfg, str(row.get("key", "")), "confirmed"):
             confirmed_qa.append((str(row.get("question", "")), str(row.get("answer", ""))))
     for i in reject:
-        if not _idx_ok(i):
-            return None
         set_candidate_status(cfg, str(cands[i - 1].get("key", "")), "rejected")
     if all_reject:
         for row in cands:
@@ -161,10 +167,12 @@ def _apply_candidate_reply(cfg: Config, pending: dict[str, Any], text: str) -> s
 
 def try_weekly_interaction(cfg: Config, content: str) -> str | None:
     """QQ 捕获入口（优先级：评分 > 候选确认；均要求 pending 未过期）。未命中返回 None。"""
+    text = (content or "").strip()
     pending = load_pending(cfg)
     if not pending:
+        if _RATING_RE.match(text) or _CAND_RE.match(text):
+            return "⚠️ 本周评分/候选确认窗口已关闭（或还没到周报日），这条没有记录。"
         return None
-    text = (content or "").strip()
     week = str(pending.get("week", ""))
     m = _RATING_RE.match(text)
     if m and not pending.get("rated"):
@@ -173,6 +181,8 @@ def try_weekly_interaction(cfg: Config, content: str) -> str | None:
         pending["rated"] = True
         _pending_path(cfg).write_text(json.dumps(pending, ensure_ascii=False), encoding="utf-8")
         return f"✅ 已记录本周评分（像不像我 {m.group(1)} · 有用 {m.group(2)}）。"
+    if m and pending.get("rated"):
+        return "⚠️ 本周已经打过分了，这条没有覆盖之前的分数。"
     reply = _apply_candidate_reply(cfg, pending, text)
     if reply is not None:
         return reply
@@ -192,8 +202,9 @@ def push_weekly_notice(cfg: Config, week: str) -> int:
         return 0
     message = (
         f"本周周报（{week}）已发邮件。\n"
-        "· 打分：回「像不像我 有用」两个 0-5 数字，如「4 3」，可再跟一个最不像的条目号。\n"
-        "· 画像候选：回「1」确认、「-1」否掉、「0」全部否掉。"
+        "· 打分：回「评分 4 3」（像不像我 / 有用，各 0-5），可再跟一个最不像的条目号。\n"
+        "· 画像候选：回「候选 1 3」确认、「候选 -2」否掉、「候选 0」全部否掉。\n"
+        "· 周报里的问题：回「[想问你-1] 你的答案」。"
     )
     try:
         result = asyncio.run(send_c2c(message, targets, is_sandbox=False))

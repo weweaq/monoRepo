@@ -36,7 +36,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Final
 
-from gacore.audit import audit_report, cap_questions, write_audit
+from gacore.audit import audit_report, cap_questions, cap_weekly, write_audit
 from gacore.config import Config, load_dotenv
 from gacore.feedback import save_delivered, stamp_report_bullets
 from gacore.heartbeat import Heartbeat, run_dir
@@ -125,6 +125,8 @@ def _make_retry_prompt(prompt: str) -> str:
 
 # 日报 job 的命名标记：凡 job.name 含该子串即视为"日报类"，触发信息包注入与跨日 onboard 导出。
 _DAILY_JOB_MARKER: Final = "daily"
+# 周报 id（`YYYY-Www`）：投递时不得走日报的「重生成 vN」版本计数。
+_WEEK_ID_RE: Final = re.compile(r"^\d{4}-W\d{2}$")
 
 
 def _is_daily_job(job: Job) -> bool:
@@ -506,10 +508,23 @@ def _build_job_prompt(job: Job, cfg: Config, for_day: str | None = None, for_wee
         # P4 周报：数字区（程序填）+ 候选清单 + 上期回看指引 前置注入；铁律=数字只读。
         # for_week：历史周重跑（rerun --week）时以该周为窗口，否则取本周。
         try:
+            from gacore.qa_store import open_questions
+            from gacore.runtime import week_sunday
+            from gacore.tools.daily_notes import load_recent_daily_summaries
             from gacore.weekly_stats import collect_week_numbers, pending_candidates, prev_week, week_now
 
             week = for_week or week_now()
+            sunday = week_sunday(week) or ""
             numbers = collect_week_numbers(cfg, week)
+            # 一周素材（决策 33）：系统 prompt 只注入最近 2 天笔记，周报要写"三条变化"必须
+            # 自己看满 7 天，否则只能编日期。as_of=周日 保证不越界。
+            week_notes = load_recent_daily_summaries(cfg, days=7, as_of=sunday or None)
+            opens = open_questions(cfg, before_date=sunday or None)
+            open_lines = (
+                "\n".join(f"- {q.get('question', '')}" for q in opens)
+                if opens
+                else "- （本周无未答提问，「本周未解」节整节省略）"
+            )
             cands = pending_candidates(cfg)
             if cands:
                 cand_lines = "\n".join(
@@ -518,7 +533,10 @@ def _build_job_prompt(job: Job, cfg: Config, for_day: str | None = None, for_wee
             else:
                 cand_lines = "- （本周无待确认候选，「画像候选」节整节省略）"
             prompt = (
-                f"{numbers}\n\n〔画像候选（原样转述，禁止改写）〕\n{cand_lines}\n\n"
+                f"{numbers}\n\n〔本周笔记摘要（周一至周日，三条变化取证用）〕\n"
+                f"{week_notes or '（本周无笔记）'}\n\n"
+                f"〔本周未答提问（原样引用，勿重复问）〕\n{open_lines}\n\n"
+                f"〔画像候选（原样转述，禁止改写）〕\n{cand_lines}\n\n"
                 f"〔上期周报〕logs/delivered_weekly/{prev_week(week)}.md"
                 "（用 file_read 读取做回看；不存在则本篇为首期）\n\n" + job.prompt
             )
@@ -527,6 +545,8 @@ def _build_job_prompt(job: Job, cfg: Config, for_day: str | None = None, for_wee
                 job=job.name,
                 week=week,
                 numbers_chars=len(numbers),
+                notes_chars=len(week_notes),
+                open_questions=len(opens),
                 candidates=len(cands),
             )
         except Exception as e:  # noqa: BLE001 — 注入失败回退裸 prompt，job 照常
@@ -716,6 +736,15 @@ def _run_job(
                 gated, questions_gated = cap_questions(reply, limit=3)
                 if questions_gated:
                     logger.warning("weekly questions gated", job=name)
+                gated_in = gated
+                gated, dropped = cap_weekly(gated)
+                if dropped or len(gated) < len(gated_in):
+                    logger.warning(
+                        "weekly length gated",
+                        job=name,
+                        dropped=dropped,
+                        chars=len(gated),
+                    )
                 deliver_reply = stamp_report_bullets(gated)
                 write_weekly(cfg, week, deliver_reply)
             except Exception as e:  # noqa: BLE001 — stamping must never break delivery
@@ -728,6 +757,7 @@ def _run_job(
                 deliver_reply = reply
             for label, hook in (
                 ("weekly audit hook", lambda: _audit_delivered(cfg, week)),
+                ("weekly qa seed", lambda: _seed_qa(cfg, week, deliver_reply)),
                 ("weekly pending state", lambda: set_pending_weekly(cfg, week)),
                 ("weekly qq notice", lambda: push_weekly_notice(cfg, week)),
             ):
@@ -909,6 +939,9 @@ def _write_output(
 
 def _write_daily_note(cfg: Config, job: Job, reply: str, error: str | None) -> None:
     """Append a bullet to today's daily note recording this scheduled run."""
+    if _is_weekly_job(job):
+        # 周报不落 daily note（决策 32）：正文片段进每日笔记会污染 last_seen 证据与次日日报上下文
+        return
     # Imported here to avoid a circular import at module load (daily_notes imports config).
     from gacore.tools.daily_notes import edit_daily
 
@@ -1025,36 +1058,59 @@ def _qq_targets() -> list[str]:
     return targets
 
 
-def _qq_reply_guidance(cfg: Config, day: str, body: str) -> str:
-    """按当日问答状态生成回复指引：正文没带问题时，开放问题复述进指引（不留悬空的 [Q1] 话术）。"""
-    from gacore import qa_store
+def _is_question_heading(line: str) -> bool:
+    """`# 想问你` / `## 想问你` 都算（模型常把一级标题降级，不认会漏剥）。"""
+    stripped = line.strip()
+    return stripped.startswith("#") and stripped.lstrip("#").strip() == "想问你"
 
-    correction = "要订正正文回「订正 …」。"
+
+def _strip_questions(body: str) -> str:
+    """剥掉整节「想问你」（夜间 QQ 正文用）。
+
+    提问按决策 25 错峰到次日 08:30 单独推（那里带 [Q1]..[Qn] 编号并记录展示顺序），
+    正文再带一遍会造成 9 小时内重复打扰，也让 asks 计数翻倍。
+    """
+    lines = body.splitlines()
+    out: list[str] = []
+    i = 0
+    while i < len(lines):
+        if not _is_question_heading(lines[i]):
+            out.append(lines[i])
+            i += 1
+            continue
+        j = i + 1
+        while j < len(lines) and not lines[j].lstrip().startswith("#"):
+            j += 1
+        i = j
+    return "\n".join(out).rstrip() + ("\n" if body.endswith("\n") else "")
+
+
+def _qq_reply_guidance(body: str) -> str:
+    """夜间正文推送的回复指引：问题已移出正文，只留订正话术与明早预告。"""
     if "- [想问你-" in body:
-        return f"\n\n〔回复指引〕「想问你」直接回 [Q1] 你的答案；{correction}"
-    opens = [q for q in qa_store.open_questions(cfg) if q.get("day") == day]
-    if opens:
-        listed = "；".join(
-            f"[Q{str(q.get('anchor', '')).rsplit('-', 1)[-1]}] {q.get('question', '')}"
-            for q in opens
+        return (
+            "\n\n〔回复指引〕要订正正文回「订正 …」；"
+            "「想问你」的问题明早 08:30 单独推给你（也可回 [想问你-N] 你的答案）。"
         )
-        return f"\n\n〔回复指引〕正文未带新问题，此前问过的：{listed}——直接回 [Qn] 你的答案；{correction}"
-    return f"\n\n〔回复指引〕{correction}"
+    return "\n\n〔回复指引〕要订正正文回「订正 …」。"
 
 
 def _push_daily_to_qq(cfg: Config, day: str, body: str) -> int:
-    """日报正文分段推 QQ；成功后当日开放问题计一次触达（asks+1，裸回答当晚生效）。"""
+    """日报正文分段推 QQ（剥「想问你」节，提问错峰到早晨）；best-effort。"""
     import asyncio
 
-    from gacore import qa_store
     from gacore.langTrack.qq_push import send_c2c
 
     targets = _qq_targets()
     if not targets:
         logger.info("daily qq push skipped: no valid users", day=day)
         return 0
-    segments = _split_for_qq(_plain_for_qq(body))
-    segments[-1] += _qq_reply_guidance(cfg, day, body)
+    segments = _split_for_qq(_plain_for_qq(_strip_questions(body)).strip())
+    if not segments or not any(seg.strip() for seg in segments):
+        # 正文只有「想问你」一节（极端）：剥完为空就不推，避免 IndexError 打断投递
+        logger.info("daily qq push skipped: empty after stripping questions", day=day)
+        return 0
+    segments[-1] += _qq_reply_guidance(body)
     sent_total = 0
     for seg in segments:
         try:
@@ -1069,10 +1125,6 @@ def _push_daily_to_qq(cfg: Config, day: str, body: str) -> int:
                 stack_trace=str(exc),
             )
             break
-    if sent_total:
-        keys = [q["question_key"] for q in qa_store.open_questions(cfg) if q.get("day") == day]
-        if keys:
-            qa_store.mark_pushed(cfg, keys)
     logger.info("daily qq pushed", day=day, segments=len(segments), sent=sent_total)
     return sent_total
 
@@ -1383,7 +1435,7 @@ def _deliver_email(job: Job, cfg: Config, reply: str, error: str | None, env: Ma
     # 之后重生成/修订重发为 v2/v3…（覆盖 rerun 与 QQ「确认重发」两条路径，集中在此
     # 单点）。当天例行投递不进版本序列，保持原样。
     version = 0
-    if for_day and for_day != today:
+    if for_day and for_day != today and not _WEEK_ID_RE.match(for_day):
         try:
             from gacore.feedback import next_report_version
 

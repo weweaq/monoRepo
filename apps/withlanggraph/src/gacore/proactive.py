@@ -28,6 +28,7 @@ import random
 import re
 import sqlite3
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -357,12 +358,23 @@ def load_state(cfg: Config) -> dict:
 
 
 def save_state(cfg: Config, state: dict) -> None:
-    """Persist proactive_state.json atomically (temp file + os.replace)."""
+    """Persist proactive_state.json atomically (temp file + os.replace).
+
+    Windows 上 `os.replace` 偶发 `WinError 5`（杀毒/索引器瞬时占用目标文件）；
+    重试几次即可，不能让它把一次状态写入变成 job 崩溃。
+    """
     path = _state_path(cfg)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, path)
+    for attempt in range(5):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.02 * (attempt + 1))
 
 
 def _with_state(cfg: Config, mutate: Callable[[dict], None]) -> dict:
@@ -1279,6 +1291,11 @@ def run_proactive_job(
         return result
 
     if scene == "questions":
+        # 先归档到期的（asks 已满），再取待推列表：否则第 3 次展示的题会在同一次推送里被归档，
+        # 15 小时回答窗口内变成"推了就答不了"（决策 29 配套修复）
+        archived = qa_store.archive_stale(resolved_cfg)
+        if archived:
+            logger.info("proactive: stale questions archived before push", job=job.name, count=archived)
         open_qa = qa_store.open_questions(resolved_cfg)
         if not open_qa:
             logger.info("proactive: questions scene skipped, no open questions", job=job.name)
@@ -1398,10 +1415,9 @@ def run_proactive_job(
             # P3 questions scene: count this as one re-ask per open question, then
             # archive the ones that already exceeded the re-ask budget (用户不关心).
             if open_qa:
+                # 记录本次推送的展示顺序：[Q1]..[Qn] 与用户刚看到的消息一致（决策 29）
+                qa_store.set_prompt_order(resolved_cfg, [q["question_key"] for q in open_qa])
                 qa_store.mark_pushed(resolved_cfg, [q["question_key"] for q in open_qa])
-                archived = qa_store.archive_stale(resolved_cfg)
-                if archived:
-                    logger.info("proactive: stale questions archived", job=job.name, count=archived)
             # P3: once delivered, write the turn back into the user's main thread so
             # 韩立 sees his own proactive message in the next turn's context and chat
             # records keep a complete "定时任务触发 → AI 回复" alternation. Best-effort:
