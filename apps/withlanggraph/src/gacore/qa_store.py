@@ -246,6 +246,11 @@ def try_answer(cfg: Config, content: str, *, allow_bare: bool = True) -> str | N
     return None
 
 
+def all_rows(cfg: Config) -> list[dict[str, Any]]:
+    """qa 库全量行（含 archived），供信息包 detail 与运维查看；内部读口的外公开。"""
+    return _read_rows(cfg)
+
+
 def stats(cfg: Config) -> dict[str, Any]:
     """度量（spec §5.3）：每期提问数、回答率、去重命中。"""
     rows = _read_rows(cfg)
@@ -263,30 +268,17 @@ def stats(cfg: Config) -> dict[str, Any]:
     }
 
 
-def build_qa_block(cfg: Config, *, cap: int = 600, recent_days: int = 7) -> str:
-    """`_QA` 信息源内容（决策 24）：最近 N 天已回答问答 + 未答 key 清单，超限优先保未答与最近回答。"""
+def qa_brief(
+    cfg: Config, *, before_date: str | None = None, recent_days: int = 7
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """`_QA` 信息源取数（决策 24）：近 N 天已回答问答（新→旧）+ 全部未答问题。"""
     rows = _read_rows(cfg)
-    today = datetime.now(tz=_TZ).date()
-    horizon = (today - timedelta(days=recent_days)).isoformat()
+    anchor = before_date or _today()
+    horizon = (datetime.fromisoformat(anchor) - timedelta(days=recent_days)).date().isoformat()
     answered = sorted(
-        (r for r in rows if r.get("status") == "answered" and str(r.get("answer_day", "")) >= horizon),
+        (r for r in rows if r.get("status") == "answered" and str(r.get("answer_day", "")) > horizon),
         key=lambda r: str(r.get("answer_day", "")),
         reverse=True,
-    )[:3]
-    open_keys = [r["question_key"] for r in rows if r.get("status") == "open"]
-
-    def _render(ans: list[dict[str, Any]], keys: list[str]) -> str:
-        lines = ["〔QA〕"]
-        for r in ans:
-            lines.append(f"- 已答：{r['question']} → {r['answer']}")
-        if keys:
-            lines.append("- 仍未回答（勿重复问）：" + "、".join(keys))
-        return "\n".join(lines)
-
-    out = _render(answered, open_keys)
-    while len(out) > cap and answered:
-        answered.pop()
-        out = _render(answered, open_keys)
-    if len(out) > cap and open_keys:
-        out = (_render(answered, open_keys[: max(1, len(open_keys) // 2)]))[:cap]
-    return out
+    )
+    open_ = [r for r in rows if r.get("status") == "open"]
+    return answered, open_

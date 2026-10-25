@@ -130,6 +130,9 @@ def _inject_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cfg: Config
     elif key == "_KG":
         # KG 源打桩到读图入口（_kg_day_graph 自身吞表缺失降级为 None，不抛）
         monkeypatch.setattr(dip, "_KG_FN", _raise)
+    elif key == "_QA":
+        # QA 源打桩到取数入口（qa_brief 读文件吞异常不抛）
+        monkeypatch.setattr(dip, "_QA_FN", _raise)
     else:
         pytest.fail(f"新增源 {key} 未在 test_source_registry 登记失败注入方式——"
                     "请补齐后确认其失败输出遵循 '- 该源失败：' sentinel 约定")

@@ -152,3 +152,64 @@ def test_stats_reports_answer_rate(tmp_path):
     assert s["total"] == 2
     assert s["answered"] == 1
     assert s["answer_rate"] == 0.5
+
+
+# ----------------------------------------------------- P3 Task 5: _QA 信息源
+
+
+def test_qa_source_empty_is_missing_data(tmp_path):
+    import gacore.daily_info_pack as dip
+
+    cfg = Config.for_tests(tmp_path)
+    title, pack, detail = dip._build_qa("2026-10-26", cfg)
+    assert "〔QA·想问你的回答〕" in title
+    assert pack.startswith("- 当日无问答数据")
+    assert detail == ""
+    status, _ = dip.classify_body(pack)
+    assert status == "missing_data"
+
+
+def test_qa_source_renders_answered_and_open(tmp_path, monkeypatch):
+    import gacore.daily_info_pack as dip
+
+    cfg = Config.for_tests(tmp_path)
+    _seed_day(
+        cfg,
+        "2026-10-25",
+        [
+            "- [想问你-1] 你是在读还是上班？（依据：10-25）",
+            "- [想问你-2] 工学椅还买吗？（依据：长期画像）",
+        ],
+    )
+    record_answer(cfg, open_questions(cfg)[0]["question_key"], "在读")
+    # 回答日期锚定到今天（record_answer 写 answer_day=今天），before_date 用今天保证入窗
+    from datetime import datetime, timedelta, timezone
+
+    today = datetime.now(tz=timezone(timedelta(hours=8))).date().isoformat()
+    title, pack, detail = dip._build_qa(today, cfg)
+    assert "已答" in pack and "在读" in pack
+    assert "仍未回答（勿重复问）" in pack
+    assert dip.classify_body(pack)[0] == "ok"
+    assert "archived" not in detail  # 无归档行
+    assert "→ 在读" in detail  # detail 全量含已答行
+
+
+def test_qa_source_truncates_to_cap(tmp_path, monkeypatch):
+    import gacore.daily_info_pack as dip
+
+    monkeypatch.setattr(dip, "_QA_CAP", 120)
+    cfg = Config.for_tests(tmp_path)
+    _seed_day(
+        cfg,
+        "2026-10-25",
+        [
+            "- [想问你-1] " + "很" * 200 + "累吗？（依据：10-25）",
+            "- [想问你-2] 今天午饭吃了什么？（依据：10-25）",
+        ],
+    )
+    # 两条语义不同都能种入（近似问句会被同期语义去重砍掉，另行覆盖在 seed 测试）
+    assert len(open_questions(cfg)) == 2
+    record_answer(cfg, open_questions(cfg)[0]["question_key"], "还好")
+    title, pack, detail = dip._build_qa("2026-10-26", cfg)
+    assert len(pack) <= 120
+    assert dip.classify_body(pack)[0] == "ok"

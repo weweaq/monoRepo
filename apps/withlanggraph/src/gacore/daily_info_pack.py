@@ -44,6 +44,8 @@ from urllib.parse import urlparse
 
 from gacore.config import Config
 from gacore.jsonl_logger import get_logger
+from gacore.qa_store import all_rows as _qa_all_rows
+from gacore.qa_store import qa_brief
 
 logger = get_logger("daily_info_pack")
 
@@ -1091,6 +1093,65 @@ def _build_kg(date: str, cfg: Config) -> tuple[str, str, str]:
 
 
 # --------------------------------------------------------------------------- #
+# _QA：提问回路注入（P3，评测设计决策 24）                                     #
+# --------------------------------------------------------------------------- #
+_QA_CAP: int = 600  # 决策 24：独立 cap，不挤 preferences 预算；超限先减已答组再减未答 key
+_QA_MAX_ANSWERED_LINES: Final = 3  # 进包的已答问答组数上限（保底保留）
+_QA_MISSING: Final = "- 当日无问答数据（提问回路未开启或近 7 天无已答/未答）"
+_QA_FN = qa_brief
+_QA_ROWS_FN = _qa_all_rows
+
+
+def _qa_clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _build_qa(date: str, cfg: Config) -> tuple[str, str, str]:
+    """想问你的回答注入（P3 决策 24）：近 7 天已回答问答（新→旧）+ 仍未回答的问题 key。
+
+    pack 单一截断点 = _QA_CAP：超限先逐条减已答组、再对半减未答 key；
+    detail = qa 库全量逐行（含 archived），不挑选不压缩，供 /health 单源页归因。
+    空态文案命中"当日无"→ 自动分类 missing_data。
+    """
+    title = "〔QA·想问你的回答〕"
+    try:
+        answered, open_ = _QA_FN(cfg, before_date=date)
+        if not answered and not open_:
+            return title, _QA_MISSING, ""
+        open_keys = [str(r.get("question_key", "")) for r in open_]
+
+        def render(ans: list[dict[str, Any]], keys: list[str]) -> str:
+            lines = [f"- 已答 {len(answered)} 组 / 未答 {len(open_keys)} 个（近 7 天口径）"]
+            for r in ans:
+                q = _qa_clip(str(r.get("question", "")), 90)
+                a = _qa_clip(str(r.get("answer", "")), 60)
+                lines.append(f"- 已答：{q} → {a}")
+            if keys:
+                lines.append("- 仍未回答（勿重复问）：" + "、".join(keys))
+            return "\n".join(lines)
+
+        # 单一截断点（军规②）：超 cap 依次减已答组 → 对半减未答 key → 最终硬截断兜底
+        ans = list(answered)[:_QA_MAX_ANSWERED_LINES]
+        body = render(ans, open_keys)
+        while len(body) > _QA_CAP and ans:
+            ans.pop()
+            body = render(ans, open_keys)
+        while len(body) > _QA_CAP and len(open_keys) > 1:
+            open_keys = open_keys[: max(1, len(open_keys) // 2)]
+            body = render(ans, open_keys)
+        body = body[:_QA_CAP]
+        detail = [
+            f"- [{r.get('day', '')}] {r.get('status', '')}（asks {r.get('asks', 0)}）"
+            f"{r.get('question', '')} → {r.get('answer', '')}"
+            for r in _QA_ROWS_FN(cfg)
+        ]
+        return title, body, "\n".join(detail)
+    except Exception as exc:  # noqa: BLE001 - 最后防线：源失败不中断整包
+        logger.warning("daily_info_pack: qa failed", error_type=type(exc).__name__, error=str(exc))
+        return title, f"- 该源失败：{exc}", ""
+
+
+# --------------------------------------------------------------------------- #
 # 状态分类（C1）：builder 文案约定 → 机器可读状态的唯一执行点                  #
 # --------------------------------------------------------------------------- #
 _MISSING_DATA_RE = re.compile(
@@ -1242,6 +1303,8 @@ SOURCES: Final[tuple[SourceSpec, ...]] = (
     SourceSpec("_MEMORY", _MEMORY_CAP, 100, _build_memory),
     # S4：KG 抽取产物（最低优先级，预算紧张时先被熔断丢弃；默认停用见 config/info_pack.json）
     SourceSpec("_KG", _KG_CAP, 105, _build_kg),
+    # P3：提问回路（评测设计决策 24）；最低优先级，预算紧张先于 _KG 之后被熔断
+    SourceSpec("_QA", _QA_CAP, 110, _build_qa),
 )
 
 # 最近一次装配的逐源统计（含 title 与三节正文，供 scheduler 落盘钩子取用）。
