@@ -104,6 +104,21 @@ def test_last_seen_handles_duplicate_rows(tmp_path):
     assert last_seen(cfg, "硬件", "2026-10-20").date == "2026-10-03"
 
 
+def test_topic_table_external_config_overrides(tmp_path):
+    """决策 28：config/audit_topics.json 存在时整体覆盖内置词表，新主题即改即生效。"""
+    cfg = Config.for_tests(tmp_path)
+    (tmp_path / "config").mkdir(parents=True)
+    (tmp_path / "config" / "audit_topics.json").write_text(
+        json.dumps({"相机": ["相机", "镜头", "微单"]}, ensure_ascii=False), encoding="utf-8"
+    )
+    daily = cfg.memory_dir / "daily"
+    daily.mkdir(parents=True)
+    (daily / "2026-10-01.md").write_text("入手了一支镜头", encoding="utf-8")
+    got = last_seen(cfg, "相机", "2026-10-05")
+    assert got.found is True
+    assert got.date == "2026-10-01"
+
+
 # ------------------------------------------------------------ Task 3: 冲突判定与单篇审计
 
 

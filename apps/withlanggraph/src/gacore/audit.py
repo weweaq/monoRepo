@@ -171,10 +171,31 @@ class LastSeen:
 
 def find_topic(text: str) -> str | None:
     """返回文本命中的第一个主题名（按词表声明顺序）；无命中返回 None。"""
-    for topic, synonyms in TOPIC_SYNONYMS.items():
+    return _topic_from_table(TOPIC_SYNONYMS, text)
+
+
+def _topic_from_table(table: dict[str, tuple[str, ...]], text: str) -> str | None:
+    for topic, synonyms in table.items():
         if any(syn in text for syn in synonyms):
             return topic
     return None
+
+
+def _load_topic_synonyms(cfg: Config) -> dict[str, tuple[str, ...]]:
+    """决策 28：主题词表外置 config/audit_topics.json（存在时整体覆盖内置初值）；解析失败回退内置。"""
+    path = cfg.root / "config" / "audit_topics.json"
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return TOPIC_SYNONYMS
+    table: dict[str, tuple[str, ...]] = {}
+    if isinstance(raw, dict):
+        for topic, words in raw.items():
+            if isinstance(topic, str) and isinstance(words, list):
+                synonyms = tuple(w for w in words if isinstance(w, str) and w)
+                if synonyms:
+                    table[topic] = synonyms
+    return table or TOPIC_SYNONYMS
 
 
 def _snippet_around(line: str, synonyms: tuple[str, ...]) -> str:
@@ -233,7 +254,7 @@ def _scan_global(cfg: Config, synonyms: tuple[str, ...], before_date: str) -> li
 
 def last_seen(cfg: Config, topic: str, before_date: str) -> LastSeen:
     """在记忆库三源里查主题最近一次出现日期（严格早于 before_date）；查不到 found=False。"""
-    synonyms = TOPIC_SYNONYMS.get(topic, (topic,))
+    synonyms = _load_topic_synonyms(cfg).get(topic, (topic,))
     hits = _scan_daily(cfg, synonyms, before_date) + _scan_global(cfg, synonyms, before_date)
     if not hits:
         return LastSeen(found=False, date=None, gap_days=None, source="", snippet="")
@@ -282,8 +303,9 @@ def _audit_claims(cfg: Config, claims: list[Claim], before_date: str) -> tuple[F
     P4 周报审计复用本函数，不复制规则。
     """
     findings: list[Finding] = []
+    table = _load_topic_synonyms(cfg)
     for claim in claims:
-        topic = find_topic(claim.text)
+        topic = _topic_from_table(table, claim.text)
         if topic and claim.claimed_days is not None:
             seen = last_seen(cfg, topic, before_date)
             if seen.found and seen.gap_days is not None and is_conflict(claim.claimed_days, seen.gap_days):
