@@ -36,7 +36,9 @@ def test_push_daily_segments_and_marks_touch(tmp_path, monkeypatch):
         return {"ok": len(targets), "failures": [], "errors": {}, "ids": {}}
 
     monkeypatch.setattr("gacore.langTrack.qq_push.send_c2c", fake_send)
-    monkeypatch.setattr("gacore.langTrack.qq_push.load_known_users", lambda: {"u1": {}})
+    monkeypatch.setattr(
+        "gacore.langTrack.qq_push.load_known_users", lambda: {"A" * 32: {}}
+    )
 
     body = "# 今日状态\n- [今日状态-1] " + "好" * 900 + "\n\n# 想问你\n- [想问你-1] 你是在读还是上班？（依据：10-25）\n"
     sent = _push_daily_to_qq(cfg, "2026-10-25", body)
@@ -51,3 +53,26 @@ def test_push_daily_no_users_noop(tmp_path, monkeypatch):
     cfg = Config.for_tests(tmp_path)
     monkeypatch.setattr("gacore.langTrack.qq_push.load_known_users", lambda: {})
     assert _push_daily_to_qq(cfg, "2026-10-25", "# 今日状态\n- ok\n") == 0
+
+
+def test_push_daily_filters_placeholder_targets(tmp_path, monkeypatch):
+    """known_users 里的占位残留（user-1/admin-1）不是合法 openid，推送只发真实格式目标。"""
+    cfg = Config.for_tests(tmp_path)
+    calls: list[list[str]] = []
+
+    async def fake_send(content, targets, is_sandbox):
+        calls.append(list(targets))
+        return {"ok": len(targets), "failures": [], "errors": {}, "ids": {}}
+
+    monkeypatch.setattr("gacore.langTrack.qq_push.send_c2c", fake_send)
+    monkeypatch.setattr(
+        "gacore.langTrack.qq_push.load_known_users",
+        lambda: {
+            "5270431CCFE7063EA0B30D0D396D91BF": {},
+            "user-1": {},
+            "admin-1": {},
+        },
+    )
+    sent = _push_daily_to_qq(cfg, "2026-10-25", "# 今日状态\n- ok\n")
+    assert sent == 1
+    assert calls == [["5270431CCFE7063EA0B30D0D396D91BF"]]

@@ -959,16 +959,32 @@ def _split_for_qq(body: str, limit: int = _QQ_SEGMENT_CHARS) -> list[str]:
     return segments
 
 
+# QQ openid 为 32 位十六进制；known_users 里的占位残留（user-1/admin-1 等）不是合法目标
+_QQ_OPENID_RE: Final = re.compile(r"^[0-9A-Fa-f]{32}$")
+
+
+def _qq_targets() -> list[str]:
+    """known users 里过滤出合法 openid 目标；占位条目跳过并计数。"""
+    from gacore.langTrack.qq_push import load_known_users
+
+    users = load_known_users()
+    targets = [uid for uid in users if _QQ_OPENID_RE.match(uid)]
+    skipped = len(users) - len(targets)
+    if skipped:
+        logger.info("qq push skipped placeholder targets", skipped=skipped)
+    return targets
+
+
 def _push_daily_to_qq(cfg: Config, day: str, body: str) -> int:
     """日报正文分段推 QQ；成功后当日开放问题计一次触达（asks+1，裸回答当晚生效）。"""
     import asyncio
 
     from gacore import qa_store
-    from gacore.langTrack.qq_push import load_known_users, send_c2c
+    from gacore.langTrack.qq_push import send_c2c
 
-    targets = list(load_known_users())
+    targets = _qq_targets()
     if not targets:
-        logger.info("daily qq push skipped: no known users", day=day)
+        logger.info("daily qq push skipped: no valid users", day=day)
         return 0
     segments = _split_for_qq(body)
     segments[-1] += "\n\n〔回复指引〕「想问你」直接回 [Q1] 你的答案；要订正正文回「订正 …」。"

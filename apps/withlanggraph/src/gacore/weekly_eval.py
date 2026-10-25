@@ -183,12 +183,13 @@ def push_weekly_notice(cfg: Config, week: str) -> int:
     """周报投递后的确定性 QQ 提醒（评分 + 候选操作说明）；失败只记日志。"""
     import asyncio
 
-    from gacore.langTrack.qq_push import load_known_users, send_c2c
+    from gacore.langTrack.qq_push import send_c2c
+    from gacore.scheduler import _qq_targets
 
-    users = load_known_users()
-    targets = [uid for uid, info in users.items() if not info.get("is_sandbox")]
+    targets = _qq_targets()
     if not targets:
-        targets = list(users)
+        logger.info("weekly notice skipped: no valid users", week=week)
+        return 0
     message = (
         f"本周周报（{week}）已发邮件。\n"
         "· 打分：回「像不像我 有用」两个 0-5 数字，如「4 3」，可再跟一个最不像的条目号。\n"
