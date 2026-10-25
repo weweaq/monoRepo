@@ -2277,7 +2277,7 @@ reply ─cap_questions→ gated ─stamp_report_bullets→ deliver_reply ─save
 | `weekly_eval.set_pending_weekly / load_pending` | `data/eval/human/pending.json`（week + 候选清单 + rated 标记，3 天过期） |
 | `weekly_eval.try_weekly_interaction(cfg, content)` | 评分 `4 3`（可带第三数字=最不像条目与自由文本）→ `{week}.json`（`rubric_version:1`，决策 17/22，已评分不重复吞）；候选 `1`/`-2`/`0`（决策 27）→ `set_candidate_status`，confirmed 追加 `global_mem_facts.txt` |
 | `weekly_eval.push_weekly_notice(cfg, week)` | 投递后确定性 QQ 提醒（评分与候选操作说明，best-effort） |
-| `scheduler.next_run_time` weekday 形态 | `Sun 20:30`/`周日 20:30`；既有 `HH:MM`/`every N<d/h/m>` 不变 |
+| `scheduler.next_run_time` weekday 形态 | `Sun 20:30`/`周日 20:30`；既有 `HH:MM`/`every N<d/h/m>` 不变。**到期语义（2026-10-25 首跑事故修复）**：槽位已过但本周未跑 → 原样返回已过槽位（`now >= slot` 即到期，迟到补跑，与 `HH:MM` 同语义）；只有 `last_run >= slot`（本周已跑过）才翻下周——修复前槽位一过无条件 +7 天，30s 轮询的到期窗口零宽，job 永不触发 |
 | `audit._report_path / _anchor_day` | week id → `delivered_weekly/{week}.md`；last_seen 基线锚点 = 周日；R5 对周报 fail-open |
 | `audit.cap_questions(reply, limit=…)` | 日报 limit=5（默认）、周报 limit=3 |
 
