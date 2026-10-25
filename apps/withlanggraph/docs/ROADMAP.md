@@ -4368,3 +4368,29 @@ batterystats 实测 weiCheckApp 耗电 67.7 mAh，其中 GNSS 64.4 mAh（引擎�
 - [ ] P2：`schedule.json` 加 `last_seen` 契约 + `# 想问你` 节 + `save_delivered` 后挂审计钩子（默认只标记）+ R5 跨篇规则 + `last_seen` 读历史日报走 v1 `report_text`
 - [ ] P3：proactive job（次日 08:30 QQ 推送，决策 25）+ `proactive_qa` 处理器 + `data/qa/` 落库 + `_QA` 源（cap 600 字，决策 24）
 - [ ] P4：周报（程序填数字 + 模型写叙事）+ 评分两问 + 周趋势；周报同样过 `_audit_claims`
+
+## 2026-10-25 · 日报断言基线闸 P2（查表契约接入生成）
+
+**背景**：P1 已给出历史基线（59 篇 / 29 断言 / 16 无锚 / 2 硬冲突），但生成侧没有任何机制阻止模型继续凭语感写量级。P2 按 `docs/superpowers/plans/2026-10-25-daily-report-audit-p2.md` 把「数字查表」接进生成链路：`last_seen` 工具化 + prompt 硬规则 + `# 想问你` 节与确定性硬闸 + 投递后审计钩子。
+
+**已完成**（5 笔功能提交）：
+- `gacore/audit.py`：`last_seen` 数据源扩至**历史日报 v1 快照**（只读 `{date}.v1.json` 的 `report_text`，无快照不作证据，决策 23）；新增 **R5 跨篇连续计数断档**（`连续/持续 N 天` 对照昨日 v1 同主题计数，`N==M+1` 或 `N==1` 为连续，否则 warn；主题识别不出 fail-open）；新增 `cap_questions` 想问你硬闸（>5 截断、删缺「依据」条、清零整节省略，只动该节）。
+- `gacore/tools/audit_tools.py`（新增）：`last_seen(topic, before_date="")` 注册进工具表（import / TOOL_NAMES / _TOOLS 三处），自配 `Config.default()`，docstring 写明三选一契约。
+- `config/schedule.json` daily-report prompt：时间量级军规（先查表再三选一、found=False 禁写量级）+ `# 想问你` 节（0–5 条、0 条合法、铺垫+问句+依据锚、价值二选一准入）；json round-trip 修改，diff 仅 prompt 一行。
+- `scheduler.py` 投递路径两处：`stamp_report_bullets` 前过 `cap_questions`（改动记 `report questions gated` WARNING）；`save_delivered` 成功后、`_deliver` 前挂 `_audit_delivered`（audit_report + write_audit + 计数日志），两处均 best-effort try/except，决策 2「只标记不阻断」。生成与投递主逻辑零改动。
+- 架构图：TOOLS 区新增 `T8 last_seen`、AUD 节点补 R5/v1 快照源/cap_questions、SC→AUD 边改「P2 已挂审计钩子」；mermaid 断言行号同步（FB 96 / 日报正文 123）ALL PASS。tech 新增 §9.35。
+
+**实测验证**：
+- `tests/test_audit.py` → **29 passed**（新增 11 例：v1 快照三例、工具注册与 Config 解析、prompt 契约防回归、R5 三例、cap_questions 四例、钩子落盘）；`test_scheduler_extract_job.py` 7 passed 无回归；ruff 全绿。
+- 真实链路（生成→投递→审计）属运行时行为，待当晚 23:50 真实日报运行验证：预期 `logs/report_audit/{当日}.v1.json` 自动生成、`report audited` 日志出现。
+
+**偏差说明**：
+- prompt 新增规则合计约 210 字（spec §10 目标 ≤200 字），超出 10 字为保住决策 12.1 的价值二选一准入条件，接受。
+- `cap_questions` 的 key 去重 / token 重合 >60% 聚类未做——依赖 P3 qa 落库的历史，按计划归 P3。
+- 想问你硬闸在 `stamp_report_bullets` **前**执行（而非 spec 写的生成后独立闸），保证锚点连续；语义等价（闸的输入就是生成产物）。
+- R5 只在主题词表能同时识别昨日与今日主题时判定，当前词表 4 主题，实际覆盖面有限（fail-open 方向安全）。
+
+**待办更新**：
+- [ ] 当晚真实运行验证：v1 自动落盘 + `report audited` 日志 + 日报含 `# 想问你`（或整节省略）
+- [ ] P3：proactive job（次日 08:30 QQ 推送）+ `proactive_qa` 处理器 + `data/qa/` 落库 + `_QA` 源（cap 600 字）+ 想问你 key 去重
+- [ ] P4：周报 + 评分两问 + 周趋势

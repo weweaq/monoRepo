@@ -2193,3 +2193,37 @@ CLI：`uv run python -m gacore.audit --backfill`（stdout 打印汇总 JSON 属 
 - 主题词表只覆盖 4 主题，新主题不补 `config/audit_topics.json` 则 R2 漏报（fail-open 不误报）。
 - R5（计数自相矛盾，跨篇语料）P1 不实现，随 P2 做。
 - 阻断开关不存在（决策 2：P1 只标记）；连续 3 期 error 升级机制随 P2 的 `save_delivered` 钩子一起评估。
+
+## 9.35 断言基线闸 P2：查表契约接入生成（2026-10-25）
+
+> 实施计划：`docs/superpowers/plans/2026-10-25-daily-report-audit-p2.md`。P2 改生成链路但不改信息包取数；生成与投递主逻辑零改动，全部接缝都是 best-effort。
+
+### 生成侧接入
+
+| 接缝 | 落点 | 说明 |
+|---|---|---|
+| 查表工具 | `gacore/tools/audit_tools.py` 的 `last_seen(topic, before_date="")` | 注册进 TOOL_NAMES/_TOOLS；内部调 `gacore.audit.last_seen`，`before_date` 缺省=今天（东八区）；数据源=记忆三源+历史 v1 快照（决策 23） |
+| prompt 硬规则 | `config/schedule.json` daily-report prompt | 「时间量级军规」：写量级断言前必须 `last_seen(topic)` 查表，三选一出口（带日期/改问句/删量级），found=False 禁写量级 |
+| `# 想问你` 节 | 同上 prompt | 0–5 条、0 条合法整节省略；每条=铺垫+问句+（依据：…）；只问语义缺失/画像矛盾；价值二选一须近 14 天双观测且允许“都不是”（决策 12.1） |
+
+### 投递侧闸与钩子（`scheduler.py` run_job 投递路径）
+
+```
+reply ─cap_questions→ gated ─stamp_report_bullets→ deliver_reply ─save_delivered→ 真相源
+                                                                     ↓
+                                                            _audit_delivered（audit_report + write_audit）
+                                                                     ↓
+                                                                 _deliver
+```
+
+- `cap_questions(reply) -> tuple[str, bool]`（`gacore/audit.py`）：只动 `# 想问你` 节——bullet >5 截断、缺「依据」条删除、清零则整节连同标题省略；其余正文逐字不变；发生改动返回 True 并记 `report questions gated` WARNING。key 去重依赖 qa 历史，归 P3。
+- `_audit_delivered(cfg, day)`：`save_delivered` 成功后、`_deliver` 前执行（决策 2 钩子位置），`audit_report` + `write_audit` 落 `{date}.vN.json`（v1 含 `report_text` 冻结），日志 `report audited`（score/findings/errors）。两处均 try/except best-effort——审计失败绝不影响投递；阻断开关仍不存在（连续 3 期 error 的升级机制留待观察误报率后再评估）。
+
+### R5 跨篇连续计数（`_audit_claims` 内，P2 新增）
+
+`连续/持续 N 天` 断言对照**昨日 v1 快照**同主题（`config/audit_topics.json` 词表识别）的最大计数 M：`N == M+1`（递增）或 `N == 1`（重新起算）为连续；否则 `Finding(rule="R5", severity="warn")`，evidence 写「昨日连续 M 天 vs 今日 N 天」。任一侧主题识别不出 → 不判（fail-open）。规则优先级整体为 **R2 > R4 > R5 > R1**（单断言单 finding）。
+
+### 已知边界
+
+- R5 覆盖面受词表限制（当前 4 主题）；扩词表即扩覆盖，不改代码。
+- 生成→投递→审计全链路属运行时行为，首晚真实运行后以 `logs/report_audit/{当日}.v1.json` 与 `report audited` 日志核对。
