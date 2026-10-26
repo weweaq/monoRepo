@@ -4693,3 +4693,53 @@ batterystats 实测 weiCheckApp 耗电 67.7 mAh，其中 GNSS 64.4 mAh（引擎�
 - [ ] 抽取层 `todos` 通道补 `due_at`/到期窗口字段，供 `kg_todo` 按到期日筛选
 - [ ] 处理仓库根 `tmp_pytest_run` ACL 拒绝（`tmp_pytest` 同样未清）
 - [ ] 重启 gacore 使 P2 候选池生效（`candidates.enabled=true` 已在配置中）
+
+## 2026-10-27 · 主动询问 2.0 P3：时机与自适应
+
+**背景**：P0/P1/P2 解决了「记得住问过什么、答得准、问得出来」，但发送节奏仍是固定 08:30 + 静态 2 条/日，不随用户回复率与作息调整。P3 按 `docs/proactive-inquiry-2.0.md` §5/§7 落地动态配额、静默时段、最小间隔、来源静音与「别问了」全局静音；不新增表、不新增链路、不改 `qq_push` 通道。
+
+**已完成**：
+- `proactive.py`：
+  - `quota_cap` / `questions_per_push`：近 7 日回复率四档 → 每日 1/2/3/4 条、单条 1/2/2/3 问；窗口内无数据（`reply_rate=None`）回退静态 `max_per_day`（冷启动 2 条/日）。
+  - `job_guard_allows` 闸门顺序：全局静音 → 静默时段（`quiet_hours`，默认 23:30–07:30）→ 动态配额 → 热聊冷却 → 最小间隔（`min_gap_hours=3`，复用既有 `last_sent_time`）→ 失联阈值 → 活跃时段。
+  - `record_last_active` 同步维护 24 维 `active_hours` 直方图（30 天半衰期）；`top_active_hours` / `active_slot_allows` 取最高 2 个小时 ±30 分钟；样本 <10 放行（冷启动不拦）；`guard.active_slot_enabled` 默认 false。
+  - `is_mute_request`（短句显式请求，≤12 字）+ `mute_global`（写 `muted_until`，7 天）；`muted_until_of` 归一东八区，供 guard 与 ops 直接比较。
+- `qa_store.py`：`source_health`（近 30 天按来源统计 + 连续忽略链）、`muted_sources`（连续 2 次忽略 → 静音 14 天）、`archive_muted`（静音来源的未答问题归档，避免静音到期后重问旧题）。
+- `proactive_candidates.py`：`select(..., muted_sources=...)` 采集后先过滤静音来源。
+- `frontends/qq.py`：命令分支后、暂停图与 QA 裸答之前识别「别问了/不想回答」，`_mute_and_reply` 落盘并回「好，接下来 7 天我不主动打扰你，有事随时叫我。」
+- `ops.py`：`proactive` 摘要新增 `muted_sources` / `muted_until` / `global_muted_users`，文本渲染追加两行。
+- `config/proactive.json`：`quiet_hours=23:30-07:30`、`adaptive_quota=true`、`min_gap_hours=3`、`active_slot_enabled=false`。
+
+**实测验证**：
+- 新增 `tests/test_proactive_p3_adaptive.py` 41 例：配额四档、静默时段（含跨午夜）、最小间隔、全局静音、「别问了」识别边界、直方图衰减/跨日、活跃时段闸门、来源连续忽略静音、候选池过滤、静音来源问题归档、ops 摘要。
+- 相关套件（`test_proactive_p3_adaptive + test_proactive_questions + test_proactive + test_ops`）= **111 passed**。
+- 全仓 `pytest` = **1815 passed / 5 skipped**；`ruff check` 全绿。
+
+**偏差说明**：
+- 设计 §8 的 `last_proactive_at` 未新增字段，复用既有 `last_sent_time`（`_mark_sent` 每次成功发送都写）；语义一致，少一份真源。
+- 设计 §8 的 `cooldown_until` 未新增：同主题 7 天冷却已由 `seed_candidates` 的 `recent_topics` 实现，行级字段冗余。
+- 闸门顺序与设计 §7 略有差异：来源静音在选问题阶段生效（比 §7 第 4 条更早），全局静音提前到第 0 条；活跃时段为可选第 7 条（默认关闭）。
+- 连续忽略静音的判定放在 `mark_ignored` 之前：当轮刚跨过阈值的来源本轮仍可能推一次，下一轮才静音（保守，避免同轮内刚记账就改判）。
+- 活跃时段默认关闭：questions job 每天只跑一次 08:30，固定时段已足够；直方图仍持续累积，供后续「窗口覆盖大半天 + 每小时触发」的调度使用。
+- 仓库根 `tmp_pytest_run` ACL 拒绝仍在，本轮以系统临时目录 `--basetemp` 复核。
+
+**待办更新**：
+- [x] P3：活跃时段调度、自适应配额 1–4 条/日、来源静音与 `别问了` 命令
+- [ ] 抽取层 `todos` 通道补 `due_at`/到期窗口字段，供 `kg_todo` 按到期日筛选
+- [ ] 处理仓库根 `tmp_pytest_run` ACL 拒绝（`tmp_pytest` 同样未清）
+- [ ] 重启 gacore 使 P2/P3 生效（`candidates.enabled=true`、`quiet_hours`、`adaptive_quota` 已在配置中）
+
+## 2026-10-27 · 主动询问 3.0 P3a：日报想问你随报走（修订决策 40）
+
+**背景**：用户拍板两个变更（设计稿 `docs/proactive-inquiry-3.0-design.md`，四项拍板见其 §6）：①日报的问题随日报直接问，看到了就回——原决策 40「夜间剥节、08:30 单独推」把一个自然交互拆成两条消息；②主动询问升级为 LLM 归因式「朋友式提问」，候选池降级为素材（P3b/P3c 待实现）。
+
+**已完成（1f99548）**：`scheduler._push_daily_to_qq` 删除 `_strip_questions` 调用（函数移除，`_is_question_heading` 保留——audit.cap_questions 仍用）；`_qq_reply_guidance` 回两态（正文带想问你 → 「直接回 [想问你-1] 你的答案」；否则只留订正）；推送成功即对当日开放问题 `set_prompt_order` + `mark_pushed`（asks=1）——显式与裸回答当晚生效，比原口径早 8.5 小时。
+
+**实测验证**：`test_daily_qq_push.py` 重写 4 例（随报走+asks=1+keys 快照 / 无问题不记账 / 无目标 noop / 占位过滤）→ 全仓 1813 passed + ruff 绿。关键发现：现有 proactive 链路零改动即形成正确两段触达——夜间 asks=1 → 08:30 只推仍开放者（已答即跳过）asks=2 → 次 `archive_stale`（max_asks=2）归档，语义自动衔接，`proactive.py` 无需动。
+
+**偏差说明**：R5 三处同步因并行会话文档批次未落库而推迟半日，本条与 tech §9.36 修订、spec 决策 40/25 批注随后补齐（即本提交）。
+
+**待办更新**：
+- [ ] P3b：`question_surface.py` 变化面（五路信号 vs 30 天基线）
+- [ ] P3c：`question_composer.py`（归因出题/无编号单问/裸回答归属最近推送/降级链）；「别问了」作用域按拍板拆分（2.0 P3 的全局静音改为只静音出题，晨间提醒不受影响）
+- [ ] 日报想问你节 prompt 注入 L1-L3 阶梯铁律（拍板 3，与 composer 共享文本）

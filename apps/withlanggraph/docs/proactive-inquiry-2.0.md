@@ -173,7 +173,7 @@ P1（多问题匹配，已完成 2026-10-26）：实现规则 + LLM 兜底匹配
 
 P2（候选池与生成器，已完成 2026-10-26）：新增 `proactive_candidates.py`，接入 `chat_loop`、`kg_todo`、`langtrack`、`memory_conflict` 四类来源 + 可解释打分（权重与阈值同 §5）+ 依据校验。候选问题由模板从真实来源行生成，日期/数字入池即已可追溯；`verify_evidence` 再对模型转述做发送后审计（`proactive.evidence` 日志）。入选候选经 `qa_store.seed_candidates` 落成 `kind=candidate` 的待答问题，复用既有 `mark_pushed`/`mark_ignored`/`reply_stats`/P1 匹配层。验收：候选来源可追溯（`ref` 指回 `kg_edges`/`daily_stats`/`candidates.jsonl`/`thread_id`），低于阈值不发。
 
-P3（时机与自适应）：活跃时段调度、动态配额、来源静音、`别问了` 命令。验收：连续忽略后自动降频，静默时段零发送。
+P3（时机与自适应，已完成 2026-10-27）：活跃时段调度、动态配额、来源静音、`别问了` 命令。落地时 `last_proactive_at` 复用既有 `last_sent_time`、`cooldown_until` 复用 `seed_candidates` 的 topic 7 天冷却（不新增行级字段）；`active_slot_enabled` 默认关闭（当前 08:30 单次调度用不到，直方图照常累积）。验收：连续忽略后自动降频，静默时段零发送。
 
 ## 10. 风险与回滚
 

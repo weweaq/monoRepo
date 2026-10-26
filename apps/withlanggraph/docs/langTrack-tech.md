@@ -2256,7 +2256,7 @@ reply ─cap_questions→ gated ─stamp_report_bullets→ deliver_reply ─save
 - **种入**：`scheduler._seed_qa(cfg, day, deliver_reply)` 在 `save_delivered` 后执行（审计钩子旁，best-effort），从已 stamp 的 `- [想问你-N]` 行种入。
 - **推送**：`schedule.json` 的 `daily-questions` job（type=proactive·08:30·scene=questions·window 08:00-09:30）；`run_proactive_job` 无开放问题整 job 跳过（`no_open_questions`，0 条不推）；问题清单注入 `build_proactive_prompt(questions=...)` 并强制**逐条原样转述、保留 [Qn] 编号**（编号是捕获配对键）；push 成功后先 `set_prompt_order` 记录展示顺序、再 `asks+1` + 归档超限。
 - **捕获**：`qq.py on_message` 路由 3.6 步（`feedback_route` 判定后、feedback 分发前）调 `try_answer`，命中回确认消息并 return——不进订正阶梯、不进 agent 轮（决策 8）；`allow_bare=route is None` 防止吞掉订正关键词。
-- **日报 QQ 推送**：`scheduler._push_daily_to_qq`——正文先过 `_strip_questions`（**剥掉 `# 想问你` 整节**，决策 40：提问只在次日 08:30 单独推，避免 9 小时内重复打扰与 `asks` 双计数）与 `_plain_for_qq`（剥 `**` 与反引号：QQ 聊天不渲染 Markdown，符号裸露成噪音；邮件版保留原样），再 `_split_for_qq` 6000 UTF-8 字节/段行边界切段（多段带〔日报 i/N〕标头），尾段追加 `_qq_reply_guidance`（只留订正话术；正文带过问题则加一句「明早 08:30 单独推」），挂 `_deliver` 邮件后 best-effort；**夜间不再 `mark_pushed`**。
+- **日报 QQ 推送**：`scheduler._push_daily_to_qq`——正文先过 `_plain_for_qq`（剥 `**` 与反引号：QQ 聊天不渲染 Markdown，符号裸露成噪音；邮件版保留原样），再 `_split_for_qq` 6000 UTF-8 字节/段行边界切段（多段带〔日报 i/N〕标头），尾段追加 `_qq_reply_guidance`（两态：正文带想问你 → 「直接回 [想问你-1] 你的答案」；否则只留订正）。**3.0 决策 D-A（修订原决策 40）**：想问你节**随报走**，`_strip_questions` 已删除；推送成功即对当日开放问题 `set_prompt_order` + `mark_pushed`（asks=1）——[Qn]/[想问你-N] 显式回答与裸回答当晚生效；次日 08:30 的 daily-questions 只对仍未答的提醒（asks=2），`max_asks=2` 归档语义自动衔接。挂 `_deliver` 邮件后 best-effort。
 - **注入**：`daily_info_pack` 注册 `SourceSpec("_QA", 600, 110, _build_qa)`（决策 24）；pack 单一截断点=cap（减已答组→对半减未答问题→硬截断），单行 `_qa_clip`（问 90/答 60）；未答清单给**问题原文**而非 `question_key`（决策 31）；空态 `- 当日无问答数据` → missing_data；detail=qa 库全量不压缩。
 
 ### 已知边界
@@ -2346,19 +2346,18 @@ sequenceDiagram
     participant QQ as QQ 用户
     participant P as proactive 08:30
     S->>Q: _seed_qa(day, 已 stamp 正文)
-    S->>QQ: 正文（_strip_questions 剥掉「想问你」）+ 订正指引
-    Note over QQ: 夜间不计 asks、不编号
-    P->>Q: open_questions()（唯一来源）
+    S->>QQ: 正文【含想问你节】+ 指引（3.0 决策 D-A 随报问）
+    S->>Q: set_prompt_order + mark_pushed（asks=1，裸答当晚生效）
+    P->>Q: open_questions()（仅仍未答者 → 晨间提醒）
     P->>Q: set_prompt_order([key...])  ← [Q1]..[Qn] 与消息同序
     P->>QQ: 逐条问题（编号 + 原文）
-    P->>Q: mark_pushed(asks+1) → archive_stale
-    QQ->>Q: [Q1] 答案 / [想问你-1] 答案 / 裸答（唯一待答且已推送）
+    P->>Q: mark_pushed(asks=2) → archive_stale
     Q-->>S: 次日 qa_brief(before_date=明日) 注入 _QA 源
 ```
 
 ### 测试与实测
 
-- 新增/改写测试：`test_qa_store.py`（跨天 `[Q1]`、展示顺序快照、答后编号不前移、越界不猜、`Q3 …` 不被吞、`评分/候选` 不被吞、锚点裸发不吞、as-of 栅栏、week id 折算）、`test_weekly.py`（`评分/候选` 前缀、裸数字不撞车、重复评分回执、周报种子、7 天语料注入）、`test_audit.py`（`alt` 次近命中、`cap_weekly` 短/长/`##` 标题/硬截断、backfill 二次跑与周报 v1 口径、非 ISO 日期报错）、`test_daily_qq_push.py`（夜间剥问题节且 `asks` 不涨、`## 想问你`、只剩问题节不推）、`test_proactive_questions.py`（第 3 次推送当天仍可答、下一轮归档）。
+- 新增/改写测试：`test_qa_store.py`（跨天 `[Q1]`、展示顺序快照、答后编号不前移、越界不猜、`Q3 …` 不被吞、`评分/候选` 不被吞、锚点裸发不吞、as-of 栅栏、week id 折算）、`test_weekly.py`（`评分/候选` 前缀、裸数字不撞车、重复评分回执、周报种子、7 天语料注入）、`test_audit.py`（`alt` 次近命中、`cap_weekly` 短/长/`##` 标题/硬截断、backfill 二次跑与周报 v1 口径、非 ISO 日期报错）、`test_daily_qq_push.py`（随报问：正文带问题且 `asks=1` + keys 快照、无问题不记账）、`test_proactive_questions.py`（第 3 次推送当天仍可答、下一轮归档）。
 - 全量：`1674 passed, 1 skipped`（`pytest -p no:randomly`）；`ruff check` 全绿。
 - 真实数据核对：`last_seen('工学椅','2026-10-12')` → 10-06（6 天），`alt` 带 09-22/09-20；`last_seen('硬件','2026-10-20')` → 10-07（13 天），冲突仍成立。
 - 已知口径差异：59 篇 v1 快照是 P1 期冻结的，当时 `_scan_reports` 尚未接入，故 10-20 的 v1 证据是 10-03；今天重算会得到 10-07（仍冲突）。审计结果 JSON 没有 `auditor_version` 字段，混版本快照无法区分（遗留项）。
@@ -2574,4 +2573,89 @@ sequenceDiagram
 - [ ] P3：活跃时段调度、自适应配额 1–4 条/日、来源静音与 `别问了` 命令
 - [ ] 抽取层 `todos` 通道补 `due_at`/到期窗口字段，供 `kg_todo` 按到期日筛选
 - [ ] 处理仓库根 `tmp_pytest_run` ACL 拒绝（`tmp_pytest` 同样未清）
+
+## 9.42 主动询问 2.0 P3：时机与自适应（proactive.py / qa_store.py / proactive_candidates.py / qq.py / ops.py，2026-10-27）
+
+**目标**：把固定 08:30 + 静态 2 条/日的节奏换成按回复率与作息自适应：动态配额、静默时段、最小间隔、来源静音与「别问了」全局静音。不新增表、不新增链路、不改 `qq_push`；配置缺失时保持 P0/P1/P2 行为。
+
+**动态配额（`proactive.py`）**：
+
+| 7 日回复率 | `quota_cap` 每日上限 | `questions_per_push` 单条问题数 |
+|---|---|---|
+| < 15% | 1 | 1 |
+| 15%–40% | 2 | 2 |
+| 40%–60% | 3 | 2 |
+| > 60% | 4 | 3 |
+
+- `reply_rate` 来自 `qa_store.reply_stats(days=7)`；窗口内 `asked=0` → `reply_rate=None`，回退静态 `guard.max_per_day`（冷启动 2 条/日）。
+- 两个函数只读不写状态；`guard.adaptive_quota=false` 时完全走旧逻辑（`_MAX_QUESTIONS_PER_PUSH=3`）。
+
+**Job Guard 闸门顺序（`job_guard_allows`）**：
+
+1. `muted_until` 未到期 → `globally_muted`
+2. `guard.quiet_hours`（默认 `23:30-07:30`，`in_window` 支持跨午夜）→ `quiet_hours`
+3. 当日上限（`quota_cap` 或 `max_per_day`）→ `daily_cap`
+4. 热聊冷却（`hot_chat_minutes`）→ `hot_chat`
+5. 与上一条主动消息间隔 < `min_gap_hours`（默认 3）→ `min_gap`；锚点复用既有 `entry["last_sent_time"]`（`_mark_sent` 每次成功发送都写），不新增 `last_proactive_at`
+6. 失联阈值（idle scene）
+7. `guard.active_slot_enabled`（默认 false）开启时按活跃时段 → `outside_active_slot`
+
+**活跃时段（`proactive.py`）**：
+
+- `record_last_active` 在写 `last_active` 的同时维护 `entry["active_hours"]`：24 维 float，按消息所在小时 +1.0；读改写前先按 30 天半衰期 `_decay_active_hours` 衰减，写回衰减后的值。
+- `top_active_hours(entry, now)`：衰减后总权重 < `_ACTIVE_MIN_SAMPLES=10` 返回空（冷启动放行）；否则取权重最高的 2 个小时。
+- `active_slot_allows`：每个高峰小时覆盖 `[h:00-30m, h+1:00+30m]`，处理 23 点跨日与 0 点跨日边界；关闭时恒放行。当前 08:30 单次任务保持关闭，直方图只累积。
+
+**来源静音（`qa_store.py` + `proactive_candidates.py`）**：
+
+- `source_health(cfg, days=30, now)`：按 `asked_at`（缺省 `delivered_at`）窗口取行，按来源统计 asked/answered/ignored；从最新一条向前数「连续 ignored」链——最新行已答或 `ignored_count=0`（还没到 24h 判定）即断链。
+- `muted_sources(cfg, now)`：连续忽略 ≥2 的来源，从最后一次忽略的 `updated_at` 起静音 14 天，返回 `{source: "YYYY-MM-DD HH:MM:SS"}`（东八区），过期不返回。
+- `archive_muted(cfg, sources)`：把静音来源的 open 行归档，避免静音到期后重问两周前的旧题；与 `archive_stale`（asks>2）互补。
+- `proactive_candidates.select(..., muted_sources=...)`：采集后先按来源过滤，静音来源不参与打分与同源分组。
+- questions scene 接线：`muted_sources` → `archive_muted` → `mark_ignored` → `archive_stale` → `open_questions` 过滤；过滤后为空且本轮确有静音归档时跳过并记 `source_muted`（不从候选池补位）。
+
+**「别问了」全局静音（`qq.py` + `proactive.py`）**：
+
+- `is_mute_request(text)`：`_MUTE_REQUEST_RE` 只接受 ≤12 字且自足的短句（`别问了/不想回答/不要再问了…`，尾部允许语气词与标点），普通句子顺带出现「别问」不算。
+- `mute_global(cfg, user_id, now, days=7)`：写 `entry["muted_until"]`/`muted_at`，返回 ISO 截止时间，落 `proactive.muted` 日志。
+- `muted_until_of(entry)`：读 `muted_until` 并归一东八区（手写缺偏移按东八区解释），供 guard 与 ops 直接比较。
+- `qq.py` 在命令分支之后、暂停图与 `try_answer` 之前判断：命中即 `_mute_and_reply` 落盘并回「好，接下来 7 天我不主动打扰你，有事随时叫我。」，然后 return，避免这句话被记成某个问题的答案。
+
+**运维可见（`ops.py`）**：`_proactive_summary` 增加 `muted_sources`（排序后的来源名）、`muted_until`（来源→截止时间）、`global_muted_users`（`muted_until` 未到期的用户数）；`_render` 追加 `muted sources:` 与 `globally muted users:` 两行。
+
+**配置（`config/proactive.json`）**：
+
+```json
+"guard": {
+  "idle_hours": 24,
+  "max_per_day": 2,
+  "hot_chat_minutes": 30,
+  "jitter_minutes": 30,
+  "quiet_hours": "23:30-07:30",
+  "adaptive_quota": true,
+  "min_gap_hours": 3,
+  "active_slot_enabled": false
+}
+```
+
+### 验证
+
+- 新增 `tests/test_proactive_p3_adaptive.py` 41 例：配额四档、静默时段（含跨午夜）、最小间隔、全局静音、`is_mute_request` 边界、直方图衰减/跨日、活跃时段闸门、来源连续忽略与静音、候选池过滤、静音来源问题归档、ops 摘要。
+- 相关套件（`test_proactive_p3_adaptive + test_proactive_questions + test_proactive + test_ops`）= **111 passed**；全仓 `pytest` = **1815 passed / 5 skipped**；`ruff check` 全绿。
+- 环境：仓库根 `tmp_pytest_run` ACL 拒绝仍在，本轮以系统临时目录 `--basetemp` 复核。
+
+**偏差说明**：
+
+- `last_proactive_at`（设计 §8）未新增字段，复用 `last_sent_time`。
+- `cooldown_until`（设计 §8）未新增：同主题 7 天冷却已由 `seed_candidates.recent_topics` 实现，行级字段冗余。
+- 来源静音在选问题阶段生效，比设计 §7 第 4 条更早；全局静音提前到第 0 条。
+- 静音判定在 `mark_ignored` 之前：当轮刚跨过阈值的来源本轮仍可能推一次，下一轮才静音（避免同轮内刚记账就改判）。
+- 活跃时段默认关闭：questions job 每天只跑一次 08:30，固定时段已足够；直方图持续累积，供后续窗口调度使用。
+
+**待办更新**：
+
+- [x] P3：活跃时段调度、自适应配额 1–4 条/日、来源静音与 `别问了` 命令
+- [ ] 抽取层 `todos` 通道补 `due_at`/到期窗口字段，供 `kg_todo` 按到期日筛选
+- [ ] 处理仓库根 `tmp_pytest_run` ACL 拒绝（`tmp_pytest` 同样未清）
+- [ ] 重启 gacore 使 P3 生效（`quiet_hours`/`adaptive_quota` 已在配置中）
 
