@@ -73,9 +73,9 @@ gain          预期信息增益（0–1）
 
 - `qa_open`：`qa_store.open_questions` 已开放且未超重问预算的问题，直接进入候选。
 - `chat_loop`：`proactive.recall_topic` 已能识别主线程最后一条 HumanMessage 是否为未完成问题；扩展它同时识别"回头再说 / 明天再弄 / 等忙完"这类承诺句，记录 `thread_id + message_id`。
-- `kg_todo`：抽取层 `kg_todos` 表中 `due_at` 在未来 3 天内、或状态仍为 open 的承诺；没有 `due_at` 的只在用户再次提及时进入候选。
+- `kg_todo`：抽取层 `kg_edges` 中 `src='todos'`、`valid_to IS NULL`（未闭合）且 `valid_from` 在近 14 天内的承诺；实际 schema 没有 `due_at` 列，到期日暂不可用，先按"最近提出且仍未完成"取。
 - `langtrack`：只取可解释的异常，例如连续 3 天入睡晚于 02:00、屏幕时间相对 30 日均值上浮 50%、周末工作时段显著增加；不取单日噪声。
-- `memory_conflict`：长期画像与近 7 日事实矛盾（例如画像写"早睡"但连续熬夜），由日报的「画像候选」链路提供，不新增 LLM 扫描。
+- `memory_conflict`：长期画像与近 7 日事实矛盾（例如画像写"早睡"但连续熬夜），由日报的「画像候选」链路提供，不新增 LLM 扫描；实现上取 `data/qa/candidates.jsonl` 里仍 `pending` 的画像条目（画像缺口），以确认式问题回问。
 
 去重沿用 `qa_store.question_key`（topic + 意图指纹）；同一 `topic` 在 7 天内最多出现一次，已回答的 key 永不再入池。
 
@@ -99,7 +99,7 @@ score = 0.30 * gain
 - `intrusion`：当前小时是否在静默时段、30 分钟内是否热聊、该来源连续忽略次数。
 - 低于 0.55 不入发送队列；每个时段最多取前 2 条，回复率 >50% 时可放到 3 条。
 
-批量规则：一条消息内最多 3 个问题，按 `[Q1] [Q2] [Q3]` 编号；问题之间必须同源或同主题，避免变成问卷。超过 3 条的候选留在池里等下一个时段，不一次性倾倒。
+批量规则：一条消息内最多 3 个问题，按 `[Q1] [Q2] [Q3]` 编号；问题之间必须同源或同主题，避免变成问卷。超过 3 条的候选留在池里等下一个时段，不一次性倾倒。实现上 `select` 只取总分最高的一类来源，日报 `想问你` 非空时不再混入候选池（同源约束优先）。
 
 自适应配额按近 7 天回复率调整：
 
@@ -171,7 +171,7 @@ P0（语义与账本，不改行为）：修正"发送即已答"，补 `asked_at
 
 P1（多问题匹配，已完成 2026-10-26）：实现规则 + LLM 兜底匹配，放开单条消息 2–3 个问题（`_MAX_QUESTIONS_PER_PUSH=3`），显式锚点仍拦截。验收：3 个开放问题时自然语言回答 Q2 能被正确归因，正常聊天不被吞。
 
-P2（候选池与生成器）：接入 `chat_loop`、`kg_todo`、`langtrack`、`memory_conflict` 四类来源，加打分与"依据校验"（生成文案中的日期/数字必须能在来源里找到，否则丢弃重写）。验收：候选来源可追溯，低于阈值不发。
+P2（候选池与生成器，已完成 2026-10-26）：新增 `proactive_candidates.py`，接入 `chat_loop`、`kg_todo`、`langtrack`、`memory_conflict` 四类来源 + 可解释打分（权重与阈值同 §5）+ 依据校验。候选问题由模板从真实来源行生成，日期/数字入池即已可追溯；`verify_evidence` 再对模型转述做发送后审计（`proactive.evidence` 日志）。入选候选经 `qa_store.seed_candidates` 落成 `kind=candidate` 的待答问题，复用既有 `mark_pushed`/`mark_ignored`/`reply_stats`/P1 匹配层。验收：候选来源可追溯（`ref` 指回 `kg_edges`/`daily_stats`/`candidates.jsonl`/`thread_id`），低于阈值不发。
 
 P3（时机与自适应）：活跃时段调度、动态配额、来源静音、`别问了` 命令。验收：连续忽略后自动降频，静默时段零发送。
 

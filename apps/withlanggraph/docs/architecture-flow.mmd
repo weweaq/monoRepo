@@ -10,6 +10,7 @@ flowchart TD
         QQ["qq 消息/反馈<br/>文本多消息 1.2s 合并<br/>同用户单轮串行(取消静默)"]
         MN["start.py 主进程<br/>_main(): scheduler 线程 + QQ 主循环<br/>main 心跳(每15s) + 优雅停机(stop_event)"]
         RC["proactive=定时主动推送:<br/>scheduler 每30s轮询 schedule.json 中<br/>type==proactive 的 job<br/>(proactive_due 过 window+cooldown)→入池<br/>cli=交互式 REPL: python -m gacore<br/>rerun=补跑: python -m gacore.rerun --day/--week<br/>(run_job 包 runtime.as_of 栅栏:时钟锚/get_time/<br/>每日笔记注入/事实卡/记忆写入全以目标日为今天,<br/>onboard 导出跳过·前日日报只取目标日前落盘)"]
+        PC["候选池 proactive_candidates<br/>P2: 日报「想问你」为空时补位<br/>collect_all 四类来源(best-effort·单源失败不中断)<br/>chat_loop=主线程最后一条 HumanMessage 承诺句(ref thread_id:msgN)<br/>kg_todo=kg_edges src=todos·valid_to IS NULL·valid_from 近14天(ref edge_id)<br/>langtrack=daily_stats 连续3天≥02:00入睡 / 近3天屏幕≥前30天均值1.5×<br/>memory_conflict=weekly_stats.pending_candidates 画像缺口<br/>score_candidate: 0.30gain+0.25fresh+0.20spec+0.15answer+0.10novelty-0.30intrusion<br/>select 阈值0.55·同源只取最高分组·question_key 去重<br/>verify_evidence 发送后审计(日期/数字回溯·只记警告)"]
     end
 
     subgraph MAIN["② 主图状态机  graph.build_graph() (核心):<br/>5 个核心节点串联对话流水, 每节点独立职责"]
@@ -71,7 +72,7 @@ flowchart TD
         KG[("langTrack.db kg_* 表<br/>kg_runs/kg_nodes/kg_edges<br/>kg_relations/kg_aliases<br/>kg_emotions/kg_patterns/kg_worldview<br/>schema.migrate_extract_tables")]
         KV["KG 可视化 kg_view<br/>GET /kg?view=overview / timeline / audit<br/>python -m gacore.langTrack.kg_view --out-dir data/kg_view<br/>load_kg_snapshot 只读 SELECT · render_kg_html 三视图<br/>cytoscape 3.30.2 与快照 JSON 内联（无 CDN）"]
         AUD["日报断言基线闸 gacore/audit.py<br/>python -m gacore.audit --backfill (离线 CLI)<br/>extract_claims 遮蔽引文/时刻→同子句量级×断言词 距离≤12<br/>parse_duration_days 中文量级→天数<br/>TOPIC_SYNONYMS·find_topic→last_seen 记忆三源+历史v1快照(report_text·决策23)·alt 次近命中(决策37)<br/>R2 容差带(claimed≥2×actual且差≥14d)·R1/R4/R5 warn·单断言单finding(R2&gt;R4&gt;R5&gt;R1)<br/>write_audit {date}.vN.json 冻结 report_text(决策23·v1 永不覆盖)<br/>render_baseline→logs/report_audit/baseline.md(60篇·30断言/16无锚/2硬冲突/均分98)<br/>cap_questions 想问你硬闸(&gt;5截断·删无依据条·#/## 都认)·cap_weekly 1200字硬闸(决策34)"]
-        QAS["提问回路 qa_store<br/>data/qa/{date}.jsonl·candidates.jsonl·open_state.json<br/>seed_questions 种入(已答key永不重开·同期2gram Jaccard&gt;0.6去重·周报用 week id)<br/>mark_pushed asks+1·archive_stale 超两期归档(在推送前跑·第3次仍可答)<br/>try_answer 捕获([Qn]按 open_state.keys 快照·[想问你-N]按最近一期锚点·越界不猜·决策29/41)<br/>P1 match_answer 多问题归因: 规则(主题0.3+2gram覆盖0.7·≥0.7)·歧义分差&lt;0.1不猜<br/>LLM兜底(规则0.45–0.7且&gt;8字·置信≥0.75)·record_answer 落 match_method/confidence/answered_at·unanswer 回滚<br/>qa_brief 双端 as-of 栅栏(决策30)·_day_as_date 周id折周日(决策39)"]
+        QAS["提问回路 qa_store<br/>data/qa/{date}.jsonl·candidates.jsonl·open_state.json<br/>seed_questions 种入(已答key永不重开·同期2gram Jaccard&gt;0.6去重·周报用 week id)<br/>mark_pushed asks+1·archive_stale 超两期归档(在推送前跑·第3次仍可答)<br/>try_answer 捕获([Qn]按 open_state.keys 快照·[想问你-N]按最近一期锚点·越界不猜·决策29/41)<br/>P1 match_answer 多问题归因: 规则(主题0.3+2gram覆盖0.7·≥0.7)·歧义分差&lt;0.1不猜<br/>LLM兜底(规则0.45–0.7且&gt;8字·置信≥0.75)·record_answer 落 match_method/confidence/answered_at·unanswer 回滚<br/>qa_brief 双端 as-of 栅栏(决策30)·_day_as_date 周id折周日(决策39)<br/>P2 seed_candidates(kind=candidate·已答key不再入池·同日2gram相似·topic 7天冷却)·qa_brief 过滤候选行"]
         WK["周报+人物闸 weekly_stats·weekly_eval<br/>python -m gacore.weekly_stats（无 CLI·库模块）<br/>数字程序填: git提交/屏幕/睡眠/审计v1周均/QA计数+环比(collect_week_numbers 只读区)<br/>评分 data/eval/human/{week}.json (alive·useful·rubric_version)<br/>候选 confirmed→global_mem_facts.txt(决策35: 候选 N 确认·候选 -N 否掉·候选 0 全否)<br/>回看上期 prev_week·pending 3天过期<br/>cap_weekly 1200字硬闸(保首节+打分/想问你/画像候选·决策34)<br/>重跑: python -m gacore.rerun --week YYYY-Www（for_week 锚定）"]
         OC["opencode 免费模型适配器 gacore/opencode_llm.py<br/>OpencodeChatModel(BaseChatModel) · bind_tools 非空即拒绝<br/>POST /session → POST /session/{id}/message → DELETE /session/{id}<br/>_session_payload 只发 title（显式 permission 触发 403 FreeTierError）<br/>消息体只发 model/parts(/system/agent) · 无 tools 映射<br/>UA 默认不发（OPENCODE_CLIENT_UA 显式 opt-in；opencode/&lt;version&gt; 有条款/403 风险）<br/>model.variant=OPENCODE_VARIANT（抽取层 low，空=模型默认档）<br/>空 parts → OpencodeEmptyResponse(is_retryable=True) → runner 重试<br/>→ 本地 opencode serve 127.0.0.1:4096"]
     end
@@ -158,6 +159,13 @@ flowchart TD
     MM -. "last_seen 只读基线<br/>memory/daily/*.md + global_mem_insight.txt + global_mem_facts.txt" .-> AUD
     SC -. "投递正文想问你节种入 (_seed_qa·save_delivered 后 best-effort)" .-> QAS
     SC -. "daily-questions job (type=proactive·08:30·scene=questions)<br/>archive_stale(先归档)→open_questions 注入(最多3问)·qq_push 逐条转述[Qn]<br/>set_prompt_order 落盘展示顺序·push 后 asks+1" .-> QAS
+    RC -. "questions scene: 日报 open_questions 为空且 candidates.enabled → select(四类来源·打分≥0.55·同源取最高分组)" .-> PC
+    PC -. "seed_candidates(kind=candidate·topic 7天冷却·与日报问题共用 data/qa/{day}.jsonl)" .-> QAS
+    RC -. "push 后 verify_evidence: 正文日期/数字回溯候选 evidence·违例记 proactive.evidence(不阻断)" .-> PC
+    KG -. "kg_edges: src='todos'·invalidated=0·valid_to IS NULL·valid_from 近14天" .-> PC
+    ET -. "daily_stats: 连续3天入睡≥02:00 / 近3天屏幕≥前30天均值1.5×" .-> PC
+    WK -. "pending_candidates: 仍 pending 的画像缺口" .-> PC
+    QAS -. "reply_stats(by_source)+all_rows: 打分上下文(recent_topics/recent_questions)" .-> PC
     QQ -. "回答捕获 try_answer (路由3.6步·feedback 之前·命中即确认·评分/候选前缀先拦截)<br/>+ P1 多问题自然语言回答后台 match_and_record (路由3.65·规则/LLM兜底·不拦截消息)" .-> QAS
     SC -. "日报正文分段推 QQ (_push_daily_to_qq·6000字节/段·剥「想问你」节·不计触达)" .-> QQ
     QAS -. "_QA 源 (cap600·决策24·qa_brief 近7天已答+未答问题原文)" .-> SIP

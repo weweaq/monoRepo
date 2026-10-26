@@ -4660,3 +4660,36 @@ batterystats 实测 weiCheckApp 耗电 67.7 mAh，其中 GNSS 64.4 mAh（引擎�
 - [ ] P2：候选池（chat_loop / kg_todo / langtrack / memory_conflict）+ 打分与依据校验
 - [ ] P3：活跃时段调度、自适应配额 1–4 条/日、来源静音与 `别问了` 命令
 - [ ] 清理仓库根 `tmp_pytest` 残留目录（需先解除 ACL 拒绝）
+
+## 2026-10-26 · 主动询问 2.0 P2：候选池与依据校验
+
+**背景**：P1 解决了"问得多时答不准"，但问题仍只有一个来源——日报「想问你」。日报没有问题时 08:30 的 questions job 直接跳过，主动询问在"没写日报的那天"就哑火。P2 按 `docs/proactive-inquiry-2.0.md` §4/§5 建候选池：从四类本地既有数据采集候选、可解释打分、阈值过滤，并把入选候选种回同一份 qa 账本，复用 P0/P1 的推送与归因链路。
+
+**已完成**：
+- 新增 `src/gacore/proactive_candidates.py`：`Candidate`（source/ref/topic/anchor/question/freshness/gain/evidence）与 `ScoreContext`；四类采集器 `collect_chat_loop`（主线程最后一条 HumanMessage 的「回头再说/明天再弄/等忙完」承诺句，ref=`thread_id:msgN`）、`collect_kg_todo`（`kg_edges` 中 `src='todos'`、`invalidated=0`、`valid_to IS NULL`、`valid_from` 近 14 天，ref=`kg_edges:{edge_id}`）、`collect_langtrack`（`daily_stats` 连续 3 天入睡 ≥02:00 或近 3 天屏幕时间 ≥ 前 30 天均值 1.5 倍）、`collect_memory_conflict`（`weekly_stats.pending_candidates` 仍 pending 的画像缺口，ref=`qa_candidate:{question_key}`）；`collect_all` 逐来源 best-effort，单源异常只记日志不中断。
+- 打分与选择：`score_candidate` 按 `0.30*gain + 0.25*freshness + 0.20*specificity + 0.15*answer_likelihood + 0.10*novelty - 0.30*intrusion` 输出各维度与总分（权重常量与设计稿 §5 一字不差）；`select` 以 0.55 为阈值过滤，只取总分最高的一类来源（单条消息同源约束），按 `question_key` 去重后返回，逐条落 `proactive.candidate` 日志（含各维度分与 selected）。
+- `qa_store.py`：新增 `topic_of`（audit 词表优先，未命中退回 12 字去噪片段）；`seed_candidates` 把候选种成 `kind=candidate` 的 open 行（已答 key 不再入池、同 key 跳过、同日 2-gram 相似跳过、同 topic 7 天冷却），行内含 `source/ref/topic/evidence/freshness/gain`；`qa_brief` 过滤候选行，候选不混入日报/周报语料。
+- `proactive.py`：新增 `_candidates_enabled`（`config/proactive.json` 的 `candidates.enabled`，缺失/损坏默认开启）；questions scene 在 `open_questions` 为空且开关开启时调用 `select` + `seed_candidates`，再重读开放问题；push 成功后调用 `verify_evidence(reply, open_qa)`，正文中出现无法回溯的日期/数字只记 `proactive.evidence` 警告（消息已发出，不阻断）；`build_proactive_prompt` 问题块文案改为「可能来自日报想问你或候选池」。
+- `config/proactive.json`：新增 `candidates.enabled: true`，设为 false 即秒关候选池，日报链路不受影响。
+- 文档：`langTrack-tech.md` 新增 9.41；`architecture-flow.mmd` 新增 PC 节点与数据来源边、更新 QAS 节点。
+
+**实测验证**：
+- 新增 `tests/test_proactive_candidates.py` 16 例：打分满分/边界、阈值过滤、四类来源采集（含 kg_todo schema、连续晚睡/屏幕上浮、承诺句、pending 画像）、同源分组只取最高分来源、topic 7 天冷却、已答 key 不入池、`qa_brief` 过滤候选、questions scene 接线、`candidates.enabled=false` 关闭、`verify_evidence` 回溯。
+- 相关套件 `test_proactive_candidates + test_qa_store + test_proactive_questions + test_proactive_p2 + test_proactive_p3 + test_ops` = **123 passed**。
+- 全仓 `pytest` = **1773 passed / 5 skipped**；`ruff check apps packages tests` 全绿。
+
+**偏差说明**：
+- `kg_todo` 实际 schema 无 `due_at` 列（设计稿原假设有），改为「`valid_to IS NULL` + `valid_from` 近 14 天」取未闭合待办；到期日暂不可用，留待抽取层补字段后再按到期窗口筛选。
+- `memory_conflict` 取的是日报「画像候选」里仍 pending 的条目（画像缺口），不是严格的"画像与近 7 日事实矛盾"；矛盾检测需要新的比对逻辑，本轮按设计稿「不新增 LLM 扫描」的约束先做缺口确认。
+- 同源约束实现为"只取最高分的一类来源"，因此候选池只在日报「想问你」为空时启用；日报有问题时优先日报，避免一条消息变成多来源问卷。
+- `intrusion` 在静默时段（23:30–07:30）或 30 分钟内热聊时直接记 1.0，叠加 -0.30 权重后绝大多数候选会跌破 0.55，等于静默时段天然不发；这是有意保守，P3 再做活跃时段调度。
+- `verify_evidence` 只能事后审计：消息经 `qq_push` 发出后无法撤回，故凭空数字只记警告，不阻断投递。
+- 仓库根 `tmp_pytest_run` 复现 ACL 拒绝（`icacls` 也无法读取），本轮相关套件与全仓门禁改用独立 `--basetemp` 复核；根配置的 basetemp 位置需另行处理。
+
+**待办更新**：
+- [x] P1：多问题回答匹配（显式锚点拦截 + 规则 2-gram + LLM 兜底），落 `match_method`/`match_confidence`，回填 scene 级 answered/ignored
+- [x] P2：候选池（chat_loop / kg_todo / langtrack / memory_conflict）+ 打分与依据校验
+- [ ] P3：活跃时段调度、自适应配额 1–4 条/日、来源静音与 `别问了` 命令
+- [ ] 抽取层 `todos` 通道补 `due_at`/到期窗口字段，供 `kg_todo` 按到期日筛选
+- [ ] 处理仓库根 `tmp_pytest_run` ACL 拒绝（`tmp_pytest` 同样未清）
+- [ ] 重启 gacore 使 P2 候选池生效（`candidates.enabled=true` 已在配置中）

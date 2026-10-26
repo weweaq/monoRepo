@@ -2482,3 +2482,96 @@ sequenceDiagram
 - 相关套件 `test_qa_store + test_proactive* + test_ops + test_weekly + test_daily_qq_push` = **241 passed**；全仓 `pytest` = **1758 passed / 5 skipped**；`ruff check` 全绿。
 - 环境修复：仓库根 `tmp_pytest` 残留目录 ACL 锁死（需提权删除），已把根 pytest `--basetemp` 切到 `tmp_pytest_run`，`.gitignore` 放宽为 `tmp_pytest*/`；`uv run pytest` 不带参数即可跑通（本轮实测同上）。
 
+## 9.41 主动询问 2.0 P2：候选池与依据校验（proactive_candidates.py / qa_store.py / proactive.py，2026-10-26）
+
+**目标**：日报「想问你」为空时，questions job 不再直接跳过。P2 从四类本地既有数据采集候选，打分 ≥0.55 才入池，并种回同一份 qa 账本，复用 P0/P1 的推送、忽略、回复率与归因链路；不新增表、不新增采集链路、不新增 LLM 扫描。
+
+**四类来源（`proactive_candidates.py`）**：
+
+| source | 读取口径 | `ref` | gain |
+|---|---|---|---|
+| `chat_loop` | `proactive._read_thread_messages` 主线程最后一条 HumanMessage 命中 `_COMMITMENT_RE`（回头再说/明天再弄/等忙完等） | `{thread_id}:msg{N}` | 0.55 |
+| `kg_todo` | `kg_edges` 中 `src='todos'`、`invalidated=0`、`valid_to IS NULL`、`valid_from` 近 14 天（schema 无 `due_at`） | `kg_edges:{edge_id}` | 0.85（7 天内）/ 0.70 |
+| `langtrack` | `daily_stats` 连续 3 天 `sleep_start_hhmm` ≥02:00；或近 3 天 `total_screen_ms` 日均 ≥ 前 30 天均值 ×1.5 | `daily_stats:sleep:{day}~{day}` / `daily_stats:screen:{day}~{day}` | 0.75 / 0.60 |
+| `memory_conflict` | `weekly_stats.pending_candidates` 中仍 pending 的画像缺口 | `qa_candidate:{question_key}` | 0.80 |
+
+- 采集器全部 best-effort：库/表缺失、查询异常、数据不足一律返回空；`collect_all` 逐来源 try/except，单源失败只记 `candidate: collector failed`，不中断其余来源。
+- `Candidate` 统一字段：`source/ref/topic/anchor/question/freshness/gain/evidence`；`to_row()` 转成 `seed_candidates` 接受的行。
+- 问题文案由模板从来源行生成（日期/数字直接取自 `valid_from`/`daily_stats.day`/`pending` 行），入池即已可追溯。
+
+**打分（`score_candidate`）**：
+
+```
+score = 0.30*gain + 0.25*freshness + 0.20*specificity
+      + 0.15*answer_likelihood + 0.10*novelty - 0.30*intrusion
+```
+
+| 维度 | 口径 |
+|---|---|
+| `freshness` | ≤1 天 = 1.0；≥7 天 = 0.0；中间线性衰减 |
+| `specificity` | anchor 含日期 = 1.0；含数字 = 0.8；纯文字 ≥8 字 = 0.3；否则 0 |
+| `answer_likelihood` | `qa_store.reply_stats(days=30)` 的 `by_source[source]`：answered/asked；冷启动 0.5 |
+| `novelty` | topic 命中近 7 天 `recent_topics` 或问题 2-gram 相似 → 0，否则 1 |
+| `intrusion` | 静默时段（23:30–07:30）或 30 分钟内热聊 = 1.0；该来源 asked≥2 且 ignored/asked≥0.8 = 1.0；有 ignored = 0.5 |
+
+- 低于 `_THRESHOLD=0.55` 不入发送队列；每条候选落 `proactive.candidate` 日志（各维度分 + `selected`），可解释可回放。
+
+**选择与同源约束（`select`）**：
+
+- 先按阈值过滤，再按 source 分组，只取「组内最高分」最大的一类来源，组内按分数降序取前 `limit` 条，按 `question_key` 去重。
+- 一条主动消息里的问题必须同源或同主题，因此候选池只在日报 `open_questions` 为空时启用；日报有问题时优先日报。
+
+**落库与过滤（`qa_store.py`）**：
+
+- `topic_of(cfg, text)`：audit 词表命中优先，未命中退回 `_NOISE_RE` 去噪后的 12 字片段。
+- `seed_candidates(cfg, candidates, *, day)`：写 `kind=candidate` 的 open 行（含 `source/ref/topic/evidence/freshness/gain`），与日报问题共用 `data/qa/{day}.jsonl`；去重四层——已答 key 永不入池、同 key 跳过、同日 2-gram `_similar` 跳过、同 topic 7 天冷却；落盘后 `_refresh_open_state`。
+- `qa_brief` 的 answered/open 两段都过滤 `kind == "candidate"`，候选不混入日报/周报语料。
+
+**接线（`proactive.run_proactive_job`）**：
+
+```mermaid
+sequenceDiagram
+    participant S as scheduler 08:30
+    participant P as run_proactive_job
+    participant C as proactive_candidates
+    participant Q as qa_store
+    participant L as qq_push
+    S->>P: daily-questions (scene=questions)
+    P->>Q: archive_stale → open_questions[:3]
+    alt 日报问题为空 且 candidates.enabled
+        P->>C: select(now, user_id) 采集→打分→≥0.55→同源取最高
+        C-->>P: Candidate[source/ref/question/evidence]
+        P->>Q: seed_candidates(kind=candidate·topic 7天冷却)
+        P->>Q: open_questions[:3] 重读
+    end
+    alt 仍为空
+        P-->>S: skipped=no_open_questions
+    else 有开放问题
+        P->>L: 逐条转述 [Qn]
+        P->>Q: set_prompt_order + mark_pushed
+        P->>C: verify_evidence(reply, open_qa)
+        C-->>P: violations（只记 proactive.evidence 警告）
+    end
+```
+
+- `_candidates_enabled(cfg)` 读 `config/proactive.json` 的 `candidates.enabled`，缺失/损坏默认开启；设为 false 即秒关候选池，日报链路照常。
+- `build_proactive_prompt` 问题块文案改为「本期要问主人的问题（可能来自日报「想问你」或候选池）」，仍要求逐条原样转述并保留 `[Qn]`。
+
+**依据校验（`verify_evidence`）**：
+
+- 允许集合 = 候选行的 `evidence` + `anchor`/`question` 中的日期/数字（`_NUM_RE`）。
+- 正文里出现集合外的 token 即视为无法回溯；因消息已由 `qq_push` 发出，只记 `proactive.evidence` 警告（`violations[:5]` + `question_count`），不阻断投递。
+
+### 验证
+
+- 新增 `test_proactive_candidates.py` 16 例：打分满分/边界、阈值过滤、四类来源采集（`kg_todo` schema、连续晚睡/屏幕上浮、承诺句、pending 画像）、同源只取最高分来源、topic 7 天冷却、已答 key 不入池、`qa_brief` 过滤候选、questions scene 接线、`candidates.enabled=false` 关闭、`verify_evidence` 回溯。
+- 相关套件 `test_proactive_candidates + test_qa_store + test_proactive_questions + test_proactive_p2 + test_proactive_p3 + test_ops` = **123 passed**；全仓 `pytest` = **1773 passed / 5 skipped**；`ruff check apps packages tests` 全绿。
+- 环境：仓库根 `tmp_pytest_run` 复现 ACL 拒绝（`icacls` 亦无法读取），本轮相关套件改用系统临时目录 `--basetemp` 复核；根配置 basetemp 位置待处理。
+
+**待办更新**：
+
+- [x] P2：候选池（chat_loop / kg_todo / langtrack / memory_conflict）+ 打分与依据校验
+- [ ] P3：活跃时段调度、自适应配额 1–4 条/日、来源静音与 `别问了` 命令
+- [ ] 抽取层 `todos` 通道补 `due_at`/到期窗口字段，供 `kg_todo` 按到期日筛选
+- [ ] 处理仓库根 `tmp_pytest_run` ACL 拒绝（`tmp_pytest` 同样未清）
+
