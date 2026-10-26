@@ -237,6 +237,24 @@ def _guard_int(guard: dict, key: str, default: int) -> int:
     return value if value >= 0 else default
 
 
+def _candidates_enabled(cfg: Config) -> bool:
+    """P2 候选池总开关（config/proactive.json ``candidates.enabled``）。
+
+    缺失/损坏时默认开启；设为 false 即可秒关候选池，而日报「想问你」链路照常运行。
+    """
+    path = _guard_path(cfg)
+    if not path.is_file():
+        return True
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return True
+    section = raw.get("candidates") if isinstance(raw, dict) else None
+    if isinstance(section, dict) and "enabled" in section:
+        return bool(section.get("enabled"))
+    return True
+
+
 def _jitter_minutes(guard: dict) -> int:
     """P1 jitter window from the guard config; 0 (= off) when not configured.
 
@@ -1037,8 +1055,9 @@ def build_proactive_prompt(
     if questions:
         q_block = "\n".join(f"[Q{i}] {q}" for i, q in enumerate(questions, 1))
         recall_lines.append(
-            "今日日报「想问你」的问题（必须逐条原样转述，保留 [Q 编号] 与依据，"
-            "禁止改写、合并、新增或删减；结尾提醒主人可直接回复「[Q1] 你的答案」）：\n" + q_block
+            "本期要问主人的问题（可能来自日报「想问你」或候选池；必须逐条原样转述，"
+            "保留 [Q 编号] 与依据，禁止改写、合并、新增或删减；结尾提醒主人可直接回复"
+            "「[Q1] 你的答案」）：\n" + q_block
         )
     if topic:
         recall_lines.append(f"最近话题（主人上次抛出、还没说完）：{topic}")
@@ -1322,6 +1341,32 @@ def run_proactive_job(
         if archived:
             logger.info("proactive: stale questions archived before push", job=job.name, count=archived)
         open_qa = qa_store.open_questions(resolved_cfg)[:_MAX_QUESTIONS_PER_PUSH]
+        if not open_qa and _candidates_enabled(resolved_cfg):
+            # P2 候选池（design doc §4/§5）：日报没有「想问你」时，从 chat_loop /
+            # kg_todo / langtrack / memory_conflict 采集候选，打分 ≥0.55 才入池。
+            # 同一条消息里的问题必须同源或同主题，所以只在日报问题为空时启用候选池。
+            from gacore import proactive_candidates
+
+            picked = proactive_candidates.select(
+                resolved_cfg,
+                now,
+                user_id=targets[0],
+                limit=_MAX_QUESTIONS_PER_PUSH,
+            )
+            if picked:
+                seeded = qa_store.seed_candidates(
+                    resolved_cfg,
+                    [c.to_row() for c in picked],
+                    day=now.date().isoformat(),
+                )
+                if seeded["seeded"]:
+                    logger.info(
+                        "proactive: candidate questions seeded",
+                        job=job.name,
+                        count=seeded["seeded"],
+                        source=picked[0].source,
+                    )
+                    open_qa = qa_store.open_questions(resolved_cfg)[:_MAX_QUESTIONS_PER_PUSH]
         if not open_qa:
             logger.info("proactive: questions scene skipped, no open questions", job=job.name)
             result["skipped"].append({"user": "", "reason": "no_open_questions"})
@@ -1443,6 +1488,20 @@ def run_proactive_job(
                 # 记录本次推送的展示顺序：[Q1]..[Qn] 与用户刚看到的消息一致（决策 29）
                 qa_store.set_prompt_order(resolved_cfg, [q["question_key"] for q in open_qa])
                 qa_store.mark_pushed(resolved_cfg, [q["question_key"] for q in open_qa], now=now)
+                # P2 依据校验（design doc §5）：正文里的日期/数字必须能在候选依据里回溯。
+                # 候选问题由模板从真实来源行生成，入池时已可追溯；这里对模型转述再做一次
+                # 事后审计，发现凭空数字只记警告（消息已由 qq_push 发出，无法撤回）。
+                from gacore import proactive_candidates
+
+                violations = proactive_candidates.verify_evidence(reply or "", open_qa)
+                if violations:
+                    logger.warning(
+                        "proactive.evidence",
+                        job=job.name,
+                        user=uid,
+                        violations=violations[:5],
+                        question_count=len(open_qa),
+                    )
             # P3: once delivered, write the turn back into the user's main thread so
             # 韩立 sees his own proactive message in the next turn's context and chat
             # records keep a complete "定时任务触发 → AI 回复" alternation. Best-effort:

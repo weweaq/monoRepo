@@ -125,6 +125,14 @@ def question_key(cfg: Config, question: str) -> str:
     return hashlib.sha1(f"{topic}|{intent}".encode("utf-8")).hexdigest()[:16]
 
 
+def topic_of(cfg: Config, text: str) -> str:
+    """主题词：优先复用 audit 词表，未命中时退回去噪声后的短片段（供 7 天冷却比较）。"""
+    table = _topic_from_table(_load_topic_synonyms(cfg), text or "")
+    if table:
+        return str(table)
+    return _NOISE_RE.sub("", text or "")[:12]
+
+
 def _bigrams(text: str) -> set[str]:
     clean = _NOISE_RE.sub("", text)
     return {clean[i : i + 2] for i in range(len(clean) - 1)}
@@ -415,6 +423,85 @@ def open_questions(cfg: Config, *, before_date: str | None = None) -> list[dict[
     if before_date:
         rows = [r for r in rows if (_day_as_date(str(r.get("day", ""))) or "") < before_date]
     return sorted(rows, key=lambda r: (r.get("day", ""), int(re.sub(r"\D", "", r.get("anchor", "")) or 0)))
+
+
+def seed_candidates(
+    cfg: Config, candidates: list[dict[str, Any]], *, day: str | None = None
+) -> dict[str, int]:
+    """把 P2 候选池选出的候选种成待答问题（``kind=candidate``）。
+
+    候选由 ``proactive_candidates.select`` 产出（source/ref/topic/anchor/question/
+    evidence/freshness/gain）。去重规则与日报问题一致：已回答 key 永不再入池、
+    同 key 跳过、同日 2-gram 相似跳过；额外加设计文档 §4 的「同一 topic 7 天内最多
+    出现一次」冷却。候选行与日报问题共用同一份 jsonl，因此 ``mark_pushed``/
+    ``mark_ignored``/``reply_stats``/P1 匹配层全部自动生效。
+    """
+    day = day or _today()
+    existing = _read_rows(cfg)
+    answered = {r["question_key"] for r in existing if r.get("status") == "answered"}
+    cutoff = (_now_dt() - timedelta(days=7)).date().isoformat()
+    recent_topics = {
+        str(r.get("topic") or "") or topic_of(cfg, str(r.get("question") or ""))
+        for r in existing
+        if (_day_as_date(str(r.get("day", ""))) or "") >= cutoff
+    }
+    day_rows = [r for r in existing if r.get("day") == day]
+    counts = {"seeded": 0, "dup_answered": 0, "dup_similar": 0, "dup_topic": 0}
+    kept_texts = [r["question"] for r in day_rows]
+    for cand in candidates:
+        text = str(cand.get("question") or "").strip()
+        if not text:
+            continue
+        key = question_key(cfg, text)
+        if key in answered:
+            counts["dup_answered"] += 1
+            continue
+        if any(r["question_key"] == key for r in day_rows):
+            continue
+        topic = str(cand.get("topic") or "") or topic_of(cfg, text)
+        if topic and topic in recent_topics:
+            counts["dup_topic"] += 1
+            continue
+        if any(_similar(text, prev) for prev in kept_texts):
+            counts["dup_similar"] += 1
+            continue
+        n = len(day_rows) + 1
+        row = {
+            "question_key": key,
+            "question": text,
+            "anchor": f"候选-{day}-{n}",
+            "day": day,
+            "kind": "candidate",
+            "status": "open",
+            "answer": "",
+            "answer_day": "",
+            "asks": 0,
+            "source": str(cand.get("source") or ""),
+            "ref": str(cand.get("ref") or ""),
+            "topic": topic,
+            "evidence": list(cand.get("evidence") or []),
+            "freshness": str(cand.get("freshness") or ""),
+            "gain": float(cand.get("gain") or 0.0),
+            "asked_at": "",
+            "delivered_at": "",
+            "ignored_count": 0,
+            "answered_at": "",
+            "match_method": "",
+            "match_confidence": 0.0,
+            "created_at": _now(),
+            "updated_at": _now(),
+        }
+        day_rows.append(row)
+        kept_texts.append(text)
+        if topic:
+            recent_topics.add(topic)
+        counts["seeded"] += 1
+    if counts["seeded"]:
+        _write_day(cfg, day, day_rows)
+        _refresh_open_state(cfg)
+    logger.info("qa candidates seeded", day=day, **counts)
+    return counts
+
 
 
 def record_answer(
@@ -775,6 +862,7 @@ def qa_brief(
             r
             for r in rows
             if r.get("status") == "answered"
+            and r.get("kind") != "candidate"
             and horizon < str(r.get("answer_day", "")) <= anchor
         ),
         key=lambda r: str(r.get("answer_day", "")),
@@ -783,6 +871,8 @@ def qa_brief(
     open_ = [
         r
         for r in rows
-        if r.get("status") == "open" and (_day_as_date(str(r.get("day", ""))) or "") < anchor
+        if r.get("status") == "open"
+        and r.get("kind") != "candidate"
+        and (_day_as_date(str(r.get("day", ""))) or "") < anchor
     ]
     return answered, open_

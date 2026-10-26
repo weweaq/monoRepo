@@ -9,5 +9,8 @@
   },
   "match": {
     "llm_enabled": true
+  },
+  "candidates": {
+    "enabled": true
   }
 }
