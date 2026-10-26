@@ -69,6 +69,23 @@ _MAX_QUESTIONS_PER_PUSH: Final = 3
 _JITTER_MINUTES_DEFAULT: Final = 30
 _JITTER_PROB_MIN: Final = 0.05   # floor on the per-tick pass probability (never fully muted)
 
+# P3 timing & adaptation (proactive-inquiry-2.0 §5/§7). Code-level defaults stay inert
+# (quiet off, adaptive off, active-slot off) so a missing config/proactive.json keeps the
+# exact P0/P1/P2 behaviour; the shipped config opts in explicitly.
+_MIN_GAP_HOURS: Final = 3            # at least N hours between two proactive messages
+_ACTIVE_HOURS_LEN: Final = 24        # 24-dim activity histogram
+_ACTIVE_HALF_LIFE_DAYS: Final = 30.0 # histogram decay half-life
+_ACTIVE_MIN_SAMPLES: Final = 10.0    # below this total weight the histogram is cold
+_ACTIVE_TOP_N: Final = 2             # pick the N busiest hours as send slots
+_ACTIVE_SLOT_MARGIN_MIN: Final = 30  # ± margin around each busy hour
+_MUTE_DAYS_DEFAULT: Final = 7        # "别问了 / 不想回答" global mute window
+# Explicit, short and self-contained requests only: a normal sentence that merely
+# mentions "别问" must not silence the bot for a week.
+_MUTE_REQUEST_RE: Final = re.compile(
+    r"^(?:别问了|别再问了|不要问了|别问啦|不想回答|不想答|不要再问了|以后别问了)"
+    r"(?:了|啦|啊|呀|吧|行吗|行不行|好吗|可以吗)?[\s。！!？?…~～]*$"
+)
+
 # P1 Topic Recall — lightweight "not a real question" gate (independent, dependency-free
 # reimplementation of qq.py::trivial_detect semantics; proactive never imports the QQ
 # frontend to avoid dragging botpy into the worker path).
@@ -235,6 +252,66 @@ def _guard_int(guard: dict, key: str, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return value if value >= 0 else default
+
+
+def _guard_bool(guard: dict | None, key: str, default: bool) -> bool:
+    """Parse one guard switch as bool; anything but an explicit bool-ish value is default."""
+    raw = guard.get(key) if guard else None
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str):
+        lowered = raw.strip().lower()
+        if lowered in ("1", "true", "yes", "on"):
+            return True
+        if lowered in ("0", "false", "no", "off"):
+            return False
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    return default
+
+
+# --------------------------------------------------------------------------- P3 quota
+
+
+def quota_cap(answer_rate: float | None) -> int | None:
+    """P3 自适应每日上限（design doc §5 四档）。
+
+    ``None`` 表示"还没有足够数据"（窗口内没发过问题），调用方应回退到静态
+    ``guard.max_per_day``；有数据时按近 7 日回复率映射到 1–4 条/日。
+    """
+    if answer_rate is None:
+        return None
+    try:
+        rate = float(answer_rate)
+    except (TypeError, ValueError):
+        return None
+    if rate < 0.0:
+        rate = 0.0
+    if rate < 0.15:
+        return 1
+    if rate < 0.40:
+        return 2
+    if rate < 0.60:
+        return 3
+    return 4
+
+
+def questions_per_push(answer_rate: float | None) -> int:
+    """P3 单条消息最多带几个问题（design doc §5 表格最后一列）。
+
+    冷启动（无数据）按 2 条试投；回复率越低越少问，避免一次变成问卷。
+    """
+    if answer_rate is None:
+        return 2
+    try:
+        rate = float(answer_rate)
+    except (TypeError, ValueError):
+        return 2
+    if rate < 0.15:
+        return 1
+    if rate < 0.60:
+        return 2
+    return _MAX_QUESTIONS_PER_PUSH
 
 
 def _candidates_enabled(cfg: Config) -> bool:
@@ -411,17 +488,92 @@ def _with_state(cfg: Config, mutate: Callable[[dict], None]) -> dict:
     return state
 
 
+def _active_hours_of(entry: dict) -> list[float]:
+    """Read the 24-dim activity histogram, tolerating legacy/ malformed state."""
+    raw = entry.get("active_hours")
+    if not isinstance(raw, list) or len(raw) != _ACTIVE_HOURS_LEN:
+        return [0.0] * _ACTIVE_HOURS_LEN
+    out: list[float] = []
+    for value in raw:
+        try:
+            out.append(max(0.0, float(value)))
+        except (TypeError, ValueError):
+            out.append(0.0)
+    return out
+
+
+def _decay_active_hours(hours: list[float], updated: str, now: datetime) -> list[float]:
+    """按 30 天半衰期把直方图衰减到 now；缺少时间锚时原样返回。"""
+    last = _parse_iso(updated or "")
+    if last is None:
+        return hours
+    days = max(0.0, (_as_east8(now) - _as_east8(last)).total_seconds() / 86400.0)
+    if days <= 0:
+        return hours
+    factor = 0.5 ** (days / _ACTIVE_HALF_LIFE_DAYS)
+    return [round(h * factor, 4) for h in hours]
+
+
+def top_active_hours(
+    entry: dict, *, now: datetime | None = None, n: int = _ACTIVE_TOP_N
+) -> list[int]:
+    """P3 活跃时段：返回直方图最高的 n 个小时（0–23）；样本不足返回空列表。
+
+    空列表表示"还不知道主人什么时候活跃"，调用方必须放行（冷启动不拦）。
+    """
+    current = now or _now_east8()
+    hours = _decay_active_hours(
+        _active_hours_of(entry), str(entry.get("active_hours_updated") or ""), current
+    )
+    if sum(hours) < _ACTIVE_MIN_SAMPLES:
+        return []
+    ranked = sorted(range(_ACTIVE_HOURS_LEN), key=lambda i: hours[i], reverse=True)
+    return [h for h in ranked[:n] if hours[h] > 0]
+
+
+def active_slot_allows(
+    entry: dict, now: datetime, guard: dict | None = None
+) -> tuple[bool, str]:
+    """P3 活跃时段闸门（``guard.active_slot_enabled``，默认关闭）。
+
+    关闭时永远放行（保持既有固定 cron 行为）。开启后只在直方图最高的 2 个小时
+    前后各 30 分钟内放行；样本不足仍放行，避免新用户被永久静音。这个开关适合
+    "窗口覆盖大半天、每小时触发"的调度；当前每天一次的 08:30 任务应保持关闭。
+    """
+    if not _guard_bool(guard, "active_slot_enabled", False):
+        return True, ""
+    now_e = _as_east8(now)
+    hours = top_active_hours(entry, now=now_e)
+    if not hours:
+        return True, ""
+    current = now_e.hour * 60 + now_e.minute
+    for hour in hours:
+        start = hour * 60 - _ACTIVE_SLOT_MARGIN_MIN
+        end = (hour + 1) * 60 + _ACTIVE_SLOT_MARGIN_MIN
+        if start <= current <= end:
+            return True, ""
+        # 环形边界：hour=23 的尾部跨到次日 00:30；hour=0 的头部来自前一日 23:30。
+        if end > 24 * 60 and current + 24 * 60 <= end:
+            return True, ""
+        if start < 0 and current >= start + 24 * 60:
+            return True, ""
+    return False, "outside_active_slot"
+
+
 def record_last_active(user_id: str, cfg: Config | None = None, now: datetime | None = None) -> None:
     """Record a user's last_active into proactive_state.json (best-effort, never raises).
 
     Called from the QQ frontend on every incoming message so proactive jobs can tell
-    how recently the user was active. Failure is logged, never blocks the chat path.
+    how recently the user was active. P3 also bumps a 24-dim ``active_hours`` histogram
+    (30-day half-life) so a later schedule can pick the user's busiest hours. Failure is
+    logged, never blocks the chat path.
     """
     if not user_id or user_id in ("unknown", "None"):
         return
     try:
         resolved_cfg = cfg or Config.default()
-        ts = (now or _now_east8()).isoformat(timespec="seconds")
+        now_e = _as_east8(now or _now_east8())
+        ts = now_e.isoformat(timespec="seconds")
 
         def _mutate(state: dict) -> None:
             key = f"u_{user_id}"
@@ -429,6 +581,12 @@ def record_last_active(user_id: str, cfg: Config | None = None, now: datetime | 
             entry["last_active"] = ts
             entry["updated_at"] = ts
             entry.setdefault("created_at", ts)
+            hours = _decay_active_hours(
+                _active_hours_of(entry), str(entry.get("active_hours_updated") or ""), now_e
+            )
+            hours[now_e.hour] = round(hours[now_e.hour] + 1.0, 4)
+            entry["active_hours"] = hours
+            entry["active_hours_updated"] = ts
 
         _with_state(resolved_cfg, _mutate)
     except Exception as exc:  # noqa: BLE001 — activity tracking must never block chat
@@ -510,6 +668,64 @@ def record_user_emotion(
             error_type=type(exc).__name__,
             stack_trace=str(exc),
         )
+
+
+def is_mute_request(text: str) -> bool:
+    """P3 "别问了 / 不想回答" 识别：只接受短且自足的显式请求。
+
+    普通句子里顺带出现"别问"不算（例如"别问我这个代码怎么写"），避免一句话让
+    机器人静音一周。调用方应在 QA 裸答捕获之前判断，否则这句话会被记成答案。
+    """
+    t = (text or "").strip()
+    if not t or len(t) > 12:
+        return False
+    return bool(_MUTE_REQUEST_RE.match(t))
+
+
+def mute_global(
+    cfg: Config | None = None,
+    user_id: str = "",
+    now: datetime | None = None,
+    days: int = _MUTE_DAYS_DEFAULT,
+) -> str:
+    """P3 全局静音：写入 ``muted_until`` 并返回截止时间（ISO，东八区）。
+
+    静音期内所有主动任务（含日报问题、候选池、问候）都会被 Job Guard 拦下；
+    用户主动发消息不受影响。返回空串表示没有写入（user_id 非法）。
+    """
+    if not user_id or user_id in ("unknown", "None"):
+        return ""
+    resolved_cfg = cfg or Config.default()
+    now_e = _as_east8(now or _now_east8())
+    ts = now_e.isoformat(timespec="seconds")
+    until = (now_e + timedelta(days=max(1, int(days)))).isoformat(timespec="seconds")
+
+    def _mutate(state: dict) -> None:
+        entry = state.setdefault(f"u_{user_id}", {})
+        entry["muted_until"] = until
+        entry["muted_at"] = ts
+        entry["updated_at"] = ts
+        entry.setdefault("created_at", ts)
+
+    _with_state(resolved_cfg, _mutate)
+    logger.info(
+        "proactive.muted",
+        user=user_id,
+        scope="global",
+        muted_at=ts,
+        muted_until=until,
+        days=max(1, int(days)),
+    )
+    return until
+
+
+def muted_until_of(entry: dict) -> datetime | None:
+    """Read a user entry's global mute deadline (None when absent/unparseable).
+
+    归一成东八区：手写的 state 若缺偏移量，按东八区墙钟解释，调用方可直接与 now 比较。
+    """
+    parsed = _parse_iso(str(entry.get("muted_until") or ""))
+    return _as_east8(parsed) if parsed is not None else None
 
 
 def _mark_sent(cfg: Config, user_id: str, scene: str, now: datetime) -> None:
@@ -620,27 +836,46 @@ def job_guard_allows(
     state: dict,
     now: datetime,
     guard: dict | None = None,
+    reply_rate: float | None = None,
 ) -> tuple[bool, str]:
-    """Job Guard gate: daily cap / hot-chat cooldown / idle threshold (+ monotonic).
+    """Job Guard gate: mute / quiet / daily cap / hot-chat / min-gap / idle / active slot.
 
-    Thresholds come from the optional ``guard`` dict (config/proactive.json, P1) with
+    Thresholds come from the optional ``guard`` dict (config/proactive.json, P1/P3) with
     per-key fallback to the module-level defaults — so a missing config file keeps the
-    exact P0 behaviour. Returns (allowed, reason) where reason is a machine-readable
-    tag describing the denial, or an empty string when allowed.
+    exact P0 behaviour. ``reply_rate`` is the 7-day answer rate (``None`` = no data yet):
+    when ``guard.adaptive_quota`` is on it replaces the static ``max_per_day`` with the
+    1–4 tier from ``quota_cap``; without data it falls back to the static cap (cold start
+    keeps the existing 2/day trial). Returns (allowed, reason) where reason is a
+    machine-readable tag describing the denial, or an empty string when allowed.
     """
     max_per_day = _guard_int(guard, "max_per_day", _MAX_PER_DAY)
+    if _guard_bool(guard, "adaptive_quota", False):
+        adaptive_cap = quota_cap(reply_rate)
+        if adaptive_cap is not None:
+            max_per_day = adaptive_cap
     hot_chat_minutes = _guard_int(guard, "hot_chat_minutes", _HOT_CHAT_MINUTES)
     idle_hours = _guard_int(guard, "idle_hours", _IDLE_HOURS)
+    min_gap_hours = _guard_int(guard, "min_gap_hours", _MIN_GAP_HOURS)
 
     entry = state.get(f"u_{user_id}") or {}
     now_e = _as_east8(now)
     today = now_e.date().isoformat()
 
-    # 1. Daily cap.
+    # 0. Global mute ("别问了 / 不想回答" → 7 天): nothing proactive may go out.
+    muted_until = muted_until_of(entry)
+    if muted_until is not None and now_e < _as_east8(muted_until):
+        return False, "globally_muted"
+
+    # 1. Quiet hours (config-only; code default off so P0 tests stay deterministic).
+    quiet = str((guard or {}).get("quiet_hours") or "").strip()
+    if quiet and in_window(quiet, now_e):
+        return False, "quiet_hours"
+
+    # 2. Daily cap.
     if entry.get("last_sent_date") == today and (entry.get("daily_count") or 0) >= max_per_day:
         return False, "daily_cap"
 
-    # 2. Hot-chat cooldown: never interrupt while the user was active recently.
+    # 3. Hot-chat cooldown: never interrupt while the user was active recently.
     last_active = entry.get("last_active")
     last_e: datetime | None = None
     if last_active:
@@ -650,7 +885,13 @@ def job_guard_allows(
             if (now_e - last_e) < timedelta(minutes=hot_chat_minutes):
                 return False, "hot_chat"
 
-    # 3. Idle threshold + monotonic (idle-scene jobs only).
+    # 4. Minimum gap since the last proactive message (design doc §7 #5).
+    last_sent_time = _parse_iso(str(entry.get("last_sent_time") or ""))
+    if last_sent_time is not None:
+        if (now_e - _as_east8(last_sent_time)) < timedelta(hours=min_gap_hours):
+            return False, "min_gap"
+
+    # 5. Idle threshold + monotonic (idle-scene jobs only).
     if "idle" in job.name.lower():
         if last_e is not None and (now_e - last_e) <= timedelta(hours=idle_hours):
             return False, "not_idle"
@@ -664,6 +905,11 @@ def job_guard_allows(
                     return False, "idle_already_sent"
         # No last_active at all: the user is in known_users but we have no state yet —
         # treat them as idle-long-enough and allow the first outreach.
+
+    # 6. Active-slot gate (P3, opt-in): only fire near the user's busiest hours.
+    slot_ok, slot_reason = active_slot_allows(entry, now_e, guard)
+    if not slot_ok:
+        return False, slot_reason
     return True, ""
 
 
@@ -1279,6 +1525,11 @@ def _snippet(text: str | None, limit: int = 200) -> str:
     return text.replace("\n", " ")[:limit]
 
 
+def _row_source(row: dict) -> str:
+    """A qa row's source (legacy rows without ``source`` are daily-report questions)."""
+    return str(row.get("source") or "qa_open")
+
+
 # --------------------------------------------------------------------------- main entry
 
 
@@ -1313,6 +1564,15 @@ def run_proactive_job(
     # questions means no push at all (0 条合法，不为凑数打扰).
     from gacore import qa_store
 
+    # P3 自适应（design doc §5）：7 日回复率决定每日上限与单条问题数；窗口内没发过
+    # 问题时 reply_rate=None，回退到静态 max_per_day（冷启动 2 条/日）。
+    stats = qa_store.reply_stats(resolved_cfg, now=now)
+    reply_rate = float(stats.get("answer_rate") or 0.0) if int(stats.get("asked") or 0) > 0 else None
+    per_push = (
+        questions_per_push(reply_rate)
+        if _guard_bool(guard, "adaptive_quota", False)
+        else _MAX_QUESTIONS_PER_PUSH
+    )
     open_qa: list[dict] = []
 
     result: dict = {
@@ -1330,6 +1590,12 @@ def run_proactive_job(
         return result
 
     if scene == "questions":
+        # P3 来源静音：连续 2 次忽略的来源静音 14 天（由 qa 账本动态计算，不落新表），
+        # 该来源的未答问题同步归档（设计 §7），静音到期也不会把两周前的旧问题再翻出来。
+        muted = qa_store.muted_sources(resolved_cfg, now=now)
+        archived_muted = qa_store.archive_muted(resolved_cfg, muted) if muted else 0
+        if muted:
+            logger.info("proactive: muted sources", job=job.name, sources=sorted(muted))
         # P0 提问账本：先给"发出后超 24h 仍未答"的问题记 ignored_count（只记账，
         # 不改变 status/asks），再归档到期的（asks 已满），最后取待推列表：否则第 3
         # 次展示的题会在同一次推送里被归档，15 小时回答窗口内变成"推了就答不了"
@@ -1340,7 +1606,19 @@ def run_proactive_job(
         archived = qa_store.archive_stale(resolved_cfg)
         if archived:
             logger.info("proactive: stale questions archived before push", job=job.name, count=archived)
-        open_qa = qa_store.open_questions(resolved_cfg)[:_MAX_QUESTIONS_PER_PUSH]
+        all_open = qa_store.open_questions(resolved_cfg)
+        open_qa = [q for q in all_open if _row_source(q) not in muted][:per_push]
+        if not open_qa and (all_open or archived_muted):
+            # 未答问题都在静音来源里（本轮已归档）：本轮不推，也不从候选池补位
+            # （同源静音是整体决策）。
+            logger.info(
+                "proactive: questions scene skipped, all open questions muted",
+                job=job.name,
+                sources=sorted({_row_source(q) for q in all_open}) if all_open else sorted(muted),
+                archived_muted=archived_muted,
+            )
+            result["skipped"].append({"user": "", "reason": "source_muted"})
+            return result
         if not open_qa and _candidates_enabled(resolved_cfg):
             # P2 候选池（design doc §4/§5）：日报没有「想问你」时，从 chat_loop /
             # kg_todo / langtrack / memory_conflict 采集候选，打分 ≥0.55 才入池。
@@ -1351,7 +1629,8 @@ def run_proactive_job(
                 resolved_cfg,
                 now,
                 user_id=targets[0],
-                limit=_MAX_QUESTIONS_PER_PUSH,
+                limit=per_push,
+                muted_sources=set(muted),
             )
             if picked:
                 seeded = qa_store.seed_candidates(
@@ -1366,7 +1645,10 @@ def run_proactive_job(
                         count=seeded["seeded"],
                         source=picked[0].source,
                     )
-                    open_qa = qa_store.open_questions(resolved_cfg)[:_MAX_QUESTIONS_PER_PUSH]
+                    open_qa = [
+                        q for q in qa_store.open_questions(resolved_cfg)
+                        if _row_source(q) not in muted
+                    ][:per_push]
         if not open_qa:
             logger.info("proactive: questions scene skipped, no open questions", job=job.name)
             result["skipped"].append({"user": "", "reason": "no_open_questions"})
@@ -1386,7 +1668,9 @@ def run_proactive_job(
         return result
 
     for uid in targets:
-        allowed, reason = job_guard_allows(uid, job, state, now, guard=guard)
+        allowed, reason = job_guard_allows(
+            uid, job, state, now, guard=guard, reply_rate=reply_rate
+        )
         if not allowed:
             logger.info(
                 "proactive: user skipped by job guard",
@@ -1535,19 +1819,26 @@ def run_proactive_job(
 
 __all__ = (
     "PROACTIVE_POOL",
+    "active_slot_allows",
     "build_proactive_prompt",
     "classify_emotion",
     "cooldown_ok",
     "in_window",
+    "is_mute_request",
     "jitter_allows",
     "job_guard_allows",
     "load_guard_config",
     "load_state",
+    "mute_global",
+    "muted_until_of",
     "parse_window",
     "proactive_due",
+    "questions_per_push",
+    "quota_cap",
     "recall_topic",
     "record_last_active",
     "record_user_emotion",
     "run_proactive_job",
     "save_state",
+    "top_active_hours",
 )

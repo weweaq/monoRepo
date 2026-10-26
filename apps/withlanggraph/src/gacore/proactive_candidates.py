@@ -515,16 +515,20 @@ def select(
     *,
     user_id: str = "",
     limit: int = _MAX_PER_SOURCE,
+    muted_sources: set[str] | None = None,
 ) -> list[Candidate]:
     """采集 → 打分 → 阈值过滤 → 同源分组取最高分来源 → 去重，返回入选候选。
 
     一条主动消息里的问题必须同源或同主题（设计文档 §5 批量规则），因此这里只取
-    得分最高的一类来源，其余候选留在池里等下一个时段。
+    得分最高的一类来源，其余候选留在池里等下一个时段。``muted_sources`` 是 P3
+    来源静音集合：被静音的来源直接不参与打分与选取。
     """
     from gacore.qa_store import question_key
 
     now = _east8(now)
     cands = collect_all(cfg, now, user_id)
+    if muted_sources:
+        cands = [c for c in cands if c.source not in muted_sources]
     if not cands:
         return []
     ctx = build_context(cfg, now, user_id)

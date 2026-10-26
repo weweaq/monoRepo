@@ -102,7 +102,12 @@ from gacore.graph import DEFAULT_RECURSION_LIMIT, build_graph
 from gacore.heartbeat import DEFAULT_INTERVAL_SECONDS, Heartbeat, run_dir
 from gacore.llm import get_llm
 from gacore.jsonl_logger import get_logger
-from gacore.proactive import record_last_active, record_user_emotion
+from gacore.proactive import (
+    is_mute_request,
+    mute_global,
+    record_last_active,
+    record_user_emotion,
+)
 from gacore.qa_store import match_and_record, try_answer
 from gacore.weekly_eval import try_weekly_interaction
 
@@ -1091,6 +1096,18 @@ class QQApp:
 
 
 
+            # 1.5) P3「别问了 / 不想回答」：全局静音 7 天。必须早于 QA 裸答捕获与
+            #      agent 轮，否则这句会被记成某个开放问题的回答，或变成普通闲聊。
+            if is_mute_request(content):
+
+                asyncio.create_task(
+                    self._mute_and_reply(chat_id, user_id, msg_id=msg_id, is_group=is_group)
+                )
+
+                return
+
+
+
             # 2) If a paused graph exists (wait_for_text interrupt), resume with this text.
 
             thread_id = _user_threads.get(chat_id)
@@ -1190,6 +1207,22 @@ class QQApp:
             traceback.print_exc()
 
 
+
+    async def _mute_and_reply(self, chat_id, user_id, *, msg_id=None, is_group=False) -> None:
+        """P3：把「别问了 / 不想回答」落成 7 天全局静音，并给一句确认。
+
+        静音只拦主动消息，用户主动聊天不受影响。落盘失败只记日志，确认照常发出。
+        """
+        try:
+            await asyncio.to_thread(mute_global, Config.default(), user_id)
+        except Exception:  # noqa: BLE001 — 静音失败不能阻断对话
+            logger.debug("proactive mute failed", stack_trace=traceback.format_exc())
+        await self.send_text(
+            chat_id,
+            "好，接下来 7 天我不主动打扰你，有事随时叫我。",
+            msg_id=msg_id,
+            is_group=is_group,
+        )
 
     async def _match_qa_background(self, content: str) -> None:
         """P1：多问题自然语言回答的后台归因（不拦截消息，失败静默）。

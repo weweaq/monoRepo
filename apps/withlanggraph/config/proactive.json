@@ -5,7 +5,11 @@
     "idle_hours": 24,
     "max_per_day": 2,
     "hot_chat_minutes": 30,
-    "jitter_minutes": 30
+    "jitter_minutes": 30,
+    "quiet_hours": "23:30-07:30",
+    "adaptive_quota": true,
+    "min_gap_hours": 3,
+    "active_slot_enabled": false
   },
   "match": {
     "llm_enabled": true

@@ -15,7 +15,7 @@ import json
 import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from gacore.audit import _load_topic_synonyms, _topic_from_table
 from gacore.config import Config
@@ -26,6 +26,9 @@ logger = get_logger("qa_store")
 _TZ = timezone(timedelta(hours=8))
 _MAX_ASKS: int = 2  # 未答最多重问 2 期（spec §5.3）
 _IGNORED_AFTER_HOURS: int = 24  # 发出后超过该时长仍无回答，记一次 ignored_count
+# P3 来源静音（proactive-inquiry-2.0 §7）：同一来源连续 N 次被忽略 → 静音 D 天。
+_SOURCE_MUTE_AFTER_IGNORES: int = 2
+_SOURCE_MUTE_DAYS: int = 14
 _SIMILAR_JACCARD: float = 0.6  # 同期 token(2-gram) 重合阈值
 _BARE_ANSWER_MAX_CHARS: int = 30
 _ANCHOR_RE = re.compile(r"^\s*-\s*\[想问你-(\d+)\]\s*(.*)$")
@@ -710,6 +713,78 @@ def reply_stats(cfg: Config, *, days: int = 7, now: datetime | None = None) -> d
     }
 
 
+def source_health(
+    cfg: Config, *, days: int = 30, now: datetime | None = None
+) -> dict[str, dict[str, Any]]:
+    """按来源统计近 N 天提问/回答/忽略，并给出"连续忽略"链长（P3）。
+
+    连续链只看最新一条开始：最新一条已答 → 链断；最新一条尚未判定（ignored_count=0
+    且仍 open）→ 链断；只有"已判定为忽略"的连续行才累加。来源静音据此计算，
+    不新增任何表或字段。
+    """
+    current = (now or _now_dt()).astimezone(_TZ)
+    cutoff = current - timedelta(days=days)
+    rows: list[tuple[datetime, dict[str, Any]]] = []
+    for row in _read_rows(cfg):
+        asked_dt = _parse_ts(row.get("asked_at") or row.get("delivered_at") or "")
+        if asked_dt is None or asked_dt < cutoff:
+            continue
+        rows.append((asked_dt, row))
+    rows.sort(key=lambda item: item[0], reverse=True)
+
+    health: dict[str, dict[str, Any]] = {}
+    closed: set[str] = set()
+    for _asked_dt, row in rows:
+        source = str(row.get("source") or "qa_open")
+        bucket = health.setdefault(
+            source,
+            {"asked": 0, "answered": 0, "ignored": 0, "consecutive_ignored": 0, "last_ignored_at": ""},
+        )
+        bucket["asked"] += 1
+        if row.get("status") == "answered":
+            bucket["answered"] += 1
+        if int(row.get("ignored_count") or 0) > 0:
+            bucket["ignored"] += 1
+        if source in closed:
+            continue
+        if row.get("status") == "answered":
+            closed.add(source)
+            continue
+        if int(row.get("ignored_count") or 0) > 0:
+            bucket["consecutive_ignored"] += 1
+            if not bucket["last_ignored_at"]:
+                bucket["last_ignored_at"] = str(
+                    row.get("updated_at") or row.get("delivered_at") or ""
+                )
+        else:
+            # 最新一条还没到 24h 判定窗口：链尚未成立，不能把旧忽略算成"连续"。
+            closed.add(source)
+    return health
+
+
+def muted_sources(
+    cfg: Config,
+    *,
+    now: datetime | None = None,
+    mute_days: int = _SOURCE_MUTE_DAYS,
+    min_ignores: int = _SOURCE_MUTE_AFTER_IGNORES,
+) -> dict[str, str]:
+    """P3 静音来源：连续忽略 ≥N 次 → 从最后一次忽略起静音 D 天。
+
+    返回 ``{source: until}``（until 为 ``YYYY-MM-DD HH:MM:SS`` 东八区）；已过期的不返回。
+    """
+    current = (now or _now_dt()).astimezone(_TZ)
+    out: dict[str, str] = {}
+    for source, bucket in source_health(cfg, now=current).items():
+        if int(bucket.get("consecutive_ignored") or 0) < min_ignores:
+            continue
+        anchor = _parse_ts(bucket.get("last_ignored_at") or "") or current
+        until_dt = anchor + timedelta(days=max(1, int(mute_days)))
+        if until_dt > current:
+            out[source] = until_dt.strftime("%Y-%m-%d %H:%M:%S")
+    return out
+
+
 def archive_stale(cfg: Config, max_asks: int = _MAX_ASKS) -> int:
     """未答且 asks > max_asks 的问题归档为「用户不关心」，不再注入/推送。"""
     n = 0
@@ -722,6 +797,30 @@ def archive_stale(cfg: Config, max_asks: int = _MAX_ASKS) -> int:
     if n:
         _refresh_open_state(cfg)
         logger.info("qa stale questions archived", count=n)
+    return n
+
+
+def archive_muted(cfg: Config, sources: Iterable[str]) -> int:
+    """归档被静音来源的未答问题（设计 §7：连续忽略 → 来源静音 + 问题归档）。
+
+    静音期 14 天内这些问题不推送；归档后即使静音到期也不会把两周前的旧问题再翻出来。
+    """
+    targets = {str(s) for s in sources or () if s}
+    if not targets:
+        return 0
+    n = 0
+    for row in _read_rows(cfg):
+        if row.get("status") != "open":
+            continue
+        if str(row.get("source") or "qa_open") not in targets:
+            continue
+        row["status"] = "archived"
+        row["updated_at"] = _now()
+        _rewrite_row(cfg, row)
+        n += 1
+    if n:
+        _refresh_open_state(cfg)
+        logger.info("qa muted-source questions archived", count=n, sources=sorted(targets))
     return n
 
 

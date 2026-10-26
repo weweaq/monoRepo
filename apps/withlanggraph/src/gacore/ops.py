@@ -209,6 +209,7 @@ def _proactive_summary(base: Path, now: datetime) -> dict[str, Any]:
         )
         reply = qa_store.reply_stats(cfg, now=now)
         state = proactive.load_state(cfg)
+        muted = qa_store.muted_sources(cfg, now=now)
     except Exception as exc:  # noqa: BLE001 — status must always render
         return {"error_type": type(exc).__name__, "error_message": str(exc)}
 
@@ -230,8 +231,22 @@ def _proactive_summary(base: Path, now: datetime) -> dict[str, Any]:
             "answered": int(reply.get("answered") or 0),
             "ignored": int(reply.get("ignored") or 0),
         }
-    # 静音来源要到 P3（连续忽略 14 天静音）才有数据，P0 固定为空列表。
-    return {"reply": reply, "by_scene": by_scene, "muted_sources": []}
+    # P3: 来源静音来自 qa 账本的连续忽略链；全局静音（"别问了"）来自 state 的
+    # muted_until。两者都只读，不改状态。
+    global_muted = 0
+    for entry in state.values():
+        if not isinstance(entry, dict):
+            continue
+        until = proactive.muted_until_of(entry)
+        if until is not None and until > now:
+            global_muted += 1
+    return {
+        "reply": reply,
+        "by_scene": by_scene,
+        "muted_sources": sorted(muted),
+        "muted_until": dict(muted),
+        "global_muted_users": global_muted,
+    }
 
 
 def build_status(
@@ -326,6 +341,11 @@ def _render(status: dict[str, Any]) -> str:
                 f"  scene {scene}: asked={bucket['asked']} answered={bucket['answered']} "
                 f"ignored={bucket['ignored']}"
             )
+        muted = proactive.get("muted_sources") or []
+        if muted:
+            lines.append(f"  muted sources: {', '.join(muted)}")
+        if proactive.get("global_muted_users"):
+            lines.append(f"  globally muted users: {proactive['global_muted_users']}")
     lines.append("")
     lines.append("OVERALL  " + ("DEGRADED" if status["degraded"] else "ok"))
     for reason in status["reasons"]:
