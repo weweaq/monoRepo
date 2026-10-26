@@ -1084,15 +1084,15 @@ flowchart LR
   - `record_user_emotion(user_id, content, cfg, now)`：经 `load_known_users` 白名单校验，未知用户忽略；分类结果与 `emotion_updated_at` 通过 `_with_state` 原子写入 `proactive_state.json` 的 `entry["emotion"]`；任何异常仅 warning 不阻塞消息处理（best-effort，不吞异常）。
   - `qq.py::on_message` 在 `record_last_active` 之后调用 `record_user_emotion(user_id, content)`，情绪随最近活跃一起落盘。
 - **收尾策略（不追发第二次）**：
-  - open question 防重：`_topic_fingerprint(text)`（空白归一 + 40 字截断）作为话题指纹；发送成功后 `_mark_topic_answered` 写 `answered_topics[fingerprint]=ts`；`_topic_answered` 命中 → 下次不再注入该话题（只发普通问候），`run_proactive_job` 对已答话题置空 topic 不追发。
+  - open question 防重：`_topic_fingerprint(text)`（空白归一 + 40 字截断）作为话题指纹；发送成功后 `_mark_topic_asked`（P0 2026-10-26 由 `_mark_topic_answered` 改名，语义改为"已问"）写 `asked_topics[fingerprint]=ts`；`_topic_asked` 命中 → 下次不再注入该话题（只发普通问候），`run_proactive_job` 对已问话题置空 topic 不追发。
   - 关切点 cooldown：`_concern_due(entry, now)` 判定 `emotion != normal && last_concern 距今 >= _CONCERN_COOLDOWN_HOURS=24` 才可外呼（无 last_concern 视为可外呼；坏/缺时间戳 fail-open 可外呼，`_as_east8` 统一东八区）；发送成功后 `_mark_concerned` 写 `last_concern`，避免 24h 内重复打扰。
 - **prompt 注入**：`build_proactive_prompt` 新增 `emotion` 参数；非 normal 注入「主人最近情绪」段（低落/沮丧 → 关心语气，疲惫 → 提醒休息）并追加约束第 6 条（可提及情绪但别打探隐私、不追问细节）。
-- **run_proactive_job 接线**：逐用户 `emotion = entry.get("emotion","normal")`；`_concern_due` 未到 → `concern_covered` 跳过并记入 `skipped`；`_topic_answered` 命中 → 置空 topic；发送成功后 `_mark_topic_answered` + `_mark_concerned` 一并落盘。
+- **run_proactive_job 接线**：逐用户 `emotion = entry.get("emotion","normal")`；`_concern_due` 未到 → `concern_covered` 跳过并记入 `skipped`；`_topic_asked` 命中 → 置空 topic；发送成功后 `_mark_topic_asked` + `_mark_concerned` 一并落盘。
 - **输出侧校验**（`qq_tools.py`）：`_PUSH_MAX_CHARS=200`，`qq_push` 入口对超长 message 截断到 200 字并 warning（校验在发送前，不报错中断、不吞异常）。
 
 ### 验证
 
-- 新增 `tests/test_proactive_p2.py`（**26 用例**）：classify_emotion（空/纯空白/闲聊 normal、down/tired 关键词、down 优先于 tired）、record_user_emotion（写 emotion+时间戳 / 更新既有 entry 保留 created_at / 未知用户忽略 / None 内容不抛）、`_topic_fingerprint`（空白归一 / 40 字截断）、`_topic_answered` / `_mark_topic_answered`（空文本不标记 / 跨空白匹配）、`_concern_due`（normal 不发 / 无 last_concern 可发 / 24h 内不重发 / 超 24h 再发 / 坏时间戳 fail-open）、`_mark_concerned`（保留 created_at）、prompt 注入（无 emotion 不注入 / 未知 emotion 忽略 / down·tired 措辞）、run_proactive_job（关切未到期跳过且不调 headless / 到期注入情绪+标记 last_concern / 已答话题不追发只发普通问候 / 新话题注入+标记）。
+- 新增 `tests/test_proactive_p2.py`（**26 用例**）：classify_emotion（空/纯空白/闲聊 normal、down/tired 关键词、down 优先于 tired）、record_user_emotion（写 emotion+时间戳 / 更新既有 entry 保留 created_at / 未知用户忽略 / None 内容不抛）、`_topic_fingerprint`（空白归一 / 40 字截断）、`_topic_asked` / `_mark_topic_asked`（空文本不标记 / 跨空白匹配 / 旧 `answered_topics` 键兼容）、`_concern_due`（normal 不发 / 无 last_concern 可发 / 24h 内不重发 / 超 24h 再发 / 坏时间戳 fail-open）、`_mark_concerned`（保留 created_at）、prompt 注入（无 emotion 不注入 / 未知 emotion 忽略 / down·tired 措辞）、run_proactive_job（关切未到期跳过且不调 headless / 到期注入情绪+标记 last_concern / 已答话题不追发只发普通问候 / 新话题注入+标记）。
 - 回归：`pytest tests/test_proactive_p2.py tests/test_proactive_p1.py tests/test_proactive.py tests/test_tools_qq_push.py` = **141 passed**；全量 `pytest tests/` = **486 passed / 12 failed**，12 失败与既有基线一致（test_cli 11 个 pygraphviz 环境缺失 + test_qq 1 个 MagicMock await，非本次引入）。
 - `ruff check src/gacore/proactive.py tests/test_proactive_p2.py` 全过；qq.py / qq_tools.py 的既有 8 项 lint（import 排序 / noqa / DTZ / S110）均在本次未改动区，未纳入本次范围。
 - 未 kill/重启 bot；未改 `.ps1/.bat`；未执行 git 提交。同步更新设计文档 §5.4/§9 与 roadmap 2026-08-29 P2 段。
@@ -1109,7 +1109,7 @@ flowchart LR
 | `run_proactive_job` 的 job guard 拒绝分支 | 仅 append 到 `result["skipped"]`，无日志 | 无法区分 daily_cap / hot_chat / not_idle / idle_already_sent 为何不发 |
 | `run_proactive_job` 的 `_failure_exhausted` 拦截 | 无日志 | M3 重试上限拦截不可审计 |
 | `run_proactive_job` 的 concern 决策 | 无日志 | 无法区分"情绪关切注入" vs "24h cooldown 内不重复关切" |
-| `_mark_concerned` / `_mark_topic_answered` / `_mark_sent` / `_mark_failed` | 状态文件更新无日志 | last_concern / answered_topics / daily_count / failed_count 变化不可追踪 |
+| `_mark_concerned` / `_mark_topic_asked` / `_mark_sent` / `_mark_failed` | 状态文件更新无日志 | last_concern / asked_topics / daily_count / failed_count 变化不可追踪 |
 | `record_user_emotion` | 每次消息都更新 emotion 无日志 | 情绪何时从 normal→down/tired 不可审计 |
 | `load_state` | 文件损坏/非 dict 静默返回 {} | 状态被吞无告警 |
 | `scheduler.py` `proactive_due` 不通过 | silent continue | 窗口/cooldown 跳过不可审计 |
@@ -1118,7 +1118,7 @@ flowchart LR
 
 - **决策点（info，低频）**：
   - `run_proactive_job`：job guard 拒绝 → `info` `"proactive: user skipped by job guard"`，字段 `user`/`reason`/`max_per_day`/`hot_chat_minutes`/`idle_hours`；`_failure_exhausted` 拦截 → `info` `"proactive: user skipped, delivery-failure retries exhausted"`，字段 `failed_count`/`max_fail_retries`；`emotion != normal` → `info` `"proactive: emotion tag considered for outreach"`，字段 `emotion`/`concern_due`。
-- **状态变化**：`_mark_concerned` → `info` `"proactive: concern recorded"`（user/emotion/last_concern）；`_mark_topic_answered` → `debug` `"proactive: topic marked answered"`（fingerprint/size），LRU 裁剪时另发 `debug` `"proactive: answered_topics LRU trimmed"`（trimmed/max_entries/size）；`_mark_sent`/`_mark_failed` → `debug` 带 `daily_count`/`failed_count`。
+- **状态变化**：`_mark_concerned` → `info` `"proactive: concern recorded"`（user/emotion/last_concern）；`_mark_topic_asked` → `debug` `"proactive: topic marked asked"`（fingerprint/size），LRU 裁剪时另发 `debug` `"proactive: asked_topics LRU trimmed"`（trimmed/max_entries/size）；`_mark_sent`/`_mark_failed` → `debug` 带 `daily_count`/`failed_count`。
 - **情绪标签变化（防刷屏）**：`record_user_emotion` 的 `_mutate` 内比较旧值，`prev != label` 才发 `info` `"proactive: emotion tag changed"`（from_emotion/to_emotion/ts）；同标签连续消息不打。
 - **状态异常**：`load_state` 损坏/非 dict → `warning` `"proactive_state.json … falling back to empty state"`（path/error_type）；缺失文件静默（正常首启）。
 - **scheduler 窗口/cooldown 跳过（debug，避免每 tick 刷屏）**：`proactive_due` 不通过 → `debug` `"proactive job not due: window miss or cooldown"`（job/schedule/now）。**要点**：`is_due` 在窗口外保持 true，此分支每 poll tick 都执行，若 info 会刷屏，故用 debug。
@@ -2362,3 +2362,60 @@ sequenceDiagram
 - 全量：`1674 passed, 1 skipped`（`pytest -p no:randomly`）；`ruff check` 全绿。
 - 真实数据核对：`last_seen('工学椅','2026-10-12')` → 10-06（6 天），`alt` 带 09-22/09-20；`last_seen('硬件','2026-10-20')` → 10-07（13 天），冲突仍成立。
 - 已知口径差异：59 篇 v1 快照是 P1 期冻结的，当时 `_scan_reports` 尚未接入，故 10-20 的 v1 证据是 10-03；今天重算会得到 10-07（仍冲突）。审计结果 JSON 没有 `auditor_version` 字段，混版本快照无法区分（遗留项）。
+
+## 9.39 主动询问 2.0 P0：修正「发送即已答」+ 提问账本（proactive.py / qa_store.py / ops.py，2026-10-26）
+
+**目标**：为《主动询问 2.0》设计（`docs/proactive-inquiry-2.0.md` §9）打地基。P0 只修语义与补账本，**不改变现有 08:30 推送行为**，先让真实回复率可被观测。
+
+**语义修正（`proactive.py`）**：
+
+- `_mark_topic_answered` → `_mark_topic_asked`：发送成功只代表"问过"，不再冒充"答过"；状态键 `answered_topics` → `asked_topics`（值仍为首次提问 ISO 时间戳），LRU 上限常量 `_ANSWERED_TOPICS_MAX` → `_ASKED_TOPICS_MAX`（50）。
+- `_topic_answered` → `_topic_asked`：读取时先查 `asked_topics`，再兼容旧键 `answered_topics`（`_LEGACY_ASKED_TOPICS_KEY`），旧状态文件不会因改名丢失"不追发第二次"能力。
+- `_mark_sent` 新增 `entry["reply_stats"][scene] = {"asked", "answered", "ignored"}`，P0 只累加 `asked`；`answered`/`ignored` 由 `qa_store` 的问答行归因，P1 匹配层接入后再回填。
+- `run_proactive_job` 的 questions scene 在 `archive_stale` 之前调用 `qa_store.mark_ignored(cfg, now=now)`；`mark_pushed` 传入同一次 `now`，保证账本时间与 job 时钟一致。
+
+**提问账本（`qa_store.py`）**：
+
+| 行字段 | 写入点 | 含义 |
+|---|---|---|
+| `source` | `seed_questions` 新行固定 `qa_open` | 候选来源（P2 扩为 chat_loop/kg_todo/langtrack/memory_conflict） |
+| `asked_at` | `mark_pushed` 首次发送（`setdefault` 语义） | 首次提问时间，回复率分母的窗口锚 |
+| `delivered_at` | `mark_pushed` 每次发送覆盖 | 最近一次发送时间，也是 ignored 的判定锚 |
+| `ignored_count` / `ignored_marked_for` | `mark_ignored` | 发出满 24h 未答 +1；`ignored_marked_for` 存当轮 `delivered_at` 做幂等，重推后才可再记 |
+| `asks` | `mark_pushed`（不变） | 仍是重问预算的唯一依据，P0 未改 |
+
+- `mark_ignored(cfg, *, now=None, after_hours=24)`：只对 `status == "open"` 的行记账，不改 `status`/`asks`，对推送行为零影响。
+- `reply_stats(cfg, *, days=7, now=None)`：分母 = 窗口内 `asked_at`（旧行回退 `delivered_at`）落在近 N 天的问题；返回 `asked` / `asked_today` / `answered` / `ignored` / `answer_rate` / `by_source`。未推送的种子问题不进分母，避免 0 回复假象。
+- 旧行缺新字段一律按空串/0 读取，向后兼容。
+
+**可观测性（`ops.py`）**：
+
+- `build_status()` 新增 `proactive` 段：`reply`（qa 7 日账本）、`by_scene`（`proactive_state.json` 各 scene 的 asked/answered/ignored 汇总）、`muted_sources`（P0 固定空，P3 接入来源静音）。
+- 文本渲染新增 `PROACTIVE  7d asked=… answered=… ignored=… rate=… today=…` 与逐 scene 行；读取异常降级为 `PROACTIVE unavailable: …`，不参与 `degraded` 判定。
+- 数据来源是只读文件（`data/qa/*.jsonl`、`data/proactive_state.json`），ops 不写任何状态。
+
+```mermaid
+sequenceDiagram
+    participant P as proactive 08:30
+    participant Q as qa_store
+    participant O as ops status
+    P->>Q: mark_ignored(now)  ← 上一轮发出满 24h 未答 +1
+    P->>Q: archive_stale() → open_questions()
+    P->>Q: set_prompt_order + mark_pushed(now)  ← asked_at 首次 / delivered_at 覆盖
+    Q-->>O: reply_stats(days=7)  ← asked/answered/ignored/by_source
+    P->>P: _mark_sent → reply_stats[scene].asked += 1
+    P-->>O: proactive_state.json  ← by_scene
+```
+
+### 验证
+
+- 新增/改写测试：`test_qa_store.py` 5 例（asked_at 首次写/重复推只更新 delivered_at、ignored 24h 幂等与重推后再记、answered 行不记 ignored、7 日窗口与 by_source、空账本零值）；`test_ops.py` 1 例（`build_status`/`_render` 出现 7 日账本）；`test_proactive_p2.py` 改名同步 + 新增旧键兼容用例。
+- 相关套件：`pytest test_qa_store test_ops test_proactive test_proactive_p1/p2/p3 test_proactive_questions` = **203 passed**；全仓 `pytest` = **1747 passed / 5 skipped**；`ruff check apps packages tests` 全绿。
+- 环境偏差：仓库根 `tmp_pytest` 残留目录 ACL 拒绝访问导致 pytest fixture 初始化失败（既有基础设施问题，非本次改动），本轮以 `--basetemp=tmp_pytest_run` 跑通；`tmp_pytest` 仍待人工清理。
+
+**待办更新**：
+
+- [ ] P1：多问题回答匹配（显式锚点拦截 + 规则 2-gram + LLM 兜底），落 `match_method`/`match_confidence`
+- [ ] P2：候选池（chat_loop / kg_todo / langtrack / memory_conflict）+ 打分与依据校验
+- [ ] P3：活跃时段调度、自适应配额 1–4 条/日、来源静音与 `别问了` 命令
+

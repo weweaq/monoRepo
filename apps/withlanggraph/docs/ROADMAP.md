@@ -4607,3 +4607,29 @@ batterystats 实测 weiCheckApp 耗电 67.7 mAh，其中 GNSS 64.4 mAh（引擎�
 - [ ] P2：self 回填 + resolve_alias 只认 manual/self/linker + kg_view/日报切 resolved（T4/T11/T12）
 - [ ] P3：抽取硬约束 prompt v2 + validator + linker + grounded（T13/T14/T14b/T14c）
 - [ ] P4：/kg audit 合并 UI
+
+## 2026-10-26 · 主动询问 2.0 P0：修正「发送即已答」+ 提问账本
+
+**背景**：用户提出把 QQ 主动询问做得"又多又准、有活人感"。审计现有链路后确认两个根因：①`_mark_topic_answered` 在发送成功时调用，把"已问"记成"已答"，无法统计真实回复率；②`try_answer` 的裸答只在唯一开放问题时生效，"问得多"与"问得准"互斥。设计稿 `docs/proactive-inquiry-2.0.md` 按 P0–P3 分期，本条只落 P0（语义与账本，不改行为）。
+
+**已完成**：
+- `proactive.py`：`_mark_topic_answered` → `_mark_topic_asked`、`_topic_answered` → `_topic_asked`、状态键 `answered_topics` → `asked_topics`（LRU 常量同步改名）；读取兼容旧键，旧状态文件不丢"不追发第二次"；`_mark_sent` 新增 `reply_stats[scene].asked` 计数；questions scene 在 `archive_stale` 前调用 `mark_ignored`，`mark_pushed` 传入 job 同一 `now`。
+- `qa_store.py`：新行补 `source=qa_open` / `asked_at` / `delivered_at` / `ignored_count`；`mark_pushed` 首次写 `asked_at`、每次覆盖 `delivered_at`（`asks` 语义不变）；新增 `mark_ignored`（发出满 24h 未答 +1，按 `delivered_at` 幂等）与 `reply_stats`（7 日 asked/answered/ignored/answer_rate/by_source，分母只算窗口内实际发出）。
+- `ops.py`：`build_status()` 新增 `proactive` 段（qa 7 日账本 + 按 scene 的 asked 汇总 + 静音来源占位），文本渲染新增 `PROACTIVE` 行；读取异常降级不参与 `degraded`。
+- 文档：`architecture-flow.mmd` 增 `QAS/RC → OPS` 两条账本边并更新 OPS 节点；`langTrack-tech.md` 新增 9.39 并同步 9.17/9.18 的旧符号名。
+
+**实测验证**：
+- 相关套件 `test_qa_store / test_ops / test_proactive / p1 / p2 / p3 / test_proactive_questions` = **203 passed**。
+- 全仓 `uv run --all-packages pytest` = **1747 passed / 5 skipped**；`uv run ruff check apps packages tests` 全绿。
+- 新增 5 例 qa 账本测试 + 1 例 ops 账本渲染测试 + 1 例旧键兼容测试；`test_proactive_p2` 的 LRU/改名用例同步更新。
+
+**偏差说明**：
+- P0 只统计 `asked`；`answered`/`ignored` 的 scene 级归因要等 P1 匹配层把回答写回后才有，`by_scene` 里这两项目前恒为 0，属预期。
+- 仓库根 `tmp_pytest` 残留目录 ACL 拒绝访问，pytest fixture 初始化即失败（既有基础设施问题，非本次引入），本轮以 `--basetemp=tmp_pytest_run` 跑通；`tmp_pytest` 待人工清理。
+- 未重启 gacore、未提交（按本轮工作方式，代码与文档改动待用户确认后提交）。
+
+**待办更新**：
+- [ ] P1：多问题回答匹配（显式锚点拦截 + 规则 2-gram + LLM 兜底），落 `match_method`/`match_confidence`，回填 scene 级 answered/ignored
+- [ ] P2：候选池（chat_loop / kg_todo / langtrack / memory_conflict）+ 打分与依据校验
+- [ ] P3：活跃时段调度、自适应配额 1–4 条/日、来源静音与 `别问了` 命令
+- [ ] 清理仓库根 `tmp_pytest` 残留目录（需先解除 ACL 拒绝）

@@ -99,7 +99,7 @@ flowchart TD
         LG["jsonl_logger<br/>+ Logger.exception(真栈→error_type/error_message/stack_trace)<br/>+ message/fields/console 全链路脱敏(redact)<br/>+ llm_request_log"]
         HB[("data/run/*.json 组件心跳<br/>gacore.heartbeat.Heartbeat<br/>main/scheduler/qq/langtrack_server<br/>原子写 os.replace(瞬时错误尝试×3、重试 2 次) · beat(state) 保留上一态<br/>stale_after_sec=max(60, interval×3)<br/>GACORE_RUN_DIR 覆盖")]
         RD["gacore/redact.py 统一脱敏入口<br/>redact_text / redact_obj(幂等·不抛)<br/>值层: *_KEY/*_TOKEN/*_SECRET 等环境变量值(≥8字符·最长优先)<br/>模式层: URL query · Bearer · sk-/ghp- token · 赋值式密钥"]
-        OPS["python -m gacore.ops status<br/>read_heartbeats(四个组件) + find_latest_record<br/>7天窗口扫 logs/&lt;day&gt;/app.jsonl 尾部256KB<br/>etl.run.* → ok/failed/interrupted/running<br/>+ 最近 ingest failed · 退出码 0/1 供 cron"]
+        OPS["python -m gacore.ops status<br/>read_heartbeats(四个组件) + find_latest_record<br/>7天窗口扫 logs/&lt;day&gt;/app.jsonl 尾部256KB<br/>etl.run.* → ok/failed/interrupted/running<br/>+ 最近 ingest failed · 退出码 0/1 供 cron<br/>+ proactive 账本: qa 7日 asked/answered/ignored/回复率 + scene asked"]
     end
 
     %% ===== 层间边 (带语义) =====
@@ -131,6 +131,8 @@ flowchart TD
     QQ -. "qq 心跳" .-> HB
     MN -. "main 心跳" .-> HB
     HB -. "read_heartbeats: state/age/stale/detail" .-> OPS
+    QAS -. "reply_stats: 7日 asked/answered/ignored/answer_rate/by_source" .-> OPS
+    RC -. "proactive_state.json reply_stats: 按 scene asked" .-> OPS
     LG -. "logs/&lt;day&gt;/app.jsonl 7天窗口尾部" .-> OPS
     LG -. "message/fields/console 脱敏" .-> RD
     IG -. "/health detail + ingest 失败摘要 + /etl/status last_error" .-> RD
