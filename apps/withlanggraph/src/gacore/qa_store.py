@@ -40,6 +40,24 @@ _WEEKLY_CMD_RE = re.compile(r"^\s*(?:评分|打分|候选)")
 _WEEK_ID_RE = re.compile(r"^\d{4}-W\d{2}$")
 _NOISE_RE = re.compile(r"[\d\s，。？！？、:：;；()（）\[\]【】,.\-—/\"'“”‘’]+")
 
+# P1 多问题回答匹配（proactive-inquiry-2.0 §6）：规则层只做归因、不拦截聊天。
+# 规则分 = 主题词命中(0.3) + 用户消息 2-gram 被问题覆盖的比例(0.7)。
+_RULE_TOPIC_WEIGHT: float = 0.3
+_RULE_OVERLAP_WEIGHT: float = 0.7
+_RULE_HIT_MIN: float = 0.70
+_RULE_AMBIGUITY_GAP: float = 0.10
+_LLM_BAND_LOW: float = 0.45
+_LLM_BAND_HIGH: float = 0.70
+_LLM_CONF_MIN: float = 0.75
+_LLM_MIN_CHARS: int = 8
+_MATCH_MAX_CHARS: int = 120
+_MATCH_PROMPT: str = (
+    "你是回答归因分类器。给定待答问题列表和用户刚发的一条消息，判断这条消息是否在回答其中某个问题。\n"
+    "只在消息确实回答了某题时给出该题 key；在提问、闲聊、转述或含糊时一律 question_key=null。\n"
+    "只输出一行 JSON，不要解释：{\"question_key\": \"<key 或 null>\", \"confidence\": <0-1>}\n\n"
+    "问题列表：\n{questions}\n\n用户消息：{content}"
+)
+
 
 def _now_dt() -> datetime:
     return datetime.now(tz=_TZ)
@@ -131,6 +149,170 @@ def _day_as_date(day: str) -> str:
     return day if len(day) == 10 and day[4] == "-" else ""
 
 
+def _match_config(cfg: Config) -> dict[str, Any]:
+    """``config/proactive.json`` 的 ``match`` 段；缺失/损坏时按默认（LLM 兜底开启）。"""
+    path = cfg.root / "config" / "proactive.json"
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    match = raw.get("match") if isinstance(raw, dict) else None
+    return match if isinstance(match, dict) else {}
+
+
+def _rule_score(question: str, content: str, *, topic: str = "") -> float:
+    """规则归因分：主题词命中 + 用户消息 2-gram 被问题覆盖的比例。
+
+    分母取用户消息的 2-gram，而不是问题的：短答「在读」也能在「你是在读还是上班？」
+    里拿到满分覆盖；长问题里的「依据：…」尾巴不会稀释分数。
+    """
+    bg_q, bg_c = _bigrams(question), _bigrams(content)
+    if not bg_q or not bg_c:
+        return 0.0
+    topic_hit = 1.0 if topic and topic in content else 0.0
+    overlap = len(bg_q & bg_c) / len(bg_c)
+    return round(_RULE_TOPIC_WEIGHT * topic_hit + _RULE_OVERLAP_WEIGHT * overlap, 4)
+
+
+def _rank_rule(cfg: Config, content: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    table = _load_topic_synonyms(cfg)
+    ranked = []
+    for row in rows:
+        question = str(row.get("question") or "")
+        topic = _topic_from_table(table, question) or ""
+        ranked.append(
+            {
+                "question_key": row["question_key"],
+                "question": question,
+                "topic": topic,
+                "score": _rule_score(question, content, topic=topic),
+            }
+        )
+    return sorted(ranked, key=lambda r: r["score"], reverse=True)
+
+
+def _llm_classify(
+    content: str, ranked: list[dict[str, Any]], *, llm: Any = None
+) -> dict[str, Any] | None:
+    """轻量归因分类（失败/超时/坏 JSON 一律 None，绝不影响聊天）。"""
+    try:
+        if llm is None:
+            from gacore.llm import get_llm
+
+            llm = get_llm([], bind_tools=False)
+        lines = "\n".join(f"- {r['question_key']} | {r['question']}" for r in ranked)
+        prompt = _MATCH_PROMPT.replace("{questions}", lines).replace("{content}", content)
+        resp = llm.invoke(prompt)
+        text = getattr(resp, "content", resp)
+        if not isinstance(text, str):
+            text = str(text)
+        m = re.search(r"\{.*\}", text, re.S)
+        if not m:
+            return None
+        data = json.loads(m.group(0))
+    except Exception as exc:  # noqa: BLE001 — 归因失败只降级，不抛出
+        logger.warning("qa llm match failed", error_type=type(exc).__name__, error_message=str(exc))
+        return None
+    if not isinstance(data, dict):
+        return None
+    key = data.get("question_key")
+    if not isinstance(key, str) or key not in {r["question_key"] for r in ranked}:
+        return None
+    try:
+        confidence = float(data.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    return {"question_key": key, "confidence": max(0.0, min(1.0, confidence))}
+
+
+def _hit(row: dict[str, Any], method: str, confidence: float) -> dict[str, Any]:
+    return {
+        "question_key": row["question_key"],
+        "question": row["question"],
+        "topic": row.get("topic", ""),
+        "score": row.get("score", 0.0),
+        "method": method,
+        "confidence": round(confidence, 2),
+    }
+
+
+def match_answer(
+    cfg: Config,
+    content: str,
+    *,
+    open_: list[dict[str, Any]] | None = None,
+    llm: Any = None,
+) -> dict[str, Any] | None:
+    """P1 多问题归因：规则优先，置信度不足时轻量 LLM 兜底。
+
+    只在 2 个及以上开放问题时启用（唯一开放问题由 ``try_answer`` 的裸答路径覆盖）。
+    本函数只返回归因结果、不落账、不拦截消息；调用方决定是否 ``record_answer``。
+    歧义（两个问题都过阈值且分差 < 0.1）、问句、命令、周报交互一律不猜。
+    """
+    content = (content or "").strip()
+    if not content or len(content) > _MATCH_MAX_CHARS:
+        return None
+    if content.startswith("/") or _WEEKLY_CMD_RE.match(content) or _LOOKS_LIKE_QUESTION_RE.search(content):
+        return None
+    rows = open_ if open_ is not None else open_questions(cfg)
+    if len(rows) < 2:
+        return None
+    ranked = _rank_rule(cfg, content, rows)
+    top = ranked[0]
+    if top["score"] >= _RULE_HIT_MIN:
+        runner = ranked[1] if len(ranked) > 1 else None
+        if runner and runner["score"] >= _RULE_HIT_MIN and top["score"] - runner["score"] < _RULE_AMBIGUITY_GAP:
+            logger.info(
+                "qa match ambiguous, skipped",
+                top_score=top["score"],
+                runner_score=runner["score"],
+            )
+            return None
+        return _hit(top, "rule", top["score"])
+    if _LLM_BAND_LOW <= top["score"] < _LLM_BAND_HIGH and len(content) > _LLM_MIN_CHARS:
+        if not bool(_match_config(cfg).get("llm_enabled", True)):
+            return None
+        verdict = _llm_classify(content, ranked, llm=llm)
+        if not verdict or float(verdict.get("confidence") or 0.0) < _LLM_CONF_MIN:
+            return None
+        row = next((r for r in ranked if r["question_key"] == verdict["question_key"]), None)
+        return _hit(row, "llm", float(verdict["confidence"])) if row else None
+    return None
+
+
+def match_and_record(
+    cfg: Config,
+    content: str,
+    *,
+    open_: list[dict[str, Any]] | None = None,
+    llm: Any = None,
+    now: datetime | None = None,
+) -> dict[str, Any] | None:
+    """后台归因并落账（QQ 侧调用，不拦截消息）；未命中返回 None。"""
+    hit = match_answer(cfg, content, open_=open_, llm=llm)
+    if not hit:
+        return None
+    row = record_answer(
+        cfg,
+        hit["question_key"],
+        content,
+        method=hit["method"],
+        confidence=hit["confidence"],
+        now=now,
+    )
+    if row is None:
+        return None
+    logger.info(
+        "qa answer matched",
+        question_key=hit["question_key"],
+        method=hit["method"],
+        confidence=hit["confidence"],
+    )
+    return hit
+
+
 def _load_open_state(cfg: Config) -> dict[str, Any]:
     path = _qa_dir(cfg) / "open_state.json"
     if not path.is_file():
@@ -211,6 +393,10 @@ def seed_questions(cfg: Config, day: str, bullets: list[str]) -> dict[str, int]:
             "asked_at": "",
             "delivered_at": "",
             "ignored_count": 0,
+            # P1 归因字段（回答后写入；未答行保持空值）。
+            "answered_at": "",
+            "match_method": "",
+            "match_confidence": 0.0,
             "created_at": _now(),
             "updated_at": _now(),
         }
@@ -231,14 +417,32 @@ def open_questions(cfg: Config, *, before_date: str | None = None) -> list[dict[
     return sorted(rows, key=lambda r: (r.get("day", ""), int(re.sub(r"\D", "", r.get("anchor", "")) or 0)))
 
 
-def record_answer(cfg: Config, key: str, answer: str) -> dict[str, Any] | None:
-    """落回答：行转 answered + 画像候选 pending；返回更新后的行（未找到返回 None）。"""
+def record_answer(
+    cfg: Config,
+    key: str,
+    answer: str,
+    *,
+    method: str = "explicit",
+    confidence: float = 1.0,
+    now: datetime | None = None,
+) -> dict[str, Any] | None:
+    """落回答：行转 answered + 画像候选 pending；返回更新后的行（未找到返回 None）。
+
+    ``method``/``confidence`` 记录回答是怎么归因到这条问题的（P1）：
+    ``explicit``（[Qn]/[想问你-N] 或直接 API 落账）、``rule``（2-gram 规则）、
+    ``llm``（轻量分类兜底）。``answer`` 字段本身就是回答原文，不再另设 answer_text。
+    """
+    ts_dt = (now or _now_dt()).astimezone(_TZ)
+    ts = ts_dt.strftime("%Y-%m-%d %H:%M:%S")
     for row in _read_rows(cfg):
         if row["question_key"] != key or row.get("status") != "open":
             continue
         row["status"] = "answered"
         row["answer"] = answer
-        row["answer_day"] = _today()
+        row["answer_day"] = ts_dt.date().isoformat()
+        row["answered_at"] = ts
+        row["match_method"] = method
+        row["match_confidence"] = round(float(confidence), 2)
         row["updated_at"] = _now()
         _rewrite_row(cfg, row)
         cand_path = _qa_dir(cfg) / "candidates.jsonl"
@@ -250,15 +454,73 @@ def record_answer(cfg: Config, key: str, answer: str) -> dict[str, Any] | None:
                     "question": row["question"],
                     "answer": answer,
                     "status": "pending",
+                    "answered_at": ts,
+                    "match_method": method,
+                    "match_confidence": round(float(confidence), 2),
                     "created_at": _now(),
                     "updated_at": _now(),
                 },
                 ensure_ascii=False,
             ) + "\n")
         _refresh_open_state(cfg)
-        logger.info("qa answer recorded", question_key=key, answer_len=len(answer))
+        logger.info(
+            "qa answer recorded",
+            question_key=key,
+            answer_len=len(answer),
+            match_method=method,
+            match_confidence=round(float(confidence), 2),
+        )
         return row
     return None
+
+
+def _drop_pending_candidate(cfg: Config, key: str) -> None:
+    """回滚回答时连带删掉由它产生的 pending 画像候选（已 confirmed/rejected 的不动）。"""
+    path = _qa_dir(cfg) / "candidates.jsonl"
+    if not path.is_file():
+        return
+    kept: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            kept.append(line)
+            continue
+        if (
+            isinstance(row, dict)
+            and row.get("question_key") == key
+            and row.get("status") == "pending"
+        ):
+            continue
+        kept.append(line)
+    path.write_text("\n".join(kept) + ("\n" if kept else ""), encoding="utf-8")
+
+
+def unanswer(cfg: Config, key: str) -> bool:
+    """回滚一次回答：状态改回 open 并清空匹配字段（P1 人工纠错入口）。
+
+    问题重新进入未答池；由这次回答产生的 pending 候选一并移除，避免周报继续消费
+    一条已被撤销的答案。
+    """
+    for row in _read_rows(cfg):
+        if row["question_key"] != key or row.get("status") != "answered":
+            continue
+        row["status"] = "open"
+        row["answer"] = ""
+        row["answer_day"] = ""
+        row["answered_at"] = ""
+        row["match_method"] = ""
+        row["match_confidence"] = 0.0
+        row["updated_at"] = _now()
+        _rewrite_row(cfg, row)
+        _drop_pending_candidate(cfg, key)
+        _refresh_open_state(cfg)
+        logger.info("qa answer rolled back", question_key=key)
+        return True
+    return False
 
 
 def mark_pushed(cfg: Config, keys: list[str], *, now: datetime | None = None) -> None:
@@ -429,7 +691,7 @@ def try_answer(cfg: Config, content: str, *, allow_bare: bool = True) -> str | N
             # 只发了锚点/标点：不当作裸回答吞掉（交回普通对话，由助手追问）
             return None
         row = _resolve_explicit(cfg, kind, idx, open_)
-        if row and record_answer(cfg, row["question_key"], text):
+        if row and record_answer(cfg, row["question_key"], text, method="explicit"):
             return f"✅ 已记下你对 [Q{idx}] 的回答，会进下一期日报。"
         return None
     if (
@@ -440,7 +702,7 @@ def try_answer(cfg: Config, content: str, *, allow_bare: bool = True) -> str | N
         and 0 < len(content) <= _BARE_ANSWER_MAX_CHARS
         and not _LOOKS_LIKE_QUESTION_RE.search(content)
     ):
-        row = record_answer(cfg, open_[0]["question_key"], content)
+        row = record_answer(cfg, open_[0]["question_key"], content, method="rule")
         if row:
             return "✅ 已记下你的回答，会进下一期日报。"
     return None

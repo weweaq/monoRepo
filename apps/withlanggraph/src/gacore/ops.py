@@ -222,6 +222,14 @@ def _proactive_summary(base: Path, now: datetime) -> dict[str, Any]:
             target = by_scene.setdefault(scene, {"asked": 0, "answered": 0, "ignored": 0})
             for field in ("asked", "answered", "ignored"):
                 target[field] += int(bucket.get(field) or 0)
+    # P1 回填 questions 场景：真实口径在 qa 账本（按问题条数），proactive_state 的
+    # asked 只按消息条数记，两种单位不能混算，有账本就以账本为准。
+    if reply.get("asked"):
+        by_scene["questions"] = {
+            "asked": int(reply.get("asked") or 0),
+            "answered": int(reply.get("answered") or 0),
+            "ignored": int(reply.get("ignored") or 0),
+        }
     # 静音来源要到 P3（连续忽略 14 天静音）才有数据，P0 固定为空列表。
     return {"reply": reply, "by_scene": by_scene, "muted_sources": []}
 

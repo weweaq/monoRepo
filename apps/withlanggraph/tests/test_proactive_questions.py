@@ -71,6 +71,31 @@ def test_questions_scene_push_marks_asks(tmp_path, monkeypatch):
     assert row["asks"] == 1
 
 
+def test_questions_scene_pushes_at_most_three_per_message(tmp_path, monkeypatch):
+    """P1：一条主动消息最多 3 个问题，其余留在池里等下一个时段，不一次性倾倒。"""
+    cfg = Config.for_tests(tmp_path)
+    seed_questions(
+        cfg,
+        "2026-10-25",
+        [f"- [想问你-{i}] 问题{name}（依据：10-25）" for i, name in enumerate("甲乙丙丁", 1)],
+    )
+    monkeypatch.setattr("gacore.proactive._target_users", lambda job: ["u1"])
+    captured: dict = {}
+
+    def fake_headless(job, cfg_, prompt, max_turns):
+        captured["prompt"] = prompt
+        return "END", "转述完成", [json.dumps({"status": "sent", "to": ["u1"]})]
+
+    monkeypatch.setattr("gacore.proactive._headless_run", fake_headless)
+    monkeypatch.setattr("gacore.proactive._write_back_proactive", lambda *a, **k: False)
+    job = Job(name="daily-questions", schedule="08:30", prompt="", scene="questions")
+    assert run_proactive_job(job, cfg, clock=lambda: datetime(2026, 10, 26, 8, 30))["sent"] == 1
+
+    assert "[Q3]" in captured["prompt"] and "[Q4]" not in captured["prompt"]
+    asks = sorted(r["asks"] for r in all_rows(cfg))
+    assert asks == [0, 1, 1, 1]
+
+
 def test_questions_scene_archives_before_push_so_last_ask_is_answerable(tmp_path, monkeypatch):
     """第 3 次（上限）推送当天必须仍可回答：归档发生在推送之前，不是推完立刻归档。"""
     cfg = Config.for_tests(tmp_path)

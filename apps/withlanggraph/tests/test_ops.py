@@ -156,7 +156,8 @@ def test_build_status_includes_proactive_ledger(tmp_path: Path) -> None:
     assert proactive["reply"]["asked"] == 2
     assert proactive["reply"]["answered"] == 1
     assert proactive["reply"]["answer_rate"] == 0.5
-    assert proactive["by_scene"] == {}
+    # P1：questions 场景的真实口径回填自 qa 账本（按问题条数，而非消息条数）
+    assert proactive["by_scene"]["questions"] == {"asked": 2, "answered": 1, "ignored": 0}
     assert proactive["muted_sources"] == []
     rendered = ops._render(status)
     assert "PROACTIVE  7d asked=2 answered=1 ignored=0 rate=50% today=0" in rendered

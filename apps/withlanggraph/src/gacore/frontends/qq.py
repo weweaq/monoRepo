@@ -103,7 +103,7 @@ from gacore.heartbeat import DEFAULT_INTERVAL_SECONDS, Heartbeat, run_dir
 from gacore.llm import get_llm
 from gacore.jsonl_logger import get_logger
 from gacore.proactive import record_last_active, record_user_emotion
-from gacore.qa_store import try_answer
+from gacore.qa_store import match_and_record, try_answer
 from gacore.weekly_eval import try_weekly_interaction
 
 from gacore.state import new_state
@@ -220,6 +220,9 @@ _RECONNECT_MAX: Final = 300
 _HTTP_TIMEOUT: Final = 30  # botpy default (5s) is too short for slow TLS handshakes
 
 _IMAGE_WAIT_TIMEOUT: Final = 300  # seconds the wait_for_text interrupt auto-resumes after
+# P1 多问题归因的后台预算：规则层是纯本地计算，只有 LLM 兜底会慢；超时即放弃，
+# 用户已经在正常聊天里拿到回复，归因失败不能反过来拖慢或阻断对话。
+_QA_MATCH_TIMEOUT: Final = 25
 
 
 
@@ -1154,6 +1157,12 @@ class QQApp:
                 )
                 return
 
+            # 3.65) P1 多问题回答归因：显式锚点与唯一开放问题的裸答已在上一步拦截；
+            #       这里只对"多问题并存时的自然语言回答"做后台归因（规则 + LLM 兜底），
+            #       命中静默落账，未命中或超时都不影响本条消息继续走正常聊天/反馈链路。
+            if route is None and user_id not in self._feedback_sessions:
+                asyncio.create_task(self._match_qa_background(content))
+
             if route is not None or user_id in self._feedback_sessions:
                 asyncio.create_task(
                     self._handle_feedback(chat_id, content, user_id, route, msg_id=msg_id, is_group=is_group)
@@ -1181,6 +1190,20 @@ class QQApp:
             traceback.print_exc()
 
 
+
+    async def _match_qa_background(self, content: str) -> None:
+        """P1：多问题自然语言回答的后台归因（不拦截消息，失败静默）。
+
+        规则层纯本地、命中即落账；规则分落在 0.45–0.7 且消息够长时才走一次轻量
+        LLM 分类。整个过程放进线程 + ``wait_for`` 兜底，任何异常只记 debug。
+        """
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(match_and_record, Config.default(), content),
+                timeout=_QA_MATCH_TIMEOUT,
+            )
+        except Exception:  # noqa: BLE001 — 归因失败绝不影响聊天主链路
+            logger.debug("background qa match failed", stack_trace=traceback.format_exc())
 
     async def _handle_feedback(self, chat_id, content, user_id, route, *, msg_id=None, is_group=False):
         """Edit/confirm/resend router for the daily-report feedback loop (off the chat graph).

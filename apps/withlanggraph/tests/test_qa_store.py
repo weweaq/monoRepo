@@ -11,6 +11,8 @@ from gacore.qa_store import (
     archive_stale,
     mark_ignored,
     mark_pushed,
+    match_and_record,
+    match_answer,
     open_questions,
     qa_brief,
     record_answer,
@@ -19,6 +21,7 @@ from gacore.qa_store import (
     set_prompt_order,
     stats,
     try_answer,
+    unanswer,
 )
 
 _TZ = timezone(timedelta(hours=8))
@@ -427,4 +430,156 @@ def test_reply_stats_empty_ledger_is_zero(tmp_path):
     assert stats_["asked"] == 0
     assert stats_["answer_rate"] == 0.0
     assert stats_["by_source"] == {}
+
+
+# --------------------------------------------------------------------------- P1 多问题匹配
+
+
+class _StubLLM:
+    """最小 chat-model 替身：``content`` 可为字符串（正常返回）或异常实例（模拟失败）。"""
+
+    def __init__(self, content):
+        self.content = content
+        self.calls = 0
+
+    def invoke(self, prompt):
+        self.calls += 1
+        if isinstance(self.content, Exception):
+            raise self.content
+        return type("R", (), {"content": self.content})()
+
+
+def _seed_two_open(cfg) -> list[str]:
+    _seed_day(
+        cfg,
+        "2026-10-25",
+        [
+            "- [想问你-1] 你是在读还是上班？（依据：10-25）",
+            "- [想问你-2] 工学椅到底还买不买？（依据：长期画像）",
+        ],
+    )
+    keys = [q["question_key"] for q in open_questions(cfg)]
+    mark_pushed(cfg, keys)
+    return keys
+
+
+def test_record_answer_stores_match_fields(tmp_path):
+    cfg = Config.for_tests(tmp_path)
+    _seed_day(cfg, "2026-10-25", ["- [想问你-1] 你是在读还是上班？（依据：10-25）"])
+    key = open_questions(cfg)[0]["question_key"]
+    row = record_answer(cfg, key, "在读", method="rule", confidence=0.82, now=_dt(2026, 10, 26, 9))
+    assert row["match_method"] == "rule"
+    assert row["match_confidence"] == 0.82
+    assert row["answered_at"] == "2026-10-26 09:00:00"
+    assert row["answer_day"] == "2026-10-26"
+    assert row["answer"] == "在读"
+
+
+def test_match_rule_attributes_natural_answer_among_multiple(tmp_path):
+    """3 个开放问题场景的核心验收：自然语言短答只归因到匹配的那一题。"""
+    cfg = Config.for_tests(tmp_path)
+    keys = _seed_two_open(cfg)
+    hit = match_and_record(cfg, "在读", now=_dt(2026, 10, 26, 9))
+    assert hit is not None
+    assert hit["question_key"] == keys[0]
+    assert hit["method"] == "rule"
+    assert hit["confidence"] >= 0.7
+
+    rows = {r["question_key"]: r for r in all_rows(cfg)}
+    assert rows[keys[0]]["status"] == "answered"
+    assert rows[keys[0]]["match_method"] == "rule"
+    assert rows[keys[0]]["answered_at"] == "2026-10-26 09:00:00"
+    assert rows[keys[1]]["status"] == "open"
+    assert [r["question_key"] for r in open_questions(cfg)] == [keys[1]]
+
+
+def test_match_rule_does_not_guess_when_scores_are_close(tmp_path):
+    cfg = Config.for_tests(tmp_path)
+    _seed_day(
+        cfg,
+        "2026-10-25",
+        [
+            "- [想问你-1] 今天去学校吗？（依据：10-25）",
+            "- [想问你-2] 今天去学校还是上班？（依据：10-25）",
+        ],
+    )
+    mark_pushed(cfg, [q["question_key"] for q in open_questions(cfg)])
+    assert match_answer(cfg, "今天去学校") is None
+
+
+def test_match_skips_question_command_and_weekly_messages(tmp_path):
+    cfg = Config.for_tests(tmp_path)
+    _seed_two_open(cfg)
+    assert match_answer(cfg, "在读吗") is None
+    assert match_answer(cfg, "/在读") is None
+    assert match_answer(cfg, "评分 5 5") is None
+    assert match_answer(cfg, "在读" * 70) is None  # 超长消息不当答案
+
+
+def test_match_answer_ignores_single_open_question(tmp_path):
+    """唯一开放问题由 try_answer 的裸答路径负责，匹配层不重复接管。"""
+    cfg = Config.for_tests(tmp_path)
+    _seed_day(cfg, "2026-10-25", ["- [想问你-1] 你是在读还是上班？（依据：10-25）"])
+    mark_pushed(cfg, [open_questions(cfg)[0]["question_key"]])
+    assert match_answer(cfg, "在读") is None
+
+
+def test_match_llm_fallback_records_high_confidence(tmp_path):
+    cfg = Config.for_tests(tmp_path)
+    keys = _seed_two_open(cfg)
+    stub = _StubLLM('{"question_key": "%s", "confidence": 0.92}' % keys[0])
+    hit = match_answer(cfg, "在读还是上班哈哈哈", llm=stub)
+    assert stub.calls == 1
+    assert hit is not None
+    assert hit["question_key"] == keys[0]
+    assert hit["method"] == "llm"
+    assert hit["confidence"] == 0.92
+
+
+def test_match_llm_low_confidence_is_dropped(tmp_path):
+    cfg = Config.for_tests(tmp_path)
+    keys = _seed_two_open(cfg)
+    stub = _StubLLM('{"question_key": "%s", "confidence": 0.5}' % keys[0])
+    assert match_answer(cfg, "在读还是上班哈哈哈", llm=stub) is None
+
+
+def test_match_llm_failure_degrades_to_no_match(tmp_path):
+    cfg = Config.for_tests(tmp_path)
+    _seed_two_open(cfg)
+    stub = _StubLLM(RuntimeError("timeout"))
+    assert match_answer(cfg, "在读还是上班哈哈哈", llm=stub) is None
+    assert stub.calls == 1
+
+
+def test_match_llm_can_be_disabled_by_config(tmp_path):
+    cfg = Config.for_tests(tmp_path)
+    _seed_two_open(cfg)
+    config_dir = cfg.root / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "proactive.json").write_text(
+        '{"match": {"llm_enabled": false}}', encoding="utf-8"
+    )
+    stub = _StubLLM('{"question_key": "x", "confidence": 0.99}')
+    assert match_answer(cfg, "在读还是上班哈哈哈", llm=stub) is None
+    assert stub.calls == 0
+
+
+def test_unanswer_rolls_back_status_and_pending_candidate(tmp_path):
+    cfg = Config.for_tests(tmp_path)
+    _seed_day(cfg, "2026-10-25", ["- [想问你-1] 工学椅到底还买不买？（依据：长期画像）"])
+    key = open_questions(cfg)[0]["question_key"]
+    mark_pushed(cfg, [key])
+    assert try_answer(cfg, "[Q1] 先不买了") is not None
+
+    assert unanswer(cfg, key) is True
+    row = all_rows(cfg)[0]
+    assert row["status"] == "open"
+    assert row["answer"] == ""
+    assert row["answered_at"] == ""
+    assert row["match_method"] == ""
+    assert row["match_confidence"] == 0.0
+    assert [r["question_key"] for r in open_questions(cfg)] == [key]
+    cands = (cfg.root / "data" / "qa" / "candidates.jsonl").read_text(encoding="utf-8")
+    assert cands.strip() == ""
+    assert unanswer(cfg, key) is False
 

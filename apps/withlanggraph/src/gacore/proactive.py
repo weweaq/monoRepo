@@ -59,6 +59,9 @@ _IDLE_HOURS: Final = 24          # idle threshold: only reach out when last_acti
 _HOT_CHAT_MINUTES: Final = 30    # hot-chat cooldown: never interrupt while the user is active
 _MAX_FAIL_RETRIES: Final = 3     # per-user per-day delivery-failure retry cap (M3): once a day's
                                  # failed_count reaches this, the window will not keep re-calling
+# P1 (proactive-inquiry-2.0 §5): one proactive message carries at most 3 questions.
+# The rest stay open in the pool and wait for the next slot instead of becoming a survey.
+_MAX_QUESTIONS_PER_PUSH: Final = 3
 
 # P1 jitter: recommended default is ±30min (config/proactive.json carries it). The code
 # level default is 0 (= no jitter) so environments without a guard config file keep the
@@ -1318,7 +1321,7 @@ def run_proactive_job(
         archived = qa_store.archive_stale(resolved_cfg)
         if archived:
             logger.info("proactive: stale questions archived before push", job=job.name, count=archived)
-        open_qa = qa_store.open_questions(resolved_cfg)
+        open_qa = qa_store.open_questions(resolved_cfg)[:_MAX_QUESTIONS_PER_PUSH]
         if not open_qa:
             logger.info("proactive: questions scene skipped, no open questions", job=job.name)
             result["skipped"].append({"user": "", "reason": "no_open_questions"})
