@@ -37,7 +37,8 @@ def test_typical_report_fits_single_segment():
     assert "〔日报" not in segments[0]
 
 
-def test_push_daily_segments_and_strips_questions(tmp_path, monkeypatch):
+def test_push_daily_carries_questions_and_records_touch(tmp_path, monkeypatch):
+    """3.0 决策 D-A 随报问：夜间正文带想问你节，推送成功即 asks=1 + keys 快照（裸回答当晚生效）。"""
     cfg = Config.for_tests(tmp_path)
     from gacore.qa_store import open_questions, seed_questions
 
@@ -58,75 +59,36 @@ def test_push_daily_segments_and_strips_questions(tmp_path, monkeypatch):
     sent = _push_daily_to_qq(cfg, "2026-10-25", body)
     assert sent == len(calls)  # 每段成功送达 1 人，累计口径
     assert len(calls) == 1  # 典型日报 ~2.9K 字节单条送达
-    # 决策 25/40：提问错峰到次日 08:30，夜间正文不带问题、也不计触达
-    assert "想问你-1" not in calls[0]
-    assert "[Q1]" not in calls[0]
-    assert "明早 08:30" in calls[0]
-    assert open_questions(cfg)[0]["asks"] == 0
+    assert "你是在读还是上班" in calls[0]  # 问题随报走，不剥节
+    assert "[想问你-1] 你的答案" in calls[0]  # 指引给正文锚点话术
+    assert "明早" not in calls[0]  # 不再预告次日单独推
+    assert open_questions(cfg)[0]["asks"] == 1  # 夜间即触达一次
+    state = (tmp_path / "data" / "qa" / "open_state.json").read_text(encoding="utf-8")
+    assert open_questions(cfg)[0]["question_key"] in __import__("json").loads(state)["keys"]
 
 
-def test_strip_questions_accepts_h2_and_empty_body_noop(tmp_path, monkeypatch):
-    """`## 想问你` 也要剥；正文只剩问题节时剥完为空 → 不推、不抛 IndexError。"""
+def test_push_daily_without_questions_records_nothing(tmp_path, monkeypatch):
+    """正文无问题节：指引只留订正；不写 keys 快照、不记触达。"""
     cfg = Config.for_tests(tmp_path)
     calls: list[str] = []
 
     async def fake_send(content, targets, is_sandbox):
         calls.append(content)
-        return {"ok": len(targets)}
+        return {"ok": len(targets), "failures": [], "errors": {}, "ids": {}}
 
     monkeypatch.setattr("gacore.langTrack.qq_push.send_c2c", fake_send)
     monkeypatch.setattr("gacore.langTrack.qq_push.load_known_users", lambda: {"A" * 32: {}})
-
-    body = "# 今日状态\n- ok\n\n## 想问你\n- [想问你-1] q（依据：a）\n"
-    assert _push_daily_to_qq(cfg, "2026-10-25", body) == 1
-    assert calls and "想问你-1" not in calls[0]
-
-    calls.clear()
-    only_questions = "## 想问你\n- [想问你-1] q（依据：a）\n"
-    assert _push_daily_to_qq(cfg, "2026-10-25", only_questions) == 0
-    assert calls == []
+    _push_daily_to_qq(cfg, "2026-10-25", "# 今日状态\n- ok\n")
+    assert "订正" in calls[-1]
+    assert "想问你" not in calls[-1] and "[想问你-1]" not in calls[-1]
+    state = (tmp_path / "data" / "qa" / "open_state.json")
+    assert not state.exists() or __import__("json").loads(state.read_text(encoding="utf-8"))["keys"] == []
 
 
 def test_push_daily_no_users_noop(tmp_path, monkeypatch):
     cfg = Config.for_tests(tmp_path)
     monkeypatch.setattr("gacore.langTrack.qq_push.load_known_users", lambda: {})
     assert _push_daily_to_qq(cfg, "2026-10-25", "# 今日状态\n- ok\n") == 0
-
-
-def test_night_body_never_restates_open_questions(tmp_path, monkeypatch):
-    """夜间正文不编号问题（决策 25/40）：有未答问题也只预告明早单独推，避免 9 小时重复打扰。"""
-    cfg = Config.for_tests(tmp_path)
-    from gacore.qa_store import seed_questions
-
-    seed_questions(cfg, "2026-10-25", ["- [想问你-1] 马鞍山医生怎么说？（依据：10-24 报告）"])
-    calls: list[str] = []
-
-    async def fake_send(content, targets, is_sandbox):
-        calls.append(content)
-        return {"ok": len(targets), "failures": [], "errors": {}, "ids": {}}
-
-    monkeypatch.setattr("gacore.langTrack.qq_push.send_c2c", fake_send)
-    monkeypatch.setattr("gacore.langTrack.qq_push.load_known_users", lambda: {"A" * 32: {}})
-    _push_daily_to_qq(cfg, "2026-10-25", "# 今日状态\n- ok\n")
-    assert "马鞍山医生怎么说" not in calls[-1]
-    assert "[Q1]" not in calls[-1]
-    assert "订正" in calls[-1]
-
-
-def test_guidance_drops_question_clause_when_no_open_questions(tmp_path, monkeypatch):
-    """正文没带问题且当日无开放问题：指引只剩订正，不提「想问你」也不提 [Q1]。"""
-    cfg = Config.for_tests(tmp_path)
-    calls: list[str] = []
-
-    async def fake_send(content, targets, is_sandbox):
-        calls.append(content)
-        return {"ok": len(targets), "failures": [], "errors": {}, "ids": {}}
-
-    monkeypatch.setattr("gacore.langTrack.qq_push.send_c2c", fake_send)
-    monkeypatch.setattr("gacore.langTrack.qq_push.load_known_users", lambda: {"A" * 32: {}})
-    _push_daily_to_qq(cfg, "2026-10-25", "# 今日状态\n- ok\n")
-    assert "订正" in calls[-1]
-    assert "想问你" not in calls[-1] and "[Q1]" not in calls[-1]
 
 
 def test_push_daily_filters_placeholder_targets(tmp_path, monkeypatch):

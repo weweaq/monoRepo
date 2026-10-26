@@ -1059,56 +1059,40 @@ def _qq_targets() -> list[str]:
 
 
 def _is_question_heading(line: str) -> bool:
-    """`# 想问你` / `## 想问你` 都算（模型常把一级标题降级，不认会漏剥）。"""
+    """`# 想问你` / `## 想问你` 都算（模型常把一级标题降级，不认会漏算）。"""
     stripped = line.strip()
     return stripped.startswith("#") and stripped.lstrip("#").strip() == "想问你"
 
 
-def _strip_questions(body: str) -> str:
-    """剥掉整节「想问你」（夜间 QQ 正文用）。
-
-    提问按决策 25 错峰到次日 08:30 单独推（那里带 [Q1]..[Qn] 编号并记录展示顺序），
-    正文再带一遍会造成 9 小时内重复打扰，也让 asks 计数翻倍。
-    """
-    lines = body.splitlines()
-    out: list[str] = []
-    i = 0
-    while i < len(lines):
-        if not _is_question_heading(lines[i]):
-            out.append(lines[i])
-            i += 1
-            continue
-        j = i + 1
-        while j < len(lines) and not lines[j].lstrip().startswith("#"):
-            j += 1
-        i = j
-    return "\n".join(out).rstrip() + ("\n" if body.endswith("\n") else "")
-
-
 def _qq_reply_guidance(body: str) -> str:
-    """夜间正文推送的回复指引：问题已移出正文，只留订正话术与明早预告。"""
+    """夜间正文推送的回复指引（3.0 决策 D-A：随报问）——正文带问题给答题话术，否则只留订正。"""
     if "- [想问你-" in body:
         return (
-            "\n\n〔回复指引〕要订正正文回「订正 …」；"
-            "「想问你」的问题明早 08:30 单独推给你（也可回 [想问你-N] 你的答案）。"
+            "\n\n〔回复指引〕正文里的问题直接回 [想问你-1] 你的答案；"
+            "要订正正文回「订正 …」。"
         )
     return "\n\n〔回复指引〕要订正正文回「订正 …」。"
 
 
 def _push_daily_to_qq(cfg: Config, day: str, body: str) -> int:
-    """日报正文分段推 QQ（剥「想问你」节，提问错峰到早晨）；best-effort。"""
+    """日报正文分段推 QQ，想问你节**随报走**（3.0 决策 D-A，修订原决策 40 剥节口径）。
+
+    推送成功即对当日开放问题 set_prompt_order + mark_pushed（asks=1）：[Qn]/[想问你-N]
+    显式回答与裸回答当晚即刻生效；次日 08:30 的 daily-questions 只对仍未答的提醒（asks=2）。
+    best-effort，绝不影响邮件。
+    """
     import asyncio
 
+    from gacore import qa_store
     from gacore.langTrack.qq_push import send_c2c
 
     targets = _qq_targets()
     if not targets:
         logger.info("daily qq push skipped: no valid users", day=day)
         return 0
-    segments = _split_for_qq(_plain_for_qq(_strip_questions(body)).strip())
+    segments = _split_for_qq(_plain_for_qq(body).strip())
     if not segments or not any(seg.strip() for seg in segments):
-        # 正文只有「想问你」一节（极端）：剥完为空就不推，避免 IndexError 打断投递
-        logger.info("daily qq push skipped: empty after stripping questions", day=day)
+        logger.info("daily qq push skipped: empty body", day=day)
         return 0
     segments[-1] += _qq_reply_guidance(body)
     sent_total = 0
@@ -1125,6 +1109,16 @@ def _push_daily_to_qq(cfg: Config, day: str, body: str) -> int:
                 stack_trace=str(exc),
             )
             break
+    if sent_total:
+        day_keys = [
+            q["question_key"]
+            for q in qa_store.open_questions(cfg)
+            if q.get("day") == day
+        ]
+        if day_keys:
+            qa_store.set_prompt_order(cfg, day_keys)
+            qa_store.mark_pushed(cfg, day_keys)
+            logger.info("daily qq questions touch recorded", day=day, keys=len(day_keys))
     logger.info("daily qq pushed", day=day, segments=len(segments), sent=sent_total)
     return sent_total
 
