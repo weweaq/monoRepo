@@ -429,14 +429,14 @@ def open_questions(cfg: Config, *, before_date: str | None = None) -> list[dict[
 
 
 def seed_candidates(
-    cfg: Config, candidates: list[dict[str, Any]], *, day: str | None = None
+    cfg: Config, candidates: list[dict[str, Any]], *, day: str | None = None, kind: str = "candidate"
 ) -> dict[str, int]:
-    """把 P2 候选池选出的候选种成待答问题（``kind=candidate``）。
+    """把候选种成待答问题（P2 候选池 ``kind=candidate``；3.0 出题人 ``kind=composed``）。
 
-    候选由 ``proactive_candidates.select`` 产出（source/ref/topic/anchor/question/
-    evidence/freshness/gain）。去重规则与日报问题一致：已回答 key 永不再入池、
-    同 key 跳过、同日 2-gram 相似跳过；额外加设计文档 §4 的「同一 topic 7 天内最多
-    出现一次」冷却。候选行与日报问题共用同一份 jsonl，因此 ``mark_pushed``/
+    候选由 ``proactive_candidates.select`` 或 ``question_composer.compose`` 产出
+    （source/ref/topic/anchor/question/evidence/freshness/gain）。去重规则与日报问题一致：
+    已回答 key 永不再入池、同 key 跳过、同日 2-gram 相似跳过；同一 topic 7 天内最多
+    出现一次。候选行与日报问题共用同一份 jsonl，因此 ``mark_pushed``/
     ``mark_ignored``/``reply_stats``/P1 匹配层全部自动生效。
     """
     day = day or _today()
@@ -472,9 +472,9 @@ def seed_candidates(
         row = {
             "question_key": key,
             "question": text,
-            "anchor": f"候选-{day}-{n}",
+            "anchor": f"候选-{day}-{n}" if kind == "candidate" else f"composed-{day}-{n}",
             "day": day,
-            "kind": "candidate",
+            "kind": kind,
             "status": "open",
             "answer": "",
             "answer_day": "",

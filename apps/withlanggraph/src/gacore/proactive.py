@@ -332,6 +332,21 @@ def _candidates_enabled(cfg: Config) -> bool:
     return True
 
 
+def _composer_enabled(cfg: Config) -> bool:
+    """3.0 出题人总开关（config/proactive.json ``composer.enabled``，缺失/损坏默认开启）。"""
+    path = _guard_path(cfg)
+    if not path.is_file():
+        return True
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return True
+    section = raw.get("composer") if isinstance(raw, dict) else None
+    if isinstance(section, dict) and "enabled" in section:
+        return bool(section.get("enabled"))
+    return True
+
+
 def _jitter_minutes(guard: dict) -> int:
     """P1 jitter window from the guard config; 0 (= off) when not configured.
 
@@ -837,6 +852,7 @@ def job_guard_allows(
     now: datetime,
     guard: dict | None = None,
     reply_rate: float | None = None,
+    mute_exemption: bool = False,
 ) -> tuple[bool, str]:
     """Job Guard gate: mute / quiet / daily cap / hot-chat / min-gap / idle / active slot.
 
@@ -847,6 +863,9 @@ def job_guard_allows(
     1–4 tier from ``quota_cap``; without data it falls back to the static cap (cold start
     keeps the existing 2/day trial). Returns (allowed, reason) where reason is a
     machine-readable tag describing the denial, or an empty string when allowed.
+
+    ``mute_exemption``（3.0 拍板 4）：True 时跳过全局静音闸——questions scene 里只剩日报
+    未答提醒时使用（「别问了」只静音主动出题，既有承诺的提醒照发）。
     """
     max_per_day = _guard_int(guard, "max_per_day", _MAX_PER_DAY)
     if _guard_bool(guard, "adaptive_quota", False):
@@ -862,8 +881,9 @@ def job_guard_allows(
     today = now_e.date().isoformat()
 
     # 0. Global mute ("别问了 / 不想回答" → 7 天): nothing proactive may go out.
+    # 3.0 拍板 4 豁免：日报未答提醒不受「别问了」影响（mute_exemption=True 跳过本闸）。
     muted_until = muted_until_of(entry)
-    if muted_until is not None and now_e < _as_east8(muted_until):
+    if not mute_exemption and muted_until is not None and now_e < _as_east8(muted_until):
         return False, "globally_muted"
 
     # 1. Quiet hours (config-only; code default off so P0 tests stay deterministic).
@@ -1273,6 +1293,7 @@ def build_proactive_prompt(
     insight: str = "",
     emotion: str = "",
     questions: list[str] | None = None,
+    verbatim_single: bool = False,
 ) -> str:
     """Assemble the proactive-outreach prompt for the headless agent.
 
@@ -1299,12 +1320,19 @@ def build_proactive_prompt(
 
     recall_lines: list[str] = []
     if questions:
-        q_block = "\n".join(f"[Q{i}] {q}" for i, q in enumerate(questions, 1))
-        recall_lines.append(
-            "本期要问主人的问题（可能来自日报「想问你」或候选池；必须逐条原样转述，"
-            "保留 [Q 编号] 与依据，禁止改写、合并、新增或删减；结尾提醒主人可直接回复"
-            "「[Q1] 你的答案」）：\n" + q_block
-        )
+        if verbatim_single:
+            recall_lines.append(
+                "本期只问一个问题（3.0 出题人已写成朋友口吻的完整消息）。"
+                "必须把下面这行**一字不改**地作为消息全文发出——不加编号、不加前缀、"
+                "不加任何解释或表情：\n" + questions[0]
+            )
+        else:
+            q_block = "\n".join(f"[Q{i}] {q}" for i, q in enumerate(questions, 1))
+            recall_lines.append(
+                "本期要问主人的问题（可能来自日报「想问你」或候选池；必须逐条原样转述，"
+                "保留 [Q 编号] 与依据，禁止改写、合并、新增或删减；结尾提醒主人可直接回复"
+                "「[Q1] 你的答案」）：\n" + q_block
+            )
     if topic:
         recall_lines.append(f"最近话题（主人上次抛出、还没说完）：{topic}")
     if insight:
@@ -1619,6 +1647,20 @@ def run_proactive_job(
             )
             result["skipped"].append({"user": "", "reason": "source_muted"})
             return result
+        if not open_qa and _composer_enabled(resolved_cfg):
+            # 3.0 P3c 出题人：变化面（程序算「哪里不对劲」）+ 归因（LLM）→ 朋友式单问。
+            # LLM 失败/关闭/被冷却 → 返回 None，降级候选池（下面的 P2 分支）。
+            from gacore import question_composer
+
+            composed = question_composer.compose(
+                resolved_cfg, now.date().isoformat(), user_id=targets[0]
+            )
+            if composed:
+                open_qa = [
+                    q
+                    for q in qa_store.open_questions(resolved_cfg)
+                    if (q.get("kind") or "") == "composed"
+                ]
         if not open_qa and _candidates_enabled(resolved_cfg):
             # P2 候选池（design doc §4/§5）：日报没有「想问你」时，从 chat_loop /
             # kg_todo / langtrack / memory_conflict 采集候选，打分 ≥0.55 才入池。
@@ -1668,8 +1710,26 @@ def run_proactive_job(
         return result
 
     for uid in targets:
+        # 3.0 拍板 4：「别问了」只静音主动出题（composed/candidate），日报未答提醒照发。
+        # 静音且存在日报类未答 → 收窄为提醒清单并豁免静音闸；全是出题类 → 照常被闸拦下。
+        mute_exempt = False
+        if scene == "questions" and open_qa:
+            _mu = muted_until_of(state.get(f"u_{uid}") or {})
+            if _mu is not None and _as_east8(now) < _as_east8(_mu):
+                reminder_qa = [
+                    q for q in open_qa if (q.get("kind") or "") not in ("candidate", "composed")
+                ]
+                if reminder_qa:
+                    open_qa = reminder_qa
+                    mute_exempt = True
+                    logger.info(
+                        "proactive: mute exemption narrows to report reminders",
+                        job=job.name,
+                        user=uid,
+                        count=len(reminder_qa),
+                    )
         allowed, reason = job_guard_allows(
-            uid, job, state, now, guard=guard, reply_rate=reply_rate
+            uid, job, state, now, guard=guard, reply_rate=reply_rate, mute_exemption=mute_exempt
         )
         if not allowed:
             logger.info(
@@ -1742,6 +1802,8 @@ def run_proactive_job(
                 insight=insight,
                 emotion=emotion if concern_due else "",
                 questions=[q["question"] for q in open_qa] if open_qa else None,
+                verbatim_single=bool(open_qa)
+                and all((q.get("kind") or "") == "composed" for q in open_qa),
             )
             exit_reason, reply, qq_results = _headless_run(job, resolved_cfg, prompt, job.max_turns)
             if not qq_results:

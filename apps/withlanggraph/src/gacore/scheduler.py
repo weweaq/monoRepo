@@ -556,6 +556,16 @@ def _build_job_prompt(job: Job, cfg: Config, for_day: str | None = None, for_wee
                 error_type=type(e).__name__,
                 stack_trace=str(e),
             )
+    # 3.0 拍板 3：日报「想问你」节与出题人共享同一份提问阶梯铁律（单一文本源）。
+    if _is_daily_job(job):
+        from gacore.question_composer import LADDER_RULES
+
+        prompt += (
+            "\n\n"
+            + LADDER_RULES
+            + "\n（以上阶梯适用于正文「想问你」节：默认 L1；仅当信息包/素材出现跨信号异常时才 L3，"
+            "铺垫句可引用数据，问句指向原因或感受。）"
+        )
     # 历史重跑铁律（配合 runtime.as_of 栅栏）：把"模拟视角"在用户消息层再钉一次，
     # 双保险防目标日之后的信息（笔记/问答/实时数据）渗入正文。
     if for_day:

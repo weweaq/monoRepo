@@ -1,6 +1,9 @@
 {
   "enabled": true,
-  "target": { "channel": "c2c", "users": [] },
+  "target": {
+    "channel": "c2c",
+    "users": []
+  },
   "guard": {
     "idle_hours": 24,
     "max_per_day": 2,
@@ -15,6 +18,9 @@
     "llm_enabled": true
   },
   "candidates": {
+    "enabled": true
+  },
+  "composer": {
     "enabled": true
   }
 }

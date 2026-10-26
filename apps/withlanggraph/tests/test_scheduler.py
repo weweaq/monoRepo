@@ -372,7 +372,9 @@ class TestBuildJobPrompt:
         monkeypatch.setattr("gacore.daily_info_pack.build_info_pack", boom)
         job = Job(name="daily-report", schedule="09:00", prompt="原始写作指令")
         prompt = _build_job_prompt(job, cfg)
-        assert prompt == "原始写作指令"  # 信息包构建异常 → 回退原 prompt，job 照常可跑
+        # 信息包构建异常 → 回退原 prompt（+ 3.0 拍板 3 的阶梯铁律后缀），无信息包内容，job 照常可跑
+        assert prompt.startswith("原始写作指令")
+        assert "当日信息包" not in prompt and "提问阶梯铁律" in prompt
 
 
 class TestSanitizeReply:
