@@ -122,7 +122,7 @@ score = 0.30 * gain
 
 不落账的情况：消息以问号结尾、命中命令前缀、属于周报交互（`评分/候选`）、或同时命中两个问题且分差 <0.1。歧义时不猜，避免"静默答错"。
 
-落账字段新增：`answered_at`、`match_method`、`match_confidence`、`answer_text`。人工可回滚：`qa_store` 增加 `unanswer(question_key)`，把状态改回 open 并清空匹配字段。
+落账字段新增：`answered_at`、`match_method`、`match_confidence`；回答原文沿用既有 `answer` 字段（不另设 `answer_text`，避免双份真源）。人工可回滚：`qa_store` 增加 `unanswer(question_key)`，把状态改回 open 并清空匹配字段。
 
 同时修正现有语义：`proactive.py` 发送成功后不再调用 `_mark_topic_answered`，改为 `_mark_topic_asked`（只写 `asked_at`）；`answered` 只由匹配层写入。
 
@@ -144,14 +144,15 @@ score = 0.30 * gain
 
 `data/qa/{date}.jsonl` 行新增字段（旧行缺字段按默认值读取，兼容）：
 
-| 字段 | 含义 |
-| --- | --- |
-| `source` | 候选来源 |
-| `asked_at` | 首次发送时间 |
-| `delivered_at` | 最近发送时间 |
-| `ignored_count` | 连续未回次数 |
-| `match_method` / `match_confidence` | 回答归因方式与置信度 |
-| `cooldown_until` | 同主题冷却截止 |
+| 字段 | 含义 | 落地 |
+| --- | --- | --- |
+| `source` | 候选来源 | P0 |
+| `asked_at` | 首次发送时间 | P0 |
+| `delivered_at` | 最近发送时间 | P0 |
+| `ignored_count` | 连续未回次数 | P0 |
+| `answered_at` | 回答落账时间（同时决定 `answer_day`） | P1 |
+| `match_method` / `match_confidence` | 回答归因方式（explicit/rule/llm）与置信度 | P1 |
+| `cooldown_until` | 同主题冷却截止 | P3 |
 
 `data/proactive_state.json` 新增：
 
@@ -168,7 +169,7 @@ score = 0.30 * gain
 
 P0（语义与账本，不改行为）：修正"发送即已答"，补 `asked_at`/`ignored_count`/`reply_stats`，让现有 08:30 任务先产出真实回复率。验收：日报问题发出后，未回不会被标 answered；`ops status` 能看到 7 日回复率。
 
-P1（多问题匹配）：实现规则 + LLM 兜底匹配，放开单条消息 2–3 个问题，显式锚点仍拦截。验收：3 个开放问题时自然语言回答 Q2 能被正确归因，正常聊天不被吞。
+P1（多问题匹配，已完成 2026-10-26）：实现规则 + LLM 兜底匹配，放开单条消息 2–3 个问题（`_MAX_QUESTIONS_PER_PUSH=3`），显式锚点仍拦截。验收：3 个开放问题时自然语言回答 Q2 能被正确归因，正常聊天不被吞。
 
 P2（候选池与生成器）：接入 `chat_loop`、`kg_todo`、`langtrack`、`memory_conflict` 四类来源，加打分与"依据校验"（生成文案中的日期/数字必须能在来源里找到，否则丢弃重写）。验收：候选来源可追溯，低于阈值不发。
 

@@ -2415,7 +2415,70 @@ sequenceDiagram
 
 **待办更新**：
 
-- [ ] P1：多问题回答匹配（显式锚点拦截 + 规则 2-gram + LLM 兜底），落 `match_method`/`match_confidence`
+- [x] P1：多问题回答匹配（显式锚点拦截 + 规则 2-gram + LLM 兜底），落 `match_method`/`match_confidence`
 - [ ] P2：候选池（chat_loop / kg_todo / langtrack / memory_conflict）+ 打分与依据校验
 - [ ] P3：活跃时段调度、自适应配额 1–4 条/日、来源静音与 `别问了` 命令
+
+## 9.40 主动询问 2.0 P1：多问题回答匹配（qa_store.py / qq.py / proactive.py / ops.py，2026-10-26）
+
+**目标**：解决「问得多」与「问得准」互斥的根因——多问题并存时裸答完全失效。P1 让自然语言回答能被归因到正确问题，且**不拦截聊天**；显式锚点仍是唯一会拦截并直接确认的路径。
+
+**三层匹配（`qa_store.py`）**：
+
+| 层 | 触发条件 | 落账 | 是否拦截消息 |
+|---|---|---|---|
+| 显式锚点 | `[Qn]` / `[想问你-N]`，沿用 `_resolve_explicit` | `match_method=explicit`，置信 1.0 | 是（确认并 return） |
+| 规则 | ≥2 个开放问题；规则分 = 主题词命中×0.3 + 用户消息 2-gram 被问题覆盖×0.7 | 唯一最高分 ≥0.70 → `match_method=rule` | 否（后台） |
+| LLM 兜底 | 规则最高分落在 0.45–0.70 且消息 >8 字 | 分类置信 ≥0.75 → `match_method=llm` | 否（后台） |
+
+- 2-gram 覆盖的分母取**用户消息**而非问题：短答「在读」能在「你是在读还是上班？」拿到 1.0 覆盖，长问题的「依据：…」尾巴也不会稀释分数。
+- 不猜的情况：消息以问号结尾/像问句、`/` 命令前缀、`评分|打分|候选` 周报交互、超过 120 字、两个问题都过 0.70 且分差 <0.10。
+- LLM 分类只输出一行 JSON（`question_key` + `confidence`）；异常、超时、坏 JSON、key 不在开放集合一律按未命中处理。
+- `config/proactive.json` 新增 `match.llm_enabled`（默认 true）；设为 false 即退回纯规则层。
+
+**落账与回滚**：
+
+- `record_answer(cfg, key, answer, *, method="explicit", confidence=1.0, now=None)`：新增 `answered_at`（回答时间，同时作为 `answer_day` 的时钟）、`match_method`、`match_confidence`；回答原文仍是既有 `answer` 字段，不另设 `answer_text`。
+- `candidates.jsonl` 的 pending 行同步带 `answered_at`/`match_method`/`match_confidence`，便于周报回看归因来源。
+- `unanswer(cfg, key)`：状态改回 `open`、清空 `answer`/`answer_day`/`answered_at`/`match_method`/`match_confidence`，并删除由该答案产生的 **pending** 候选（confirmed/rejected 不动）。
+- `match_and_record(cfg, content, *, open_=None, llm=None, now=None)`：后台归因 + 落账；`match_answer` 只算不写，便于单测与人工复核。
+
+**接线（`qq.py`）**：
+
+- 路由 3.6 步 `try_answer` 仍是唯一拦截点：显式锚点、唯一开放问题的裸短答命中即确认并 return。
+- 新增路由 3.65 步：`route is None` 且不在反馈会话时，`asyncio.create_task(self._match_qa_background(content))`；`asyncio.to_thread(match_and_record, ...)` 外层套 `asyncio.wait_for(timeout=_QA_MATCH_TIMEOUT=25s)`，异常只记 debug。命中静默落账，未命中照常进入 feedback/trivial/agent 链路。
+
+**单条消息问题上限（`proactive.py`）**：
+
+- `open_qa = qa_store.open_questions(cfg)[:_MAX_QUESTIONS_PER_PUSH]`（3 条）：一条主动消息最多 3 问，其余留在池里等下一个时段；`set_prompt_order`/`mark_pushed` 只覆盖本次真正推送的 3 条。
+
+**可观测性（`ops.py`）**：
+
+- `_proactive_summary` 在 qa 账本有数据时，用账本口径回填 `by_scene["questions"]`（asked/answered/ignored 均按**问题条数**）；`proactive_state.reply_stats` 的 asked 按**消息条数**，两者不再混算。
+
+```mermaid
+sequenceDiagram
+    participant U as QQ 用户
+    participant H as qq.on_message
+    participant Q as qa_store
+    U->>H: 自然语言回答（3 个开放问题并存）
+    H->>Q: try_answer(显式锚点/唯一裸答) → 未命中
+    H->>Q: 后台 match_and_record（to_thread + wait_for 25s）
+    Q->>Q: 规则分（主题0.3 + 2gram覆盖0.7）
+    alt 唯一最高分 ≥0.70
+        Q-->>Q: record_answer(method=rule)
+    else 0.45–0.70 且 >8 字
+        Q->>Q: 轻量 LLM 分类（≥0.75 才落账）
+        Q-->>Q: record_answer(method=llm)
+    end
+    H-->>U: 本条消息照常进入正常聊天/反馈链路
+```
+
+### 验证
+
+- 新增 `test_qa_store.py` P1 段 10 例：匹配字段落账、多问题规则归因、分差过小不猜、问句/命令/周报/超长不落账、唯一开放问题不重复接管、LLM 高置信落账、LLM 低置信/异常降级、`match.llm_enabled=false` 关闭、`unanswer` 回滚并清 pending 候选。
+- 新增 `test_proactive_questions.py` 1 例：4 个开放问题时单条消息只推前 3 条（`asks=[0,1,1,1]`）。
+- 改写 `test_ops.py` 1 例：`by_scene["questions"]` 回填自 qa 账本。
+- 相关套件 `test_qa_store + test_proactive* + test_ops + test_weekly + test_daily_qq_push` = **241 passed**；全仓 `pytest` = **1758 passed / 5 skipped**；`ruff check` 全绿。
+- 环境修复：仓库根 `tmp_pytest` 残留目录 ACL 锁死（需提权删除），已把根 pytest `--basetemp` 切到 `tmp_pytest_run`，`.gitignore` 放宽为 `tmp_pytest*/`；`uv run pytest` 不带参数即可跑通（本轮实测同上）。
 

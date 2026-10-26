@@ -4633,3 +4633,30 @@ batterystats 实测 weiCheckApp 耗电 67.7 mAh，其中 GNSS 64.4 mAh（引擎�
 - [ ] P2：候选池（chat_loop / kg_todo / langtrack / memory_conflict）+ 打分与依据校验
 - [ ] P3：活跃时段调度、自适应配额 1–4 条/日、来源静音与 `别问了` 命令
 - [ ] 清理仓库根 `tmp_pytest` 残留目录（需先解除 ACL 拒绝）
+
+## 2026-10-26 · 主动询问 2.0 P1：多问题回答匹配
+
+**背景**：P0 让回复率可观测后，继续解决"问得多"与"问得准"互斥的根因——多问题并存时 `try_answer` 的裸答完全失效。P1 按 `docs/proactive-inquiry-2.0.md` §6 落三层匹配：显式锚点拦截、规则 2-gram、轻量 LLM 兜底；后两层只在后台落账，不拦截聊天。
+
+**已完成**：
+- `qa_store.py`：新增 `_rule_score`（主题词命中 0.3 + 用户消息 2-gram 被问题覆盖 0.7）、`_rank_rule`、`_llm_classify`（单行 JSON，异常/坏 JSON/未知 key 一律降级）、`match_answer`（≥2 开放问题才启用；唯一最高分 ≥0.70 落 rule；0.45–0.70 且 >8 字走 LLM，≥0.75 才落账；两题同过阈值且分差 <0.10 不猜；问句/命令/周报/超 120 字不落账）、`match_and_record`；`record_answer` 新增 `method`/`confidence`/`now` 参数并落 `answered_at`/`match_method`/`match_confidence`（回答原文仍用既有 `answer`）；`unanswer` 回滚状态与匹配字段并删除该答案产生的 pending 候选；`config/proactive.json` 新增 `match.llm_enabled`。
+- `frontends/qq.py`：路由 3.65 步在 `route is None` 且无反馈会话时 `create_task(_match_qa_background)`；`asyncio.to_thread(match_and_record)` 外套 `wait_for(25s)`，异常只记 debug，不阻断正常聊天/反馈/agent 链路。
+- `proactive.py`：`_MAX_QUESTIONS_PER_PUSH=3`，questions scene 只推前 3 条，其余留池等下一个时段。
+- `ops.py`：qa 账本有数据时用问题条数口径回填 `by_scene["questions"]`，与 `proactive_state.reply_stats` 的消息条数口径分离。
+- 文档：`langTrack-tech.md` 新增 9.40；`architecture-flow.mmd` 更新 QAS/OPS 节点与 QQ→QAS、SC→QAS 边；设计稿补字段落地分期。
+
+**实测验证**：
+- `test_qa_store.py` 新增 10 例、`test_proactive_questions.py` 新增 1 例（4 题只推前 3，`asks=[0,1,1,1]`）、`test_ops.py` 改写 1 例（scene 回填）。
+- 相关套件 = **241 passed**；全仓 `pytest` = **1758 passed / 5 skipped**；`ruff check` 全绿。
+- 未重启 gacore：新逻辑在 QQ 进程下次启动后生效。
+
+**偏差说明**：
+- LLM 兜底只对多问题场景生效；唯一开放问题的长回答（>30 字）仍不会被裸答捕获，留待 P2 生成器阶段统一处理。
+- 规则层分母取用户消息 2-gram，短答归因强、长闲聊归因弱；这是有意的保守取舍（宁可漏记不误记）。
+- 仓库根 `tmp_pytest` 残留目录 ACL 锁死（需提权删除），已把根 pytest `--basetemp` 切到 `tmp_pytest_run`、`.gitignore` 放宽为 `tmp_pytest*/`；`uv run pytest` 不带参数即可跑通。
+
+**待办更新**：
+- [x] P1：多问题回答匹配（显式锚点拦截 + 规则 2-gram + LLM 兜底），落 `match_method`/`match_confidence`，回填 scene 级 answered/ignored
+- [ ] P2：候选池（chat_loop / kg_todo / langtrack / memory_conflict）+ 打分与依据校验
+- [ ] P3：活跃时段调度、自适应配额 1–4 条/日、来源静音与 `别问了` 命令
+- [ ] 清理仓库根 `tmp_pytest` 残留目录（需先解除 ACL 拒绝）
