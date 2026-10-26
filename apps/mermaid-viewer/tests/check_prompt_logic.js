@@ -107,22 +107,22 @@ function expect(cond, msg) {
 
 // symbol -> line sanity against the known file
 // (line numbers track apps/withlanggraph/docs/architecture-flow.mmd; update when
-// the diagram legitimately changes shape — last sync 2026-10-25, P4 周报提交后
-// LANG 区 +1 行：FB / 日报正文 边 各 +1)
+// the diagram legitimately changes shape — last sync 2026-10-26, P2 候选池 PC
+// 节点插入后 ENTRY 区 +1 行：MMX / FB / MAIN / FLOW / 日报正文 边 各 +1)
 expect(currentSymLine["RC"] === 12, "RC -> 行 12 (real symbol recovered)");
 expect(currentSymLine["SC"] === 9, "SC -> 行 9");
-expect(currentSymLine["MMX"] === 31, "MMX -> 行 31");
-expect(currentSymLine["FB"] === 98, "FB -> 行 98");
-expect(currentSymLine["MAIN"] === 15, "subgraph MAIN -> 行 15");
-expect(currentSymLine["FLOW"] === 18, "subgraph FLOW -> 行 18");
+expect(currentSymLine["MMX"] === 32, "MMX -> 行 32");
+expect(currentSymLine["FB"] === 99, "FB -> 行 99");
+expect(currentSymLine["MAIN"] === 16, "subgraph MAIN -> 行 16");
+expect(currentSymLine["FLOW"] === 19, "subgraph FLOW -> 行 19");
 
 // edge label lookup by normalized text (what a fresh edge click produces)
 const wtLabel = "route_after_wait: 恒进 process(返回值固定为 'process', 无分支)";
 const hit = currentEdgeLines[normKey(wtLabel)];
-expect(!!hit && hit.line === 22, "WT-->PR edge label resolves to 行 22");
+expect(!!hit && hit.line === 23, "WT-->PR edge label resolves to 行 23");
 const cuLabel = "日报正文";
 const hit2 = currentEdgeLines[normKey(cuLabel)];
-expect(!!hit2 && hit2.line === 125, "dotted label 日报正文 resolves to 行 125");
+expect(!!hit2 && hit2.line === 126, "dotted label 日报正文 resolves to 行 126");
 
 // the 6 legacy reviews: what the fixed export produces
 console.log("\n--- exported prompt (per-review part) ---");
@@ -136,9 +136,9 @@ reviews.forEach(function (r, i) {
 });
 console.log("\n--- checks ---");
 expect(normSymForExport(reviews[0].sym) === "节点 RC（行 12）", "review1 loc -> 节点 RC（行 12）");
-expect(normSymForExport(reviews[4].sym) === "容器 MAIN（行 15）", "review5 loc -> 容器 MAIN（行 15）");
+expect(normSymForExport(reviews[4].sym) === "容器 MAIN（行 16）", "review5 loc -> 容器 MAIN（行 16）");
 expect(srcLineFor("节点 RC（行 12）").startsWith('RC["proactive=定时主动推送'), "review1 源码行 = RC def line");
-expect(srcLineFor("容器 MAIN（行 15）").startsWith("subgraph MAIN["), "review5 源码行 = subgraph MAIN line");
+expect(srcLineFor("容器 MAIN（行 16）").startsWith("subgraph MAIN["), "review5 源码行 = subgraph MAIN line");
 // legacy junk anchor degrades gracefully (not a crash, no garbage line no)
 expect(typeof normSymForExport(reviews[5].sym) === "string", "review6 legacy edge anchor degrades gracefully");
 
