@@ -10,7 +10,7 @@ dist/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
-tmp_pytest/
+tmp_pytest*/
 
 # pytest basetemp 残留（kg_view 测试等，勿入库）
 .kgview_tmp/

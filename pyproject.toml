@@ -36,4 +36,6 @@ testpaths = ["tests", "apps", "packages"]
 asyncio_mode = "auto"
 # 独立 basetemp：绕开共享 %TEMP%\pytest-of-* 目录（其中遗留的 ACL 拒绝符号链接
 # 会让 pytest 启动即崩溃，WinError 5）。每次运行自动清空该目录。
-addopts = "--basetemp=tmp_pytest"
+# 目录名带 _run 后缀：旧的 tmp_pytest 残留已被 ACL 锁死（需管理员权限才能删除），
+# 继续沿用会让 `uv run pytest` 一启动就 WinError 5；换名即可绕过，无需提权。
+addopts = "--basetemp=tmp_pytest_run"
