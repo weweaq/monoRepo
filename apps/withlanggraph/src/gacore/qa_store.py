@@ -25,6 +25,7 @@ logger = get_logger("qa_store")
 
 _TZ = timezone(timedelta(hours=8))
 _MAX_ASKS: int = 2  # 未答最多重问 2 期（spec §5.3）
+_IGNORED_AFTER_HOURS: int = 24  # 发出后超过该时长仍无回答，记一次 ignored_count
 _SIMILAR_JACCARD: float = 0.6  # 同期 token(2-gram) 重合阈值
 _BARE_ANSWER_MAX_CHARS: int = 30
 _ANCHOR_RE = re.compile(r"^\s*-\s*\[想问你-(\d+)\]\s*(.*)$")
@@ -40,8 +41,12 @@ _WEEK_ID_RE = re.compile(r"^\d{4}-W\d{2}$")
 _NOISE_RE = re.compile(r"[\d\s，。？！？、:：;；()（）\[\]【】,.\-—/\"'“”‘’]+")
 
 
+def _now_dt() -> datetime:
+    return datetime.now(tz=_TZ)
+
+
 def _now() -> str:
-    return datetime.now(tz=_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    return _now_dt().strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _today() -> str:
@@ -200,6 +205,12 @@ def seed_questions(cfg: Config, day: str, bullets: list[str]) -> dict[str, int]:
             "answer": "",
             "answer_day": "",
             "asks": 0,
+            # P0 提问账本（proactive-inquiry-2.0 §8）：来源 + 首次/最近发送 + 连续未回次数。
+            # 旧行缺这些字段时一律按空/0 读取，不影响既有解析。
+            "source": "qa_open",
+            "asked_at": "",
+            "delivered_at": "",
+            "ignored_count": 0,
             "created_at": _now(),
             "updated_at": _now(),
         }
@@ -250,14 +261,104 @@ def record_answer(cfg: Config, key: str, answer: str) -> dict[str, Any] | None:
     return None
 
 
-def mark_pushed(cfg: Config, keys: list[str]) -> None:
-    """推送成功后 asks+1（重问计数）；随后归档超限未答。"""
+def mark_pushed(cfg: Config, keys: list[str], *, now: datetime | None = None) -> None:
+    """推送成功后 asks+1，并落提问账本（首次 asked_at / 最近 delivered_at）。
+
+    P0 只记账不改行为：``asks`` 仍是重问预算的唯一依据；``asked_at`` 只在首次发送时写入，
+    ``delivered_at`` 每次覆盖，供 ignored_count 与 7 日回复率统计使用。
+    """
     keyset = set(keys)
+    ts = (now or _now_dt()).astimezone(_TZ).strftime("%Y-%m-%d %H:%M:%S")
     for row in _read_rows(cfg):
         if row["question_key"] in keyset and row.get("status") == "open":
             row["asks"] = int(row.get("asks") or 0) + 1
+            if not row.get("asked_at"):
+                row["asked_at"] = ts
+            row["delivered_at"] = ts
             row["updated_at"] = _now()
             _rewrite_row(cfg, row)
+
+
+def _parse_ts(raw: Any) -> datetime | None:
+    """Parse the ``YYYY-MM-DD HH:MM:SS`` timestamps written by this module."""
+    try:
+        return datetime.strptime(str(raw), "%Y-%m-%d %H:%M:%S").replace(tzinfo=_TZ)
+    except (TypeError, ValueError):
+        return None
+
+
+def mark_ignored(
+    cfg: Config,
+    *,
+    now: datetime | None = None,
+    after_hours: int = _IGNORED_AFTER_HOURS,
+) -> int:
+    """给"发出后超时仍未答"的问题记一次 ignored_count（P0 账本）。
+
+    以 ``delivered_at`` 为锚：同一轮发送最多记一次（``ignored_marked_for`` 幂等标记），
+    之后若再次推送，delivered_at 变化，下一轮超时才能再记一次。只追加计数，
+    不影响 ``status``/``asks``/重问预算，因此对现有推送行为零改动。
+    """
+    cutoff = (now or _now_dt()).astimezone(_TZ) - timedelta(hours=after_hours)
+    n = 0
+    for row in _read_rows(cfg):
+        if row.get("status") != "open":
+            continue
+        delivered = str(row.get("delivered_at") or "")
+        sent_dt = _parse_ts(delivered)
+        if sent_dt is None or sent_dt > cutoff:
+            continue
+        if row.get("ignored_marked_for") == delivered:
+            continue
+        row["ignored_count"] = int(row.get("ignored_count") or 0) + 1
+        row["ignored_marked_for"] = delivered
+        row["updated_at"] = _now()
+        _rewrite_row(cfg, row)
+        n += 1
+    if n:
+        logger.info("qa ignored questions counted", count=n, after_hours=after_hours)
+    return n
+
+
+def reply_stats(cfg: Config, *, days: int = 7, now: datetime | None = None) -> dict[str, Any]:
+    """近 N 天提问/回答/忽略统计（P0 验收：ops 能看到真实 7 日回复率）。
+
+    分母是"窗口内实际发出过的问题"（``asked_at`` 落在窗口内）；只统计发过的问题，
+    避免把尚未推送的种子问题算成 0 回复。旧行没有 ``asked_at`` 时退回 ``delivered_at``。
+    """
+    current = (now or _now_dt()).astimezone(_TZ)
+    cutoff = current - timedelta(days=days)
+    today = current.date().isoformat()
+    asked_rows: list[dict[str, Any]] = []
+    asked_today = 0
+    for row in _read_rows(cfg):
+        asked_dt = _parse_ts(row.get("asked_at") or row.get("delivered_at") or "")
+        if asked_dt is None or asked_dt < cutoff:
+            continue
+        asked_rows.append(row)
+        if asked_dt.date().isoformat() == today:
+            asked_today += 1
+    answered = [r for r in asked_rows if r.get("status") == "answered"]
+    ignored = [r for r in asked_rows if int(r.get("ignored_count") or 0) > 0]
+    by_source: dict[str, dict[str, int]] = {}
+    for row in asked_rows:
+        source = str(row.get("source") or "qa_open")
+        bucket = by_source.setdefault(source, {"asked": 0, "answered": 0, "ignored": 0})
+        bucket["asked"] += 1
+        if row.get("status") == "answered":
+            bucket["answered"] += 1
+        if int(row.get("ignored_count") or 0) > 0:
+            bucket["ignored"] += 1
+    asked = len(asked_rows)
+    return {
+        "window_days": days,
+        "asked": asked,
+        "asked_today": asked_today,
+        "answered": len(answered),
+        "ignored": len(ignored),
+        "answer_rate": round(len(answered) / asked, 2) if asked else 0.0,
+        "by_source": by_source,
+    }
 
 
 def archive_stale(cfg: Config, max_asks: int = _MAX_ASKS) -> int:

@@ -127,6 +127,41 @@ def test_build_status_flags_nothing_running(tmp_path: Path) -> None:
     assert "no component heartbeat files" in status["reasons"]
 
 
+def test_build_status_includes_proactive_ledger(tmp_path: Path) -> None:
+    """P0：ops 能看到 7 日提问/回答/忽略与真实回复率（来自 data/qa 账本）。"""
+    from gacore.config import Config
+    from gacore.qa_store import mark_pushed, open_questions, record_answer, seed_questions
+
+    run_dir = tmp_path / "run"
+    logs_dir = tmp_path / "logs"
+    _write_heartbeat(run_dir, "main", age_sec=1)
+
+    cfg = Config.for_tests(tmp_path)
+    seed_questions(
+        cfg,
+        "2026-10-24",
+        ["- [想问你-1] 问题甲（依据：10-24）", "- [想问你-2] 问题乙（依据：10-24）"],
+    )
+    keys = [r["question_key"] for r in open_questions(cfg)]
+    mark_pushed(cfg, keys, now=datetime(2026, 10, 24, 8, 30, tzinfo=CST))
+    record_answer(cfg, keys[0], "答案甲")
+
+    status = ops.build_status(
+        root=tmp_path,
+        heartbeat_directory=run_dir,
+        logs_directory=logs_dir,
+        now=datetime(2026, 10, 25, 9, 0, tzinfo=CST),
+    )
+    proactive = status["proactive"]
+    assert proactive["reply"]["asked"] == 2
+    assert proactive["reply"]["answered"] == 1
+    assert proactive["reply"]["answer_rate"] == 0.5
+    assert proactive["by_scene"] == {}
+    assert proactive["muted_sources"] == []
+    rendered = ops._render(status)
+    assert "PROACTIVE  7d asked=2 answered=1 ignored=0 rate=50% today=0" in rendered
+
+
 def test_main_json_and_exit_codes(tmp_path: Path, capsys) -> None:
     run_dir = tmp_path / "run"
     logs_dir = tmp_path / "logs"

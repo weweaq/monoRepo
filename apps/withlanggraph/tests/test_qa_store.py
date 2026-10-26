@@ -2,20 +2,30 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from gacore.config import Config
 from gacore.qa_store import (
     _day_as_date,
     all_rows,
     archive_stale,
+    mark_ignored,
     mark_pushed,
     open_questions,
     qa_brief,
     record_answer,
+    reply_stats,
     seed_questions,
     set_prompt_order,
     stats,
     try_answer,
 )
+
+_TZ = timezone(timedelta(hours=8))
+
+
+def _dt(y: int, mo: int, d: int, h: int = 0, mi: int = 0) -> datetime:
+    return datetime(y, mo, d, h, mi, tzinfo=_TZ)
 
 
 def _seed_day(cfg, day: str, bullets: list[str]) -> dict:
@@ -328,4 +338,93 @@ def test_week_id_rows_map_to_sunday(tmp_path):
     assert _day_as_date("2026-W43") == "2026-10-25"
     assert [r["day"] for r in qa_brief(cfg, before_date="2026-10-26")[1]] == ["2026-W43"]
     assert qa_brief(cfg, before_date="2026-10-25")[1] == []
+
+
+# --------------------------------------------------------------------------- P0 提问账本
+
+
+def test_mark_pushed_records_ask_ledger(tmp_path):
+    """首次发送写 asked_at，重复发送只更新 delivered_at（不改重问语义）。"""
+    cfg = Config.for_tests(tmp_path)
+    _seed_day(cfg, "2026-10-25", ["- [想问你-1] 你是在读还是上班？（依据：10-25）"])
+    key = open_questions(cfg)[0]["question_key"]
+    mark_pushed(cfg, [key], now=_dt(2026, 10, 25, 8, 30))
+    row = all_rows(cfg)[0]
+    assert row["source"] == "qa_open"
+    assert row["asked_at"] == "2026-10-25 08:30:00"
+    assert row["delivered_at"] == "2026-10-25 08:30:00"
+
+    mark_pushed(cfg, [key], now=_dt(2026, 10, 26, 8, 30))
+    row = all_rows(cfg)[0]
+    assert row["asks"] == 2
+    assert row["asked_at"] == "2026-10-25 08:30:00"
+    assert row["delivered_at"] == "2026-10-26 08:30:00"
+
+
+def test_mark_ignored_counts_once_per_delivery(tmp_path):
+    """发出满 24h 未答记一次 ignored_count；同一轮发送幂等，重推后才可再记。"""
+    cfg = Config.for_tests(tmp_path)
+    _seed_day(cfg, "2026-10-25", ["- [想问你-1] 你是在读还是上班？（依据：10-25）"])
+    key = open_questions(cfg)[0]["question_key"]
+    mark_pushed(cfg, [key], now=_dt(2026, 10, 25, 8, 30))
+
+    assert mark_ignored(cfg, now=_dt(2026, 10, 25, 20)) == 0  # 未满 24h
+    assert mark_ignored(cfg, now=_dt(2026, 10, 26, 9)) == 1
+    assert all_rows(cfg)[0]["ignored_count"] == 1
+    assert mark_ignored(cfg, now=_dt(2026, 10, 27, 9)) == 0  # 同一轮发送不重复记
+    # 记账不改状态：问题仍 open，asks 不变
+    assert all_rows(cfg)[0]["status"] == "open"
+    assert all_rows(cfg)[0]["asks"] == 1
+
+    mark_pushed(cfg, [key], now=_dt(2026, 10, 28, 8, 30))
+    assert mark_ignored(cfg, now=_dt(2026, 10, 29, 9)) == 1
+    assert all_rows(cfg)[0]["ignored_count"] == 2
+
+
+def test_mark_ignored_skips_answered_rows(tmp_path):
+    cfg = Config.for_tests(tmp_path)
+    _seed_day(cfg, "2026-10-25", ["- [想问你-1] 你是在读还是上班？（依据：10-25）"])
+    key = open_questions(cfg)[0]["question_key"]
+    mark_pushed(cfg, [key], now=_dt(2026, 10, 25, 8, 30))
+    record_answer(cfg, key, "在读")
+    assert mark_ignored(cfg, now=_dt(2026, 10, 26, 9)) == 0
+    assert all_rows(cfg)[0]["ignored_count"] == 0
+
+
+def test_reply_stats_seven_day_rate(tmp_path):
+    """7 日回复率只算窗口内实际发出过的问题，按来源分组。"""
+    cfg = Config.for_tests(tmp_path)
+    _seed_day(
+        cfg,
+        "2026-10-20",
+        [
+            "- [想问你-1] 问题甲（依据：10-20）",
+            "- [想问你-2] 问题乙（依据：10-20）",
+        ],
+    )
+    keys = [r["question_key"] for r in open_questions(cfg)]
+    mark_pushed(cfg, keys, now=_dt(2026, 10, 20, 8, 30))
+    record_answer(cfg, keys[0], "答案甲")
+
+    # 窗口外（9 天前发出）的问题不计入
+    _seed_day(cfg, "2026-10-17", ["- [想问你-1] 问题丙（依据：10-17）"])
+    stale_key = next(r["question_key"] for r in open_questions(cfg) if r["question"] == "问题丙（依据：10-17）")
+    mark_pushed(cfg, [stale_key], now=_dt(2026, 10, 17, 8, 30))
+
+    stats_ = reply_stats(cfg, now=_dt(2026, 10, 26, 9))
+    assert stats_["window_days"] == 7
+    assert stats_["asked"] == 2
+    assert stats_["answered"] == 1
+    assert stats_["ignored"] == 0
+    assert stats_["asked_today"] == 0
+    assert stats_["answer_rate"] == 0.5
+    assert stats_["by_source"]["qa_open"] == {"asked": 2, "answered": 1, "ignored": 0}
+
+
+def test_reply_stats_empty_ledger_is_zero(tmp_path):
+    cfg = Config.for_tests(tmp_path)
+    stats_ = reply_stats(cfg, now=_dt(2026, 10, 26, 9))
+    assert stats_["asked"] == 0
+    assert stats_["answer_rate"] == 0.0
+    assert stats_["by_source"] == {}
 

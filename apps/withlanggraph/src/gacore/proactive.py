@@ -106,9 +106,13 @@ _EMOTION_TIRED_WORDS: Final = frozenset({
 # same emotional state before this many hours (design doc §5.7 "no second chase").
 _CONCERN_COOLDOWN_HOURS: Final = 24
 
-# Upper bound on per-user answered_topics fingerprints (audit L-5): when exceeded,
+# Upper bound on per-user asked_topics fingerprints (audit L-5): when exceeded,
 # the oldest entries are trimmed LRU-style so proactive_state.json cannot grow forever.
-_ANSWERED_TOPICS_MAX: Final = 50
+_ASKED_TOPICS_MAX: Final = 50
+# Pre-P0 state files stored the same fingerprint map under "answered_topics"; the name
+# was a semantic bug (delivery is not an answer), so new writes use "asked_topics" while
+# reads still honour the legacy key to keep existing state meaningful.
+_LEGACY_ASKED_TOPICS_KEY: Final = "answered_topics"
 
 _EMOTION_LABEL_TEXT: Final = {
     _EMOTION_DOWN: "低落/沮丧（主人最近消息带明显负面情绪）",
@@ -503,6 +507,11 @@ def _mark_sent(cfg: Config, user_id: str, scene: str, now: datetime) -> None:
         else:
             entry["daily_count"] = (entry.get("daily_count") or 0) + 1
         entry["last_sent_time"] = ts
+        # P0 提问账本（proactive-inquiry-2.0 §8）：按 scene 累计发出条数。P0 只统计
+        # asked；answered/ignored 由 qa_store 的问答行归因，P1 匹配层接入后再回填。
+        stats = entry.setdefault("reply_stats", {})
+        scene_stats = stats.setdefault(scene, {"asked": 0, "answered": 0, "ignored": 0})
+        scene_stats["asked"] = int(scene_stats.get("asked") or 0) + 1
         # A successful delivery resets the per-day failure counters (M3): a later
         # failure retry is a fresh attempt on a healthy channel, not a continuation.
         entry.pop("last_failed", None)
@@ -871,25 +880,33 @@ def _topic_fingerprint(text: str) -> str:
     return re.sub(r"\s+", "", text or "").strip()[:40]
 
 
-def _topic_answered(entry: dict, text: str) -> bool:
-    """True when this open question was already covered by a previous outreach.
+def _topic_asked(entry: dict, text: str) -> bool:
+    """True when this open question was already picked up by a previous outreach.
 
     "No second chase" (design doc §5.7): once a proactive message has picked the same
     open question back up, later ticks must not keep re-reaching out about it — the
     user is expected to reply or the idle threshold restarts the clock.
+
+    P0 semantics: this tracks *asked*, never *answered*. Delivery only proves the
+    message was sent; an actual answer is recorded by the QA matching layer.
     """
     if not text:
         return False
-    answered = entry.get("answered_topics")
-    return isinstance(answered, dict) and _topic_fingerprint(text) in answered
+    fp = _topic_fingerprint(text)
+    asked = entry.get("asked_topics")
+    if isinstance(asked, dict) and fp in asked:
+        return True
+    legacy = entry.get(_LEGACY_ASKED_TOPICS_KEY)
+    return isinstance(legacy, dict) and fp in legacy
 
 
-def _mark_topic_answered(cfg: Config, user_id: str, text: str, now: datetime) -> None:
-    """Atomically record an open question as already outreach-ed (P2 §5.7).
+def _mark_topic_asked(cfg: Config, user_id: str, text: str, now: datetime) -> None:
+    """Atomically record an open question as already asked (P0: asked_at only).
 
-    ``answered_topics`` is kept bounded (audit L-5): when it exceeds
-    ``_ANSWERED_TOPICS_MAX`` entries, the oldest fingerprints (by write timestamp)
-    are trimmed LRU-style so the state file cannot grow without bound.
+    ``asked_topics`` maps fingerprint -> first ask timestamp and is kept bounded
+    (audit L-5): when it exceeds ``_ASKED_TOPICS_MAX`` entries, the oldest
+    fingerprints (by write timestamp) are trimmed LRU-style so the state file
+    cannot grow without bound.
     """
     if not text:
         return
@@ -898,32 +915,32 @@ def _mark_topic_answered(cfg: Config, user_id: str, text: str, now: datetime) ->
 
     def _mutate(state: dict) -> None:
         entry = state.setdefault(f"u_{user_id}", {})
-        answered = entry.setdefault("answered_topics", {})
-        answered[fp] = ts
+        asked = entry.setdefault("asked_topics", {})
+        asked[fp] = ts
         trimmed = 0
-        if len(answered) > _ANSWERED_TOPICS_MAX:
-            # ISO8601 timestamps sort lexicographically, so key=answered.get works.
-            stale = sorted(answered, key=answered.get)[: len(answered) - _ANSWERED_TOPICS_MAX]
+        if len(asked) > _ASKED_TOPICS_MAX:
+            # ISO8601 timestamps sort lexicographically, so key=asked.get works.
+            stale = sorted(asked, key=asked.get)[: len(asked) - _ASKED_TOPICS_MAX]
             for key in stale:
-                del answered[key]
+                del asked[key]
             trimmed = len(stale)
         entry["updated_at"] = ts
         entry.setdefault("created_at", ts)
         if trimmed:
             logger.debug(
-                "proactive: answered_topics LRU trimmed",
+                "proactive: asked_topics LRU trimmed",
                 user=user_id,
                 trimmed=trimmed,
-                max_entries=_ANSWERED_TOPICS_MAX,
-                size=len(answered),
+                max_entries=_ASKED_TOPICS_MAX,
+                size=len(asked),
             )
 
     saved = _with_state(cfg, _mutate)
     logger.debug(
-        "proactive: topic marked answered",
+        "proactive: topic marked asked",
         user=user_id,
         fingerprint=fp,
-        size=len((saved.get(f"u_{user_id}") or {}).get("answered_topics", {})),
+        size=len((saved.get(f"u_{user_id}") or {}).get("asked_topics", {})),
     )
 
 
@@ -1291,8 +1308,13 @@ def run_proactive_job(
         return result
 
     if scene == "questions":
-        # 先归档到期的（asks 已满），再取待推列表：否则第 3 次展示的题会在同一次推送里被归档，
-        # 15 小时回答窗口内变成"推了就答不了"（决策 29 配套修复）
+        # P0 提问账本：先给"发出后超 24h 仍未答"的问题记 ignored_count（只记账，
+        # 不改变 status/asks），再归档到期的（asks 已满），最后取待推列表：否则第 3
+        # 次展示的题会在同一次推送里被归档，15 小时回答窗口内变成"推了就答不了"
+        # （决策 29 配套修复）
+        ignored = qa_store.mark_ignored(resolved_cfg, now=now)
+        if ignored:
+            logger.info("proactive: ignored questions counted", job=job.name, count=ignored)
         archived = qa_store.archive_stale(resolved_cfg)
         if archived:
             logger.info("proactive: stale questions archived before push", job=job.name, count=archived)
@@ -1364,7 +1386,7 @@ def run_proactive_job(
             insight = recall["text"] if recall["kind"] == "daily_note" else ""
             # P2 (design doc §5.7): the same open question was already picked up by a
             # previous outreach — don't chase it again, fall back to a plain greeting.
-            if topic and _topic_answered(entry, topic):
+            if topic and _topic_asked(entry, topic):
                 logger.info(
                     "proactive: open question already outreach-ed, no second chase",
                     job=job.name,
@@ -1417,16 +1439,16 @@ def run_proactive_job(
             if open_qa:
                 # 记录本次推送的展示顺序：[Q1]..[Qn] 与用户刚看到的消息一致（决策 29）
                 qa_store.set_prompt_order(resolved_cfg, [q["question_key"] for q in open_qa])
-                qa_store.mark_pushed(resolved_cfg, [q["question_key"] for q in open_qa])
+                qa_store.mark_pushed(resolved_cfg, [q["question_key"] for q in open_qa], now=now)
             # P3: once delivered, write the turn back into the user's main thread so
             # 韩立 sees his own proactive message in the next turn's context and chat
             # records keep a complete "定时任务触发 → AI 回复" alternation. Best-effort:
             # a write-back failure is logged and never fails the outreach.
             _write_back_proactive(resolved_cfg, uid, prompt, reply)
-            # P2 (design doc §5.7): once delivered, remember this open question and this
-            # concern so the next tick won't chase the same topic/emotion again.
+            # P0 (design doc §6): delivery only marks the topic as *asked*, never as
+            # answered — an answer is only recorded by the QA matching layer.
             if topic:
-                _mark_topic_answered(resolved_cfg, uid, topic, now)
+                _mark_topic_asked(resolved_cfg, uid, topic, now)
             if emotion != _EMOTION_NORMAL and concern_due:
                 _mark_concerned(resolved_cfg, uid, now, emotion)
             logger.info(

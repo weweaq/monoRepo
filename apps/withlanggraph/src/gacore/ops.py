@@ -189,6 +189,43 @@ def _ingest_summary(record: dict[str, Any] | None) -> dict[str, Any] | None:
     }
 
 
+def _proactive_summary(base: Path, now: datetime) -> dict[str, Any]:
+    """P0 提问账本摘要：7 日回复率、按 scene 发出数、静音来源。
+
+    数据来自两处只读文件：``data/qa/*.jsonl``（问题行的 asked_at/status/ignored_count）
+    与 ``data/proactive_state.json``（reply_stats）。任何读取异常都降级为 error 字段，
+    监控命令本身绝不能被账本文件拖垮。
+    """
+    try:
+        from gacore import proactive, qa_store
+        from gacore.config import Config
+
+        cfg = Config(
+            root=base,
+            asset_dir=base / "config" / "assets",
+            memory_dir=base / "memory",
+            logs_dir=base / "logs",
+            temp_dir=base / "temp",
+        )
+        reply = qa_store.reply_stats(cfg, now=now)
+        state = proactive.load_state(cfg)
+    except Exception as exc:  # noqa: BLE001 — status must always render
+        return {"error_type": type(exc).__name__, "error_message": str(exc)}
+
+    by_scene: dict[str, dict[str, int]] = {}
+    for entry in state.values():
+        if not isinstance(entry, dict):
+            continue
+        for scene, bucket in (entry.get("reply_stats") or {}).items():
+            if not isinstance(bucket, dict):
+                continue
+            target = by_scene.setdefault(scene, {"asked": 0, "answered": 0, "ignored": 0})
+            for field in ("asked", "answered", "ignored"):
+                target[field] += int(bucket.get(field) or 0)
+    # 静音来源要到 P3（连续忽略 14 天静音）才有数据，P0 固定为空列表。
+    return {"reply": reply, "by_scene": by_scene, "muted_sources": []}
+
+
 def build_status(
     *,
     root: Path | str = _PROJECT_ROOT,
@@ -229,6 +266,7 @@ def build_status(
         "components": components,
         "etl": etl,
         "ingest": ingest,
+        "proactive": _proactive_summary(base, current),
         "degraded": bool(reasons),
         "reasons": reasons,
     }
@@ -263,6 +301,23 @@ def _render(status: dict[str, Any]) -> str:
         if not failure
         else f"INGEST  last failure: {failure['ts']} {failure['error_type']}: {failure['error_message']}"
     )
+    proactive = status.get("proactive") or {}
+    if proactive.get("error_type"):
+        lines.append(
+            f"PROACTIVE  unavailable: {proactive['error_type']}: {proactive.get('error_message')}"
+        )
+    else:
+        reply = proactive.get("reply") or {}
+        lines.append(
+            f"PROACTIVE  7d asked={reply.get('asked', 0)} answered={reply.get('answered', 0)} "
+            f"ignored={reply.get('ignored', 0)} rate={float(reply.get('answer_rate') or 0.0):.0%} "
+            f"today={reply.get('asked_today', 0)}"
+        )
+        for scene, bucket in sorted((proactive.get("by_scene") or {}).items()):
+            lines.append(
+                f"  scene {scene}: asked={bucket['asked']} answered={bucket['answered']} "
+                f"ignored={bucket['ignored']}"
+            )
     lines.append("")
     lines.append("OVERALL  " + ("DEGRADED" if status["degraded"] else "ok"))
     for reason in status["reasons"]:

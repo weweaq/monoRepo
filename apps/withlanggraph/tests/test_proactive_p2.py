@@ -105,35 +105,43 @@ class TestTopicNoSecondChase:
         assert a == b
         assert len(proactive._topic_fingerprint("x" * 100)) == 40
 
-    def test_answered_flags(self, tmp_path: Path) -> None:
+    def test_asked_flags(self, tmp_path: Path) -> None:
         cfg = Config.for_tests(tmp_path)
         now = _dt(2026, 8, 28, 8)
-        proactive._mark_topic_answered(cfg, "u1", "上次那个方案改好了吗？", now)
+        proactive._mark_topic_asked(cfg, "u1", "上次那个方案改好了吗？", now)
         entry = proactive.load_state(cfg)["u_u1"]
-        assert proactive._topic_answered(entry, "上次那个方案改好了吗？")
-        assert proactive._topic_answered(entry, " 上次那个方案 改好了吗？")  # whitespace-insensitive
-        assert not proactive._topic_answered(entry, "完全不同的另一个话题")
-        assert not proactive._topic_answered(entry, "")
+        assert proactive._topic_asked(entry, "上次那个方案改好了吗？")
+        assert proactive._topic_asked(entry, " 上次那个方案 改好了吗？")  # whitespace-insensitive
+        assert not proactive._topic_asked(entry, "完全不同的另一个话题")
+        assert not proactive._topic_asked(entry, "")
+
+    def test_legacy_answered_topics_still_recognised(self, tmp_path: Path) -> None:
+        # P0 renamed the state key; pre-P0 files wrote "answered_topics" and must keep
+        # suppressing a second chase instead of losing their history.
+        cfg = Config.for_tests(tmp_path)
+        _seed_entry(cfg, "u1", {"answered_topics": {proactive._topic_fingerprint("上次那个方案改好了吗"): "2026-08-27T08:00:00+08:00"}})
+        entry = proactive.load_state(cfg)["u_u1"]
+        assert proactive._topic_asked(entry, "上次那个方案改好了吗")
 
     def test_empty_text_never_marks(self, tmp_path: Path) -> None:
         cfg = Config.for_tests(tmp_path)
-        proactive._mark_topic_answered(cfg, "u1", "", _dt(2026, 8, 28, 8))
+        proactive._mark_topic_asked(cfg, "u1", "", _dt(2026, 8, 28, 8))
         assert proactive.load_state(cfg) == {}
 
-    def test_answered_topics_lru_trimmed(self, tmp_path: Path) -> None:
-        # L-5: answered_topics is bounded by _ANSWERED_TOPICS_MAX — when 60 topics are
+    def test_asked_topics_lru_trimmed(self, tmp_path: Path) -> None:
+        # L-5: asked_topics is bounded by _ASKED_TOPICS_MAX — when 60 topics are
         # marked with increasing timestamps, the 10 oldest are trimmed LRU-style.
         cfg = Config.for_tests(tmp_path)
         now = _dt(2026, 8, 28, 8)
         for i in range(60):
-            proactive._mark_topic_answered(cfg, "u1", f"问题{i}", now + timedelta(minutes=i))
+            proactive._mark_topic_asked(cfg, "u1", f"问题{i}", now + timedelta(minutes=i))
         entry = proactive.load_state(cfg)["u_u1"]
-        answered = entry["answered_topics"]
-        assert len(answered) == proactive._ANSWERED_TOPICS_MAX
-        assert not proactive._topic_answered(entry, "问题0")   # oldest, trimmed
-        assert not proactive._topic_answered(entry, "问题9")   # still trimmed
-        assert proactive._topic_answered(entry, "问题10")      # kept
-        assert proactive._topic_answered(entry, "问题59")      # newest, kept
+        asked = entry["asked_topics"]
+        assert len(asked) == proactive._ASKED_TOPICS_MAX
+        assert not proactive._topic_asked(entry, "问题0")   # oldest, trimmed
+        assert not proactive._topic_asked(entry, "问题9")   # still trimmed
+        assert proactive._topic_asked(entry, "问题10")      # kept
+        assert proactive._topic_asked(entry, "问题59")      # newest, kept
 
 
 def test_save_state_retries_transient_permission_error(tmp_path: Path, monkeypatch) -> None:
@@ -361,7 +369,7 @@ class TestRunProactiveJobP2:
 
     def test_open_question_not_chased_twice(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         cfg = Config.for_tests(tmp_path)
-        _seed_entry(cfg, "u1", {"answered_topics": {proactive._topic_fingerprint("上次那个方案改好了吗"): "2026-08-27T08:00:00+08:00"}})
+        _seed_entry(cfg, "u1", {"asked_topics": {proactive._topic_fingerprint("上次那个方案改好了吗"): "2026-08-27T08:00:00+08:00"}})
         monkeypatch.setattr(proactive, "load_known_users", lambda: {"u1": {}})
         prompts: list[str] = []
         monkeypatch.setattr(proactive, "_headless_run", _sent_headless(prompts))
@@ -391,7 +399,7 @@ class TestRunProactiveJobP2:
         assert result["sent"] == 1
         assert "最近话题" in prompts[0]
         state = proactive.load_state(cfg)["u_u1"]
-        assert proactive._topic_answered(state, "上次那个方案改好了吗")
+        assert proactive._topic_asked(state, "上次那个方案改好了吗")
 
 
 # --------------------------------------------------------------------------- logging / auditability
@@ -527,9 +535,9 @@ class TestProactiveLogging:
         assert proactive.load_state(cfg) == {}
         assert rec.by_msg("proactive_state.json unreadable, falling back to empty state")
 
-    def test_topic_answered_logs_debug(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def test_topic_asked_logs_debug(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         cfg = Config.for_tests(tmp_path)
         rec = _swap_logger(monkeypatch)
-        proactive._mark_topic_answered(cfg, "u1", "上次那个方案改好了吗", _dt(2026, 8, 28, 8))
-        hits = rec.by_msg("proactive: topic marked answered")
+        proactive._mark_topic_asked(cfg, "u1", "上次那个方案改好了吗", _dt(2026, 8, 28, 8))
+        hits = rec.by_msg("proactive: topic marked asked")
         assert hits and hits[0]["user"] == "u1" and hits[0]["size"] == 1
