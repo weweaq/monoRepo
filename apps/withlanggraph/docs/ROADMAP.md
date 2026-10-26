@@ -4743,3 +4743,19 @@ batterystats 实测 weiCheckApp 耗电 67.7 mAh，其中 GNSS 64.4 mAh（引擎�
 - [ ] P3b：`question_surface.py` 变化面（五路信号 vs 30 天基线）
 - [ ] P3c：`question_composer.py`（归因出题/无编号单问/裸回答归属最近推送/降级链）；「别问了」作用域按拍板拆分（2.0 P3 的全局静音改为只静音出题，晨间提醒不受影响）
 - [ ] 日报想问你节 prompt 注入 L1-L3 阶梯铁律（拍板 3，与 composer 共享文本）
+
+## 2026-10-27 · 主动询问 3.0 P3b+P3c：变化面 + 出题人（朋友式归因提问）
+
+**背景**：设计稿 `docs/proactive-inquiry-3.0-design.md`（含四项拍板 §6）。用户定的方向：主动询问要像朋友——不问行为本身，问行为背后的原因（例：「连着两晚都折腾到挺晚，又看到你之前说要直接把领导的活都接下来——最近工作上是有点压着吗？」）。
+
+**已完成（P3b 变化面）**：新增 `question_surface.py`——程序算「哪里不对劲+同期发生了什么」，纯读、as-of 锚定：四路确定性异常检测（sleep_late 入睡漂移[跨午夜归一 <06:00 +1440] / screen_spike·drop [1.8×·0.5×] / commit_surge [3× 且峰值≥5] / mood_low [效价≤-0.4]），近 3 天 vs 前 30 天基线（样本 <5 不判，诚实留空）；上下文附近两周提交序列、情绪效价、近 3 天日记摘要（as_of）、近 14 天问答史（qa_brief as-of）。`render_surface` 无异常时明示「退 L1 或不出题」。
+
+**已完成（P3c 出题人）**：新增 `question_composer.py`——`LADDER_RULES` 共享阶梯铁律（拍板 3：scheduler 注入日报 job prompt，与 composer 同一文本源）；`compose()` = 变化面 + 画像摘编 → LLM 归因出 **0-1 条无编号单问**（问题文本即朋友口吻完整消息），evidence 守卫（问题中的 ≥2 位数字必须能在素材中定位，防编造）、L3 无异常自动降级 L1、topic 7 天冷却复用 `seed_candidates(kind=composed)`；失败/关闭 fail-open 降级候选池。接线：`proactive.py` questions scene 出题人先于候选池；`build_proactive_prompt` 增 `verbatim_single`（composed-only 推送一字不改、无 [Qn]；日报提醒保持编号）；`job_guard_allows` 增 `mute_exemption`（拍板 4：「别问了」只静音出题，日报未答提醒照发——per-user 循环静音时把 open_qa 收窄为日报类并豁免静音闸）。
+
+**实测验证**：`test_question_surface.py` 5 例（四路异常点亮/全基线内/as-of 忽略未来/缺库诚实/基线不足不误报——抓到并修复入睡跨午夜比较真 bug）；`test_question_composer.py` 8 例（L3 种入 composed/L3 无异常降级/evidence 守卫拒编造数字/topic 冷却/开关关闭/LLM 失败 fail-open/verbatim_single 无编号/静音豁免/日报阶梯注入）；全仓 1826 passed + ruff 绿。真实验证：10-26 重跑（随报问管线全链路 ✓ asks 0→1 + keys 快照）。
+
+**偏差说明**：①活跃时段路并入 sleep_late（daily_stats 无小时分布，避免重扫 events 表）；②L3 全局 2 次/周未做硬计数——topic 7 天冷却 + 异常驱动出题已近似，先观察；③composer LLM 温度沿用 get_llm 固定 0，随机性靠变化面采样；④architecture-flow PC 节点补出题人降级链（check_prompt_logic ALL PASS）。
+
+**待办更新**：
+- [ ] 首周观察 composer 真实出题质量（LLM 遵守阶梯与守卫的比例），必要时收紧 prompt
+- [ ] KG 实体合并 P2/P3（另一条线）

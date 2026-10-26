@@ -2659,3 +2659,28 @@ sequenceDiagram
 - [ ] 处理仓库根 `tmp_pytest_run` ACL 拒绝（`tmp_pytest` 同样未清）
 - [ ] 重启 gacore 使 P3 生效（`quiet_hours`/`adaptive_quota` 已在配置中）
 
+## 9.43 主动询问 3.0：日报随报问 + 变化面出题人（scheduler.py / question_surface.py / question_composer.py / proactive.py / qa_store.py，2026-10-27）
+
+设计稿 `docs/proactive-inquiry-3.0-design.md`（含四项拍板）。两个变更：**日报想问你随报走**（P3a，修订原决策 40——`_strip_questions` 删除，`_push_daily_to_qq` 推送成功即 `set_prompt_order` + `mark_pushed`（asks=1），[Qn]/[想问你-N] 显式与裸回答当晚生效；08:30 daily-questions 自然降级为未答提醒，`max_asks=2` 归档自动衔接）；**主动询问出题人**（P3b/P3c）。
+
+### 数据流
+
+日报无「想问你」时，questions scene 出题链：`question_surface.build_surface`（变化面，程序算）→ `question_composer.compose`（LLM 归因，0-1 条）→ `seed_candidates(kind="composed")` → 无编号单问推送；失败/关闭逐级降级候选池（P2）→ 不出题。
+
+### 接口
+
+| 符号 | 语义 |
+|---|---|
+| `question_surface.build_surface(cfg, day)` | 变化面（纯读，as-of）：四路异常（sleep_late 跨午夜归一/screen_spike·drop/commit_surge/mood_low）+ 提交序列 + 情绪效价 + 近 3 天日记摘要（as_of）+ 近 14 天问答史（qa_brief as-of）；基线样本 <5 不判 |
+| `question_surface.render_surface(surface)` | prompt 文本块；无异常明示「退 L1 或不出题」 |
+| `question_composer.LADDER_RULES` | 提问阶梯铁律（L0 禁问/L1 默认/L3 归因关心试探句式/敏感线禁 L3）——scheduler 注入日报 job prompt 与 composer 共用（拍板 3） |
+| `question_composer.compose(cfg, day)` | 出 0-1 条朋友式单问：evidence 守卫（≥2 位数字必须在素材中可定位）、L3 无异常降级 L1、topic 7 天冷却、失败 fail-open 返回 None |
+| `seed_candidates(..., kind="composed")` | qa 账本新行种 `kind=composed`（anchor `composed-{day}-{n}`），与 candidate 共用去重/冷却/mark_pushed/P1 匹配 |
+| `build_proactive_prompt(..., verbatim_single=True)` | composed-only 推送：问题文本一字不改、无 [Qn]（拍板 2）；日报提醒保持编号路径 |
+| `job_guard_allows(..., mute_exemption=True)` | 拍板 4：「别问了」只静音出题——questions scene 静音时把 open_qa 收窄为日报类（kind 非 candidate/composed）并豁免静音闸 |
+
+### 已知边界
+
+- 活跃时段路并入 sleep_late（daily_stats 无小时分布）；L3 全局 2 次/周未做硬计数（topic 冷却 + 异常驱动近似）。
+- composer 的 LLM 温度为 get_llm 固定 0，随机性靠变化面采样与素材逐日变化。
+- composed 裸回答归属：出题仅发生在日报无开放问题时，推送时该题即唯一待答（裸答守卫 决策 41 直接覆盖）。
