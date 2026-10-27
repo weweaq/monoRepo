@@ -4759,3 +4759,16 @@ batterystats 实测 weiCheckApp 耗电 67.7 mAh，其中 GNSS 64.4 mAh（引擎�
 **待办更新**：
 - [ ] 首周观察 composer 真实出题质量（LLM 遵守阶梯与守卫的比例），必要时收紧 prompt
 - [ ] KG 实体合并 P2/P3（另一条线）
+
+## 2026-10-27 · 测试出网事故修复：测试桩五连推真 QQ（用户截图报告）
+
+**背景**：用户截图报告 QQ 在 01:40 收到五条「[test reply for daily-report]」。溯源：全量 pytest 期间 `TestRunJob` 五个用例（daily-report 名 + fake graph_runner + 默认 deliver=True）走到 `_push_daily_to_qq`，而 `_qq_targets` 读**仓库级真实** `data/qq_known_users.json`（模块常量不吃 tmp root）→ 测试桩回复真推用户 QQ。此前多轮全量跑大概率同样泄漏（凌晨时段未察觉）。附带发现：composer 接线后测试还会摸到**真 LLM**（候选池回退测试被真出题劫持，全量耗时翻倍佐证）。
+
+**已完成（三层封堵）**：①根修 `run_job`——graph_runner 测试缝强制 `deliver=False`（"[test reply ...]" 永不入真通道），投递路由语义改在 `_run_job` 层直测（两用例迁移）；②`conftest.py` autouse `_no_real_qq_egress`——known_users 恒空 + send_c2c 假桩（专项测试自行覆盖）；③autouse `_no_real_llm_calls`——`question_composer._call_llm` 默认拒真（compose 走 fail-open），composer 专项自行 mock。
+
+**实测验证**：`test_test_seam_never_delivers` 回归（fake runner 推送计数恒空）→ 全仓 1827 passed + ruff 绿；候选池回退测试恢复确定性。数据侧无损：测试推送的 day=今天 ≠ 开放问题 day=10-26，`mark_pushed` 空转，asks 仍为 1（01:29 正规重跑所记）；deliver_to 默认 "file"，无真实邮件外泄。
+
+**偏差说明**：无。
+
+**待办更新**：
+- [ ] rerun 加静音时段保护（01:29 重跑在深夜推了日报到用户 QQ，不该打扰）

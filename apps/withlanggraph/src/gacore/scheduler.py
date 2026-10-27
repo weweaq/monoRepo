@@ -610,6 +610,11 @@ def run_job(
     The reply is extracted from the final state's last AIMessage content.
     """
     with as_of_context(for_day or week_sunday(for_week)):
+        if graph_runner is not None:
+            # 测试缝不入生产投递：fake runner 的 "[test reply ...]" 绝不允许走邮件/QQ 真通道。
+            # 2026-10-27 五连推事故：TestRunJob 用 daily-report 名 + 默认 deliver=True，
+            # _qq_targets 读仓库级真实 known_users（不吃 tmp root）→ 五条测试桩推到真实 QQ。
+            deliver = False
         return _run_job(job, cfg, graph_runner, for_day, for_week, deliver)
 
 

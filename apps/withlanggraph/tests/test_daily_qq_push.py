@@ -112,3 +112,15 @@ def test_push_daily_filters_placeholder_targets(tmp_path, monkeypatch):
     sent = _push_daily_to_qq(cfg, "2026-10-25", "# 今日状态\n- ok\n")
     assert sent == 1
     assert calls == [["5270431CCFE7063EA0B30D0D396D91BF"]]
+
+
+def test_test_seam_never_delivers(tmp_path, monkeypatch):
+    """根修回归（2026-10-27 五连推事故）：graph_runner 测试缝强制 deliver=False，绝不触 QQ 推送。"""
+    from gacore.scheduler import Job, run_job
+
+    cfg = Config.for_tests(tmp_path)
+    pushed: list[str] = []
+    monkeypatch.setattr("gacore.scheduler._push_daily_to_qq", lambda cfg_, day, body: pushed.append(body) or 1)
+    job = Job(name="daily-report", schedule="09:00", prompt="hi")
+    run_job(job, cfg, graph_runner=lambda prompt, cfg_, max_turns: "CURRENT_TASK_DONE")
+    assert pushed == []  # fake runner 的 "[test reply ...]" 不进任何真通道

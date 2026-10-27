@@ -20,6 +20,7 @@ from gacore.scheduler import (
     JobState,
     ScheduleResult,
     _build_job_prompt,
+    _run_job,
     _deliver_email,
     _email_body_html,
     _is_incomplete_reply,
@@ -971,7 +972,9 @@ class TestDeliverRouting:
         cfg = Config.for_tests(tmp_path)
         job = Job(name="daily-report", schedule="09:00", prompt="hi", deliver_to="email")
 
-        run_job(job, cfg, graph_runner=lambda p, c, m: "CURRENT_TASK_DONE")
+        # 投递路由直测内层 _run_job：run_job 的 graph_runner 测试缝强制 deliver=False
+        # （2026-10-27 五连推事故根修），路由语义在 _run_job 层验证。
+        _run_job(job, cfg, lambda p, c, m: "CURRENT_TASK_DONE", None, None, True)
 
         assert len(calls) == 1
         assert calls[0][0].deliver_to == "email"
@@ -1007,7 +1010,8 @@ class TestDeliverRouting:
         cfg = Config.for_tests(tmp_path)
         job = Job(name="daily-report", schedule="09:00", prompt="hi", deliver_to="email")
 
-        run_job(job, cfg, graph_runner=lambda p, c, m: "CURRENT_TASK_DONE", for_day="2026-09-05")
+        # 同上：路由透传在 _run_job 层验证（测试缝不入投递）
+        _run_job(job, cfg, lambda p, c, m: "CURRENT_TASK_DONE", "2026-09-05", None, True)
 
         assert seen[0]["for_day"] == "2026-09-05"
 

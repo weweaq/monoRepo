@@ -131,3 +131,37 @@ def _isolated_place_semantics(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     from gacore.langTrack import place_semantics as _ps
 
     monkeypatch.setattr(_ps, "CONFIG_PATH", tmp_path / "absent_place_semantics.json")
+
+
+@pytest.fixture(autouse=True)
+def _no_real_qq_egress(monkeypatch: pytest.MonkeyPatch) -> None:
+    """全测试禁止真实 QQ 出网（2026-10-27 五连推事故）。
+
+    ``scheduler._qq_targets`` 读仓库级真实 ``data/qq_known_users.json``（模块常量，
+    不吃测试 tmp root），任何漏 mock 的投递测试都会把测试桩回复真推到用户 QQ。
+    通道边界统一封死：known_users 恒空 + send_c2c 假桩；需要测推送语义的用例
+    自行 monkeypatch 同名目标覆盖本桩（monkeypatch 同属性后者生效）。
+    """
+    import gacore.langTrack.qq_push as _qq_push
+
+    monkeypatch.setattr(_qq_push, "load_known_users", lambda: {})
+
+    async def _fake_send_c2c(content, targets, is_sandbox):  # noqa: ANN001
+        return {"ok": 0, "failures": list(targets), "errors": {}, "ids": {}}
+
+    monkeypatch.setattr(_qq_push, "send_c2c", _fake_send_c2c)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_llm_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """全测试禁止真实 LLM 出网（composer 接线后任何未 mock 的场景都可能打到真 API）。
+
+    默认桩让 compose() 走 fail-open（RuntimeError → None → 降级候选池）；
+    composer 专项测试自行 monkeypatch ``question_composer._call_llm`` 覆盖本桩。
+    """
+    import gacore.question_composer as _qc
+
+    def _refuse(prompt):  # noqa: ANN001
+        raise RuntimeError("tests must not call the real LLM (stubbed in conftest)")
+
+    monkeypatch.setattr(_qc, "_call_llm", _refuse)
