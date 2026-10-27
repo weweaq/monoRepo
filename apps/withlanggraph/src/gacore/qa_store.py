@@ -24,7 +24,7 @@ from gacore.jsonl_logger import get_logger
 logger = get_logger("qa_store")
 
 _TZ = timezone(timedelta(hours=8))
-_MAX_ASKS: int = 2  # 未答最多重问 2 期（spec §5.3）
+_MAX_ASKS: int = 2  # 未答最多触达 2 次（3.0 用户拍板：问两次没答就归档，不问第三次）
 _IGNORED_AFTER_HOURS: int = 24  # 发出后超过该时长仍无回答，记一次 ignored_count
 # P3 来源静音（proactive-inquiry-2.0 §7）：同一来源连续 N 次被忽略 → 静音 D 天。
 _SOURCE_MUTE_AFTER_IGNORES: int = 2
@@ -786,10 +786,14 @@ def muted_sources(
 
 
 def archive_stale(cfg: Config, max_asks: int = _MAX_ASKS) -> int:
-    """未答且 asks > max_asks 的问题归档为「用户不关心」，不再注入/推送。"""
+    """未答且 asks >= max_asks 的问题在下次推送前归档为「用户不关心」，不再注入/推送。
+
+    3.0 语义（2026-10-27 用户反馈「同一个问题问三次」）：触达上限 = max_asks 次——
+    ``>=`` 保证第 3 次推送永远不会发生（旧 ``>`` 口径允许问满 3 次，已废）。
+    """
     n = 0
     for row in _read_rows(cfg):
-        if row.get("status") == "open" and int(row.get("asks") or 0) > max_asks:
+        if row.get("status") == "open" and int(row.get("asks") or 0) >= max_asks:
             row["status"] = "archived"
             row["updated_at"] = _now()
             _rewrite_row(cfg, row)

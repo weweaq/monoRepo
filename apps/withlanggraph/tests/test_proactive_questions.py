@@ -97,12 +97,11 @@ def test_questions_scene_pushes_at_most_three_per_message(tmp_path, monkeypatch)
 
 
 def test_questions_scene_archives_before_push_so_last_ask_is_answerable(tmp_path, monkeypatch):
-    """第 3 次（上限）推送当天必须仍可回答：归档发生在推送之前，不是推完立刻归档。"""
+    """3.0 触达上限：asks>=2 的未答问题在下次推送前归档——同一个问题最多问 2 次（用户拍板）。"""
     cfg = Config.for_tests(tmp_path)
     seed_questions(cfg, "2026-10-25", ["- [想问你-1] 你是在读还是上班？（依据：10-25）"])
     key = open_questions(cfg)[0]["question_key"]
     mark_pushed(cfg, [key])
-    mark_pushed(cfg, [key])  # asks=2 → 本次推送是第 3 次
     monkeypatch.setattr("gacore.proactive._target_users", lambda job: ["u1"])
 
     def fake_headless(job, cfg_, prompt, max_turns):
@@ -111,11 +110,12 @@ def test_questions_scene_archives_before_push_so_last_ask_is_answerable(tmp_path
     monkeypatch.setattr("gacore.proactive._headless_run", fake_headless)
     monkeypatch.setattr("gacore.proactive._write_back_proactive", lambda *a, **k: False)
     job = Job(name="daily-questions", schedule="08:30", prompt="", scene="questions")
+    # 第 2 次触达（asks 1→2）：仍允许——两次以内是合理提醒
     assert run_proactive_job(job, cfg, clock=lambda: datetime(2026, 10, 26, 8, 30))["sent"] == 1
     row = all_rows(cfg)[0]
-    assert row["status"] == "open" and row["asks"] == 3
+    assert row["status"] == "open" and row["asks"] == 2
 
-    # 下一轮先归档（asks 已满）→ 不再推、也不再打扰
+    # 第 3 次永不发生：asks>=2 先归档 → 不再推、也不再打扰
     again = run_proactive_job(job, cfg, clock=lambda: datetime(2026, 10, 27, 8, 30))
     assert again["skipped"] == [{"user": "", "reason": "no_open_questions"}]
     assert all_rows(cfg)[0]["status"] == "archived"
