@@ -2326,7 +2326,7 @@ reply ─cap_questions→ gated ─stamp_report_bullets→ deliver_reply ─save
 | 问题 | 根因 | 修复 |
 |---|---|---|
 | 编号仍会错位 | `_refresh_open_state` 每次按 open 集合**过滤** `keys`：答掉 Q1 后编号前移，`[Q2]` 指到第 3 题 | `keys` 改为不可变快照（只由 `set_prompt_order` 整体替换）；`_refresh_open_state` 原样保留；越界/已答返回 `None`，删掉全局位置兜底 |
-| 第 3 次推送当天不可答 | `mark_pushed` 后立刻 `archive_stale`，`asks>2` 的题刚展示就被归档 | `archive_stale` 移到 `open_questions` 之前（推送前归档）；第 3 次展示仍 open，下一轮才归档 |
+| 第 3 次推送永不发生（91101d8 收紧） | `archive_stale` 由 `asks > 2` 改为 `asks >= 2`，asks=2 的题在第 3 次推送前即被归档 | `archive_stale` 移到 `open_questions` 之前（推送前归档）：同一个问题最多问 2 次（夜间首问+晨间一提醒），第 3 次永不展示 |
 | 裸答吞正常对话 | 裸答只看「唯一待答 + 已推送 + ≤30 字」 | 追加「不像问句」护栏（`?`/`吗`/`什么`/`怎么`/`为什么`/`哪`/`谁`/`多少`/`是不是`/`有没有`）；显式回答必须带方括号，`Q3 财报什么时候发？` 不再命中 |
 | `cap_weekly` 删掉交互节 / 越界 1 字 | 只认 `# ` 一级标题、保护集只有首节+打分节；硬截断 `limit-1 + "…"` = limit+1 | 认 `#`/`##`/`###`；保护首节 + 三条变化/打分/想问你/画像候选；删无可删时压缩最长节正文（保留标题），最后硬截断，结果严格 `<= limit` |
 | 周报指令静默丢失 | 已评分/窗口关闭时 `try_weekly_interaction` 返回 `None`，消息落进 agent 或被裸答吞 | 前缀命中但不可用 → 明确回「已评分/窗口已关闭」；`try_answer` 见 `评分|候选` 前缀直接 `return None` |
@@ -2610,7 +2610,7 @@ sequenceDiagram
 
 - `source_health(cfg, days=30, now)`：按 `asked_at`（缺省 `delivered_at`）窗口取行，按来源统计 asked/answered/ignored；从最新一条向前数「连续 ignored」链——最新行已答或 `ignored_count=0`（还没到 24h 判定）即断链。
 - `muted_sources(cfg, now)`：连续忽略 ≥2 的来源，从最后一次忽略的 `updated_at` 起静音 14 天，返回 `{source: "YYYY-MM-DD HH:MM:SS"}`（东八区），过期不返回。
-- `archive_muted(cfg, sources)`：把静音来源的 open 行归档，避免静音到期后重问两周前的旧题；与 `archive_stale`（asks>2）互补。
+- `archive_muted(cfg, sources)`：把静音来源的 open 行归档，避免静音到期后重问两周前的旧题；与 `archive_stale`（asks>=2，91101d8 收紧）互补。
 - `proactive_candidates.select(..., muted_sources=...)`：采集后先按来源过滤，静音来源不参与打分与同源分组。
 - questions scene 接线：`muted_sources` → `archive_muted` → `mark_ignored` → `archive_stale` → `open_questions` 过滤；过滤后为空且本轮确有静音归档时跳过并记 `source_muted`（不从候选池补位）。
 
