@@ -10,6 +10,7 @@
 ## 待办
 
 - [x] Phase 0 → Phase 1 迁移：迁入 mono 仓库，接入 uv workspace
+- [x] 卡片勾选 + 批量启动/重启/停止仅作用于所选
 - [ ] 补基础测试（进程探测的纯函数部分）
 - [ ] services.json 模板化（去掉本机绝对路径，用环境变量或相对路径）
 - [ ] Windows 服务化（nssm 或 Task Scheduler 常驻）
@@ -147,6 +148,56 @@
 
 **待办更新**：
 - [x] 卡片勾选 + 批量启停仅作用于所选（2026-10-05）
+- [ ] 补基础测试（进程探测纯函数部分）
+- [ ] services.json 模板化（去掉本机绝对路径）
+- [ ] Windows 服务化（nssm 或 Task Scheduler 常驻）
+
+### 2026-10-28 — 新增「重启所选」批量按钮
+
+**背景**：批量启停只作用于勾选卡片后，改完代码的常见动作是「勾选几个 → 全部重启」，
+但顶部只有启动/停止，只能逐张卡片点「重启」，或退化成先停止再启动两轮。
+
+**已完成**（前端 `public/index.html` + 后端 `server.py` 一处正确性修正）：
+- header 在「启动」与「停止」之间新增 `restartAll` 按钮，`batch("/api/restart", "批量重启")`
+- `updateBatchBar()` 接管第三个按钮：勾选数 n>0 → 「重启所选 (n)」可用；n=0 → 「全部重启」置灰
+  （title 提示先勾选）；busy 期间与其余批量按钮、复选框一同禁用
+- `batch()` 对 `/api/restart` 追加确认框（列出所选数量与名称），文案点明「已停止的会直接被拉起」
+  ——与批量停止同级破坏性，防误触
+- hint 同步为「启动/重启/停止」仅作用于所选
+- **后端修正**：`restart_service()` 原先无论 stop 结果如何都只看 start——stop 杀不动进程时
+  `start_service()` 会撞单实例守卫返回 `ok=True, "已在运行 (pid X)"`，于是「重启」报成功但代码根本没重载。
+  现新增模块常量 `_STOP_PARTIAL`（`stop_service()` 的「停止未完成」前缀同源引用），
+  `restart_service()` 在其命中**且 start 同时报成功**时返回 `ok=False`，消息追加
+  「（停止阶段有残留进程，重启可能未生效）」；单卡「重启」同样受益
+
+**实测验证**（浏览器实机走查 8787 在跑实例，前端零构建刷新即生效）：
+- 初始：`#restartAll` 存在，文案「全部重启」，disabled=true
+- 勾选 2 张卡：三个批量按钮同步变「启动/重启/停止所选 (2)」并可用，卡片高亮 2 张
+- 点「重启所选」：confirm 文案为「确定重启所选 2 个服务？（强制结束进程后重新启动，已停止的会直接被拉起）」
+  且列出真实服务名；确认框取消时 `postAction` 调用 0 次（未发请求）
+- 取消勾选后按钮回落「全部重启」并置灰
+- header 在 1000px 宽下无溢出（`scrollWidth == clientWidth`）
+- `restart_service()` 四分支 monkeypatch 实测（临时脚本，未入库）：无进程可停+start 成功 → ok=True；
+  正常 stop+start → ok=True；stop 残留+start 报「已在运行」→ ok=False 且消息含「重启可能未生效」；
+  start 失败 → ok=False
+- 刻意未在实机触发真实重启：会杀掉正在运行的服务，交由用户自行点验
+
+**遗留（未在本步处理，按需另开小步）**：
+- `_kill_pids_force()` 只按「stdout 里没有存活 PID」判成功，不看 `returncode`；若 PowerShell
+  整段脚本没跑起来（被拦截/解析失败），空 stdout 会被当成「全杀成功」。属既有缺陷，
+  `_STOP_PARTIAL` 覆盖不到；收紧需实测 `Stop-Process -ErrorAction SilentlyContinue` 的退出码行为，
+  贸然加 `returncode != 0 → 视为全存活` 有误报风险，故本次不动
+- 「已停止的服务点重启」提示语仍是 `✓ 没有可停止的进程：…；started (pid X)`，功能正确但读着像失败
+- 批量串行无中断：单服务重启约 3–4s，勾 8 个约 30s，期间全 UI 禁用
+
+**偏差说明**：
+- 前端为纯交互改动，不涉及接口/表/数据流；后端仅改变 `restart_service()` 的成败判定，
+  路由与请求/响应结构不变（仍 `{ok, message}`）
+- 语义沿用单卡「重启」：对已停止的服务点重启 = 直接拉起（`stop_service` 容忍 not running）
+- 与批量停止一致：完成后保留勾选，便于部分失败重试
+
+**待办更新**：
+- [x] 顶部新增「重启所选」（2026-10-28）
 - [ ] 补基础测试（进程探测纯函数部分）
 - [ ] services.json 模板化（去掉本机绝对路径）
 - [ ] Windows 服务化（nssm 或 Task Scheduler 常驻）

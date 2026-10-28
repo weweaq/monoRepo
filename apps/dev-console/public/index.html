@@ -61,12 +61,13 @@
   <div class="right">
     <button id="selectAll">全选</button>
     <button id="startAll" title="仅作用于勾选的服务卡片">全部启动</button>
+    <button id="restartAll" title="仅作用于勾选的服务卡片">全部重启</button>
     <button id="stopAll" title="仅作用于勾选的服务卡片">全部停止</button>
     <span class="addr" id="addr">127.0.0.1:8787</span>
   </div>
 </header>
 <div id="banner"></div>
-<div id="hint">后台服务均由 uv 虚拟环境的 launcher 启动，每个服务在系统里会显示为两个进程（launcher 桩 + 真实 Python 解释器），属正常现象——停止/重启时会将这一对一并结束。勾选卡片后，顶部「启动/停止」仅作用于所选服务。</div>
+<div id="hint">后台服务均由 uv 虚拟环境的 launcher 启动，每个服务在系统里会显示为两个进程（launcher 桩 + 真实 Python 解释器），属正常现象——停止/重启时会将这一对一并结束。勾选卡片后，顶部「启动/重启/停止」仅作用于所选服务。</div>
 <main id="grid"></main>
 <div id="toast"></div>
 <div id="logModal" class="modal">
@@ -224,12 +225,15 @@ function updateBatchBar() {
   }
   const n = selected.size;
   const startBtn = document.getElementById("startAll");
+  const restartBtn = document.getElementById("restartAll");
   const stopBtn = document.getElementById("stopAll");
   const selBtn = document.getElementById("selectAll");
   startBtn.textContent = n ? "启动所选 (" + n + ")" : "全部启动";
+  restartBtn.textContent = n ? "重启所选 (" + n + ")" : "全部重启";
   stopBtn.textContent = n ? "停止所选 (" + n + ")" : "全部停止";
-  startBtn.disabled = stopBtn.disabled = !n || busy;
-  startBtn.title = stopBtn.title = n ? "仅作用于勾选的 " + n + " 个服务" : "先勾选服务卡片";
+  startBtn.disabled = restartBtn.disabled = stopBtn.disabled = !n || busy;
+  startBtn.title = restartBtn.title = stopBtn.title =
+    n ? "仅作用于勾选的 " + n + " 个服务" : "先勾选服务卡片";
   selBtn.textContent = n ? "清空所选" : "全选";
   selBtn.disabled = busy;
 }
@@ -479,6 +483,9 @@ async function batch(path, label) {
   }
   if (path === "/api/stop" &&
       !confirm("确定停止所选 " + list.length + " 个服务？（强制结束进程）\n" + list.map(s => s.name).join("、"))) return;
+  if (path === "/api/restart" &&
+      !confirm("确定重启所选 " + list.length + " 个服务？（强制结束进程后重新启动，已停止的会直接被拉起）\n" +
+               list.map(s => s.name).join("、"))) return;
   busy = true;
   render(currentList, true);
   let okN = 0;
@@ -510,6 +517,7 @@ async function batch(path, label) {
 }
 
 document.getElementById("startAll").onclick = () => batch("/api/start", "批量启动");
+document.getElementById("restartAll").onclick = () => batch("/api/restart", "批量重启");
 document.getElementById("stopAll").onclick = () => batch("/api/stop", "批量停止");
 document.getElementById("selectAll").onclick = () => {
   if (busy) return;

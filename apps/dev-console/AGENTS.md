@@ -37,11 +37,12 @@
 | `main` / `_main` | fn | server.py | 入口：安全守卫 → 绑定 → serve_forever |
 | `Handler` | class | server.py | 路由 + JSON 响应；`log_message` 被禁（日志走 JSONL） |
 | `do_GET` | fn | server.py | `/`, `/api/status`, `/api/log`, `/api/config` |
-| `do_POST` | fn | server.py | `/api/start`, `/api/stop`, `/api/config`（需 token） |
+| `do_POST` | fn | server.py | `/api/start`, `/api/stop`, `/api/restart`, `/api/config`（需 token） |
 | `load_config` | fn | server.py | 读 services.json + 叠加 services.local.json |
 | `save_service_override` | fn | server.py | 写 services.local.json（仅 EDITABLE_FIELDS） |
 | `start_service` | fn | server.py | 单实例守卫 → 端口清理 → 启进程 → 1.2s 存活校验 |
 | `stop_service` | fn | server.py | 杀 match 命中 PID + 声明端口占用者 |
+| `restart_service` | fn | server.py | `stop_service` → 1s → `start_service`；stop 残留进程（`_STOP_PARTIAL`）判失败，避免「已在运行」被当成重启成功 |
 | `detect_pids` | fn | server.py | 命令行子串 AND 匹配，存活判定核心 |
 | `list_processes` | fn | server.py | 单次 powershell 枚举全量进程，带 10s 缓存 |
 | `_kill_pids_force` | fn | server.py | 单次 powershell 强杀一批 PID 并同调用内校验存活 |

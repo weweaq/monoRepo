@@ -458,6 +458,12 @@ def start_service(service):
     return False, reason
 
 
+# Prefix stop_service() uses when processes survived the kill; restart_service() treats a
+# match as failure (otherwise start() hits the single-instance guard and answers "already
+# running" with ok=True, i.e. a restart that silently did not reload the code).
+_STOP_PARTIAL = "停止未完成"
+
+
 def stop_service(service):
     """Kill the service's matched processes AND anything holding its declared ports.
 
@@ -481,17 +487,24 @@ def stop_service(service):
     invalidate_process_cache()  # status poll right after stop must re-scan, not reuse the pre-kill list
     if survivors:
         sdesc = "; ".join(("PID %d: %s" % (p, (desc_map.get(p) or "<unknown>").strip()[:120])) for p in survivors)
-        return False, ("停止未完成：%d 个进程杀不动（%s）——可能为管理员权限启动的进程；"
+        return False, ("%s：%d 个进程杀不动（%s）——可能为管理员权限启动的进程；"
                        "请以管理员身份运行 dev-console，或在管理员终端执行 taskkill /F /PID %s。"
-                       % (len(survivors), sdesc, " /PID ".join(str(p) for p in survivors)))
+                       % (_STOP_PARTIAL, len(survivors), sdesc, " /PID ".join(str(p) for p in survivors)))
     return True, "stopped %d process(es)" % len(targets)
 
 
 def restart_service(service):
-    """Stop then start. A 'not running' stop is tolerated (process may be externally started)."""
+    """Stop then start. A 'not running' stop is tolerated (process may be externally started).
+
+    A stop that leaves processes alive is NOT tolerated: start_service() would hit its
+    single-instance guard, answer "已在运行 (pid X)" with ok=True, and the caller would
+    believe the code reloaded while the old process still serves. Report that as failure.
+    """
     _, msg_stop = stop_service(service)
     time.sleep(1.0)  # give Windows a beat to release PIDs/ports before the start guard re-scans
     ok_start, msg_start = start_service(service)
+    if ok_start and msg_stop.startswith(_STOP_PARTIAL):
+        return False, "%s；%s（停止阶段有残留进程，重启可能未生效）" % (msg_stop, msg_start)
     return ok_start, "%s；%s" % (msg_stop, msg_start)
 
 
