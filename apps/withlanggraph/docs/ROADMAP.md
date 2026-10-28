@@ -4783,3 +4783,46 @@ batterystats 实测 weiCheckApp 耗电 67.7 mAh，其中 GNSS 64.4 mAh（引擎�
 
 **待办更新**：
 - [ ] 今晚 23:50 为新口径（随报问+出题人）首次全自动运行，明早验收
+
+## 2026-10-28 · 换模型文档化（DeepSeek V4.1 Flash 两条路径 + 实测可用模型清单）
+
+**背景**：要给 langTrack 换 DeepSeek V4.1 Flash，但 `.env` 里 `DEEPSEEK_MODEL=deepseek-v4-flash`
+已经不在账号可用列表里（实测 `GET https://api.deepseek.com/models` 只返回 `deepseek-flash`、
+`deepseek-v4-pro`），照抄旧值切过去要等 provider 侧 400/404 才暴露，整日抽取白跑。另外 V4.1 Flash
+有两个身份：官方 `deepseek-flash`（付费、全路径可用）与 opencode 免费档
+`deepseek-v4.1-flash-free`（免费、只能零工具调用），README 此前完全没有说明。
+
+**已完成**：README「配置」节新增「换模型 / 换 provider」小节（三条路径对照表 + 三条硬约束 +
+可用模型自检脚本），并修正：`LLM_PROVIDER` 支持值补 `zhipu`/`opencode`、`DEEPSEEK_MODEL` 示例与
+`deepseek-v4-flash` 的错误说法、`ConfigError` 示例输出、「单一 LLM_PROVIDER」的旧表述
+（补 `KG_EXTRACT_LLM_PROVIDER` 例外）；`.env.example` 给 `DEEPSEEK_MODEL`/`OPENCODE_MODEL` 补
+可用模型名注释（纯 ASCII）。**未改真实 `.env`**，切换由用户自行执行。
+
+**检视回修（一轮 review 后）**：官方路径补「`KG_EXTRACT_LLM_PROVIDER` 须留空，否则抽取仍按它走」
+（当前 `.env` 正是 `opencode`，只改 `LLM_PROVIDER` 会出现"以为换了其实没换"）；免费档删掉
+「或其它零工具调用」这条不存在的路径（全仓只有 `KG_EXTRACT_LLM_PROVIDER` 一个路径级 override，
+`feedback`/`question_composer` 都读 `LLM_PROVIDER`）；重启对象改正为 `gacore` + `review`，
+`langtrack` 服务（`server.py` 不导入任何 LLM 模块）不必重启；补 `opencode models` 输出的
+`opencode/` 前缀提醒与自检命令的执行目录；`deepseek-v4-flash` 的断言从「已下线」弱化为
+「`/models` 不再列出（本 key 实测），大概率 400/404」。
+
+**检视回修（二轮 review 后）**：上一版写「`LLM_PROVIDER=opencode` 会让 `gacore` 启动即失败」被
+实测证伪——`create_agent` 是**延迟绑定**：`build_graph()` 照样成功（实测 `LLM_PROVIDER=opencode`
+下 build OK），首个对话/定时任务才抛 `NotImplementedError`，形态是「进程活着 + KG 抽取正常 +
+聊天全挂」的半瘫。README 已改为该表述，避免运维拿"重启后进程活着"误判切换成功。同时
+`langtrack` 不需重启的理由补为「不导入 LLM 相关模块，也不触发抽取（只跑 ETL）」，并说明进程级
+环境变量优先于 `.env`（`load_dotenv` 不覆盖），单独路由只能靠 dev-console `services.local.json`
+的 `env`。
+
+**实测验证**：官方 `/models` 返回 `["deepseek-flash", "deepseek-v4-pro"]`；`opencode models`
+列出 `opencode/deepseek-v4.1-flash-free`；本地 `opencode serve` 4096 健康（`GET /app` = 200）；
+README 自检命令在 `apps/withlanggraph` 下原样执行可跑通。
+
+**偏差说明**：本次只改文档，未动代码、未跑测试；`deepseek-v4-flash` 是否彻底下线仅按 `/models`
+未列出判断，未逐个试打。
+
+**待办更新**：
+- [ ] 真正切官方 `deepseek-flash` 后，跑一次真实 KG 抽取验证 JSON 合规与 `finish=stop`
+- [ ] `.env.example` 第 12 行等历史注释是**二次编码乱码**（文件本身是合法 UTF-8；原 UTF-8 字节
+      曾被按 latin-1 单字节解码后又存成 UTF-8），需按原意重写文案；**不要**按"转码"处理，会把中文写坏
+- [ ] PowerShell 5.1 下查看 UTF-8 文件需带 `-Encoding UTF8`，否则显示乱码（显示层问题）

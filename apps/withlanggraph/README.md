@@ -117,7 +117,7 @@ Copy-Item .env.example .env
 
 | 变量 | 说明 | 示例 |
 | :--- | :--- | :--- |
-| `LLM_PROVIDER` | 模型提供方，`openai` / `anthropic` / `deepseek` | `deepseek` |
+| `LLM_PROVIDER` | 模型提供方，`openai` / `anthropic` / `deepseek` / `zhipu` / `opencode` | `zhipu` |
 | `OPENAI_API_KEY` | OpenAI 系 API Key | `sk-xxx` |
 | `OPENAI_BASE_URL` | OpenAI 兼容网关地址，留空用官方 | `https://api.openai.com/v1` |
 | `OPENAI_MODEL` | OpenAI 模型名 | `gpt-4o` |
@@ -125,7 +125,13 @@ Copy-Item .env.example .env
 | `ANTHROPIC_MODEL` | Anthropic 模型名 | `claude-sonnet-4-5` |
 | `DEEPSEEK_API_KEY` | DeepSeek API Key（`platform.deepseek.com` 获取） | `sk-xxx` |
 | `DEEPSEEK_BASE_URL` | DeepSeek 网关地址，留空用 `https://api.deepseek.com/v1` | `https://api.deepseek.com/v1` |
-| `DEEPSEEK_MODEL` | DeepSeek 模型名 | `deepseek-v4-pro` |
+| `DEEPSEEK_MODEL` | DeepSeek 模型名，**以账号 `/models` 返回为准** | `deepseek-flash` |
+| `ZHIPU_API_KEY` | 智谱 BigModel API Key | `xxx.yyy` |
+| `ZHIPU_BASE_URL` | 智谱网关地址，留空用官方 | `https://open.bigmodel.cn/api/paas/v4` |
+| `ZHIPU_MODEL` | 智谱模型名 | `GLM-5.3-Flash` |
+| `OPENCODE_SERVER_URL` | 本地 `opencode serve` 地址（免费额度锁在该进程内） | `http://127.0.0.1:4096` |
+| `OPENCODE_MODEL` | opencode 侧模型名，`opencode models` 可查 | `glm-5.3-flash-free` |
+| `KG_EXTRACT_LLM_PROVIDER` | 只覆盖 KG 抽取路径的 provider，留空=跟随 `LLM_PROVIDER` | `opencode` |
 | `DEFAULT_MAX_TURNS` | 单次任务默认最大轮数 | `40` |
 | `SMTP_USER` | 发件账号（QQ/163 填 SMTP 授权码而非登录密码），`send_email` 工具用 | `xxx@qq.com` |
 | `SMTP_PASSWORD` | 发件密码 / 授权码 | |
@@ -135,9 +141,61 @@ Copy-Item .env.example .env
 | `SMTP_SSL` | 是否启用 SSL（`1`/`true`/`yes`），留空按端口推断 | |
 | `SMTP_TIMEOUT` | SMTP 连接超时（秒） | `10` |
 
-`deepseek` 与 GA 的配置一致（`configure_mykey.py` 中 `type: native_oai`）：走 OpenAI 兼容
-协议，由 `ChatOpenAI` 驱动，默认 base URL 为 `https://api.deepseek.com/v1`、默认模型为
-`deepseek-v4-pro`（可选 `deepseek-v4-flash`）。
+`deepseek` 与 GA 的配置一致（`configure_mykey.py` 中 `type: native_oai`）：走 OpenAI 兼容
+协议，由 `ChatOpenAI` 驱动，默认 base URL 为 `https://api.deepseek.com/v1`、默认模型常量是
+`deepseek-v4-pro`。**模型名以账号为准**：2026-10-28 实测该 key 的 `GET /models` 只返回
+`deepseek-flash`（= DeepSeek V4.1 Flash）与 `deepseek-v4-pro`；早先 README 写成可选的
+`deepseek-v4-flash` 已不在该列表里，继续填它大概率 provider 侧 400/404。
+
+### 换模型 / 换 provider
+
+provider 由 `LLM_PROVIDER` 决定，唯一例外是 `KG_EXTRACT_LLM_PROVIDER`（只作用于 KG 抽取路径）。
+改完**必须重启进程**才生效——`gacore/config.py` 的 `load_dotenv` 只在启动时读一次 `.env`：
+
+| 进程 | 重启原因 |
+| :--- | :--- |
+| `gacore`（dev-console） | 主 agent 图 + 定时任务/日报 + KG 抽取都在这里 |
+| `review`（`gacore.review_server`） | `feedback.apply_correction` 会调 LLM 改写 |
+| `langtrack`（`-m gacore.langTrack`） | **不需要**：`server.py` 不导入任何 LLM 相关模块，也不触发抽取（只跑 ETL） |
+
+一次性脚本 / CLI（`python -m gacore.langTrack.extract` 等）重跑即可，不必"重启"。
+
+| 想用的模型 | 改哪几个键（`apps/withlanggraph/.env`） | 覆盖范围 | 成本 |
+| :--- | :--- | :--- | :--- |
+| DeepSeek V4.1 Flash（官方 API） | `LLM_PROVIDER=deepseek`<br>`DEEPSEEK_MODEL=deepseek-flash`<br>`DEEPSEEK_API_KEY=<key>`<br>**`KG_EXTRACT_LLM_PROVIDER` 留空** | 全量：主 agent 图、定时任务/日报、KG 抽取（抽取须留空该键，否则仍按它走） | 按 token 计费 |
+| DeepSeek V4.1 Flash（opencode 免费档） | `KG_EXTRACT_LLM_PROVIDER=opencode`<br>`OPENCODE_MODEL=deepseek-v4.1-flash-free`<br>且本地 `opencode serve` 在 `127.0.0.1:4096` | **只有 KG 抽取** | 免费 |
+| 智谱 GLM-5.3-Flash（当前默认） | `LLM_PROVIDER=zhipu`<br>`ZHIPU_MODEL=GLM-5.3-Flash` | 全量（同样受 `KG_EXTRACT_LLM_PROVIDER` 影响） | 按 token 计费 |
+
+三条硬约束：
+
+1. **opencode 免费档上不了主 agent**：`gacore/opencode_llm.py` 的 `OpencodeChatModel` 一旦
+   被 `bind_tools` 收到非空工具表就抛 `NotImplementedError`（会话 API 不接受 gacore 的工具
+   schema），而主 agent 图必须绑全部工具。注意 `create_agent` 是**延迟绑定**：
+   `LLM_PROVIDER=opencode` 时 `gacore` **照样能启动**、KG 抽取（`bind_tools=False`）也照样跑，
+   但**第一条对话，或第一个走 graph 的定时任务（日报 / 主动推送）一进来就抛
+   `NotImplementedError`**——表现为"进程活着、抽取正常、聊天全挂"的半瘫状态，比启动直接失败更难察觉。
+   **免费档目前唯一可用路径就是 KG 抽取**（`KG_EXTRACT_LLM_PROVIDER` 是全仓唯一的配置级路径
+   override）；日报改写（`feedback`）、`question_composer` 这些零工具调用没有配置文件级开关，
+   要让它们单独走 opencode，只能给对应进程单独设环境变量（dev-console 下改
+   `services.local.json` 的 `env`；进程级 env 优先于 `.env`，`load_dotenv` 不覆盖），不建议这么做。
+2. **`KG_EXTRACT_LLM_PROVIDER` 优先于 `LLM_PROVIDER`**，但只作用于抽取路径
+   （`langTrack/extract/runner._resolve_llm`）；留空即回落到 `LLM_PROVIDER`。当前真实 `.env`
+   就设着 `opencode`，所以只改 `LLM_PROVIDER` **不会**改变抽取用的模型。
+   `OPENCODE_VARIANT` 留空时抽取路径自动补 `low`（免费档默认推理档会把输出上限烧在隐藏推理上）。
+3. **模型名写错不会启动即报错**，要等 provider 侧 400/404，整日抽取白跑。切之前先验证
+   （以下命令在 `apps/withlanggraph` 下执行——脚本按当前目录读 `.env`）：
+
+```powershell
+# 官方 DeepSeek：打印该 key 真正可用的模型 id
+uv run python -c "import json,urllib.request,pathlib;kv=dict(l.split('=',1) for l in pathlib.Path('.env').read_text(encoding='utf-8').splitlines() if '=' in l and not l.lstrip().startswith('#'));base=(kv.get('DEEPSEEK_BASE_URL') or 'https://api.deepseek.com').strip().rstrip('/');req=urllib.request.Request(base+'/models',headers={'Authorization':'Bearer '+kv['DEEPSEEK_API_KEY'].strip()});print([m['id'] for m in json.load(urllib.request.urlopen(req,timeout=30))['data']])"
+
+# opencode：打印本地 serve 认得的模型名
+opencode models | Select-String deepseek,glm
+```
+
+注意 `opencode models` 输出带 `opencode/` 前缀（如 `opencode/deepseek-v4.1-flash-free`），
+填 `OPENCODE_MODEL` 时**要去掉前缀**只留裸 modelID，provider 由 `OPENCODE_PROVIDER_ID=opencode`
+另传。
 
 ### QQ Bot 配置
 
@@ -188,7 +246,7 @@ python -m gacore
 - 未配置 `.env`（缺 `LLM_PROVIDER` 或 API Key）时优雅退出，不崩溃：
 
   ```
-  gacore: ConfigError: LLM_PROVIDER must be one of ('openai', 'anthropic', 'deepseek'), got ''
+  gacore: ConfigError: LLM_PROVIDER must be one of ('openai', 'anthropic', 'deepseek', 'zhipu', 'opencode'), got ''
   ```
 
   退出码为 1。
@@ -273,8 +331,9 @@ ask_user 中断与恢复（含 langgraph 两种中断表象）、端到端多轮
 - **IM 前端**：Telegram / Discord / 微信 / 飞书等 Bot 前端未移植，仅保留终端 REPL
   和 QQ Bot（`frontends/qq.py`）。
 - **L4 会话归档**：长程任务归档记忆未移植（L0/L1/L2 三层已覆盖）。
-- **Mixin 多模型故障切换**：GA `NativeToolClient` 的多模型兜底切换未移植，
-  gacore 是单一 `LLM_PROVIDER` 的选择逻辑（`llm.py`）。
+- **Mixin 多模型故障切换**：GA `NativeToolClient` 的多模型兜底切换未移植，
+  gacore 是单一 `LLM_PROVIDER` 的选择逻辑（`llm.py`），唯一的例外是
+  `KG_EXTRACT_LLM_PROVIDER` 这条只作用于抽取路径的覆盖。
 
 ### gacore 特有（GA 无对应）
 
