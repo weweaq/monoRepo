@@ -2244,7 +2244,7 @@ reply ─cap_questions→ gated ─stamp_report_bullets→ deliver_reply ─save
 |---|---|
 | `question_key(cfg, question)` | `sha1(topic + 意图)[:16]`：topic 取 `config/audit_topics.json` 命中（无则空串），意图 = 去数字/日期/标点后归一 |
 | `seed_questions(cfg, day, bullets)` | 投递正文种入；已答 key 永不重开（决策 11）、同期 2-gram Jaccard > 0.6 语义去重 |
-| `mark_pushed` / `archive_stale` | 推送后 `asks+1`；未答 `asks > 2` 归档（用户不关心），不再注入/推送 |
+| `mark_pushed` / `archive_stale` | 推送后 `asks+1`；未答 `asks >= 2`（`_MAX_ASKS=2`）归档（用户不关心），不再注入/推送——同一问题最多 2 次触达 |
 | `set_prompt_order(cfg, keys)` / `_load_open_state(cfg)` | 推送后落盘展示顺序（决策 29）；`_refresh_open_state` 只保留仍 open 的 key |
 | `try_answer(cfg, content, allow_bare)` | QQ 捕获入口（决策 8/29）：`[想问你-N]` 取**最近一期**含该锚点的问题（周 id 折算周日比较）；`[Qn]` 先按 `set_prompt_order` 的顺序，无记录时按最近一期锚点、再退回全局位置；只发锚点不带答案不吞；裸回答仅在「唯一开放 + 已推送（asks>0）+ ≤30 字 + allow_bare」时归给该问题 |
 | `qa_brief(cfg, before_date)` | `_QA` 源取数：近 7 天已答（新→旧）+ 未答问题；**双端 as-of 栅栏**（`horizon < answer_day <= before_date`、`day < before_date`，决策 30） |

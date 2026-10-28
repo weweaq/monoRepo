@@ -17,7 +17,7 @@
 | 环节 | 现有实现 | 事实约束 |
 | --- | --- | --- |
 | 问题种子 | `qa_store.seed_questions` 从日报正文「想问你」锚点种入 `data/qa/{date}.jsonl` | 日报允许 0–5 条问题 |
-| 重问预算 | `qa_store.mark_pushed` 发送后 `asks+1`；`archive_stale` 在 `asks > 2` 时归档为"用户不关心" | 同一问题最多出现 3 次 |
+| 重问预算 | `qa_store.mark_pushed` 发送后 `asks+1`；`archive_stale` 在 `asks > 2` 时归档为"用户不关心" | 同一问题最多出现 3 次（**3.0 修订 2026-10-27：`archive_stale` 改 `>=`、`max_asks=2`，最多 2 次**） |
 | 回答捕获 | `qa_store.try_answer`：`[Qn]` / `[想问你-N]` 显式命中；裸短答仅在 `len(open_) == 1` 且 ≤30 字、非问句时生效 | 多问题并存时裸答完全失效 |
 | 调度 | `config/schedule.json` 仅启用 `daily-questions`（08:30，窗口 08:00–09:30，cooldown 720min） | 目前只有一条主动询问任务 |
 | 护栏 | `proactive.py`：`max_per_day=2`、`hot_chat_minutes=30`、`jitter_minutes=30`；`idle_hours=24` 仅对 idle 场景生效 | 08:30 固定触发，不参考用户活跃时段 |
