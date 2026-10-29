@@ -97,6 +97,7 @@ from langgraph.types import Command
 
 
 from gacore.character import card_name, card_prompt, list_cards
+from gacore.companion.identity import ActiveCardRepository, default_active_cards_path
 from gacore.config import Config, load_dotenv
 from gacore.graph import DEFAULT_RECURSION_LIMIT, build_graph
 from gacore.heartbeat import DEFAULT_INTERVAL_SECONDS, Heartbeat, run_dir
@@ -298,31 +299,33 @@ def _save_user_threads() -> None:
 _user_threads: dict[str, str] = _load_user_threads()      # user_id -> thread_id (persisted)
 
 
-def _card_state_file() -> Path:
-    """Persist per-user active-card mappings (survives process restarts)."""
-    return Config.default().root / "data" / "active_cards.json"
+_active_card_repo = ActiveCardRepository(default_active_cards_path())
 
 
-def _load_user_cards() -> dict[str, str]:
-    """Load the persisted user->card map; missing/corrupt files degrade to {}."""
+def _set_user_card(user_id: str, card_id: str | None) -> None:
+    """Bind the user to a card (None = unbind) in the process cache and on disk.
+
+    The repository is the single writer of ``data/active_cards.json`` so proactive
+    outreach reads the same mapping QQ just switched to. Persistence stays best-effort
+    (as before): a write failure only degrades restart memory, the live session keeps
+    the in-memory value.
+    """
+    if card_id is None:
+        _user_card.pop(user_id, None)
+    else:
+        _user_card[user_id] = card_id
     try:
-        raw = json.loads(_card_state_file().read_text(encoding="utf-8"))
-        return {str(k): str(v) for k, v in raw.items() if isinstance(v, str)}
-    except Exception:  # noqa: BLE001
-        return {}
+        _active_card_repo.set(user_id, card_id)
+    except Exception as exc:  # noqa: BLE001 — persistence must never break /角色
+        logger.warning(
+            "failed to persist active_cards.json",
+            user=user_id,
+            error_type=type(exc).__name__,
+            stack_trace=str(exc),
+        )
 
 
-def _save_user_cards() -> None:
-    """Persist the user->card map; best-effort (failure only degrades restart memory)."""
-    try:
-        path = _card_state_file()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(_user_card, ensure_ascii=False, indent=2), encoding="utf-8")
-    except OSError as exc:
-        logger.warning(f"failed to persist active_cards.json: {exc}")
-
-
-_user_card: dict[str, str] = _load_user_cards()          # user_id -> active card id
+_user_card: dict[str, str] = _active_card_repo.snapshot()   # user_id -> active card id
 
 
 def _known_users_file() -> Path:
@@ -1690,8 +1693,7 @@ class QQApp:
                 _pending_image.pop(user_id, None)
                 _image_processing.discard(user_id)
                 _queued_inputs.pop(user_id, None)
-                _user_card.pop(user_id, None)
-                _save_user_cards()
+                _set_user_card(user_id, None)
                 return await self.send_text(chat_id, "🍃 已退出角色扮演，回到默认助手。", msg_id=msg_id, is_group=is_group)
 
             name = card_name(Config.default(), target)
@@ -1708,8 +1710,7 @@ class QQApp:
             _pending_image.pop(user_id, None)
             _image_processing.discard(user_id)
             _queued_inputs.pop(user_id, None)
-            _user_card[user_id] = target
-            _save_user_cards()
+            _set_user_card(user_id, target)
             return await self.send_text(chat_id, f"🎭 已切换为「{name}」。新的冒险开始了——说吧，想聊什么?", msg_id=msg_id, is_group=is_group)
 
         if op == "/status":

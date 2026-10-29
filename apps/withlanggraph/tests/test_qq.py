@@ -287,7 +287,6 @@ async def test_role_command_lists_cards():
     with (
         patch.object(qq, "_ALLOWED", frozenset({"user-1"})),
         patch.object(qq, "list_cards", return_value=[Card(id="nami", name="娜美", path=Path("nami.md"))]),
-        patch.object(qq, "_save_user_cards"),
     ):
         await app.on_message(msg, is_group=False)
 
@@ -321,13 +320,13 @@ async def test_role_command_switches_card_and_clears_thread():
     with (
         patch.object(qq, "_ALLOWED", frozenset({"user-1"})),
         patch.object(qq, "card_name", return_value="井上织姬"),
-        patch.object(qq, "_save_user_cards") as save,
+        patch.object(qq, "_active_card_repo") as repo,
     ):
         await app.on_message(msg, is_group=False)
 
     assert qq._user_card.get("user-1") == "inoue"
     assert "user-1" not in qq._user_threads
-    save.assert_called_once()
+    repo.set.assert_called_once_with("user-1", "inoue")
     out = app.send_text.call_args.args[1]
     assert "井上织姬" in out
 
@@ -355,11 +354,12 @@ async def test_role_command_off_clears_card():
 
     with (
         patch.object(qq, "_ALLOWED", frozenset({"user-1"})),
-        patch.object(qq, "_save_user_cards"),
+        patch.object(qq, "_active_card_repo") as repo,
     ):
         await app.on_message(msg, is_group=False)
 
     assert "user-1" not in qq._user_card
+    repo.set.assert_called_once_with("user-1", None)
     out = app.send_text.call_args.args[1]
     assert "已退出角色扮演" in out
 
