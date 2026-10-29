@@ -19,6 +19,7 @@ import json
 import os
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Final
 
@@ -31,6 +32,22 @@ _ACTIVE_CARDS_FILE: Final = "active_cards.json"
 # Windows 上 os.replace 偶发 PermissionError（杀毒/索引器瞬时占用目标文件），重试几次即可。
 _REPLACE_RETRIES: Final = 5
 _REPLACE_BACKOFF_SECONDS: Final = 0.02
+
+# 一个状态文件全进程一把锁：proactive 与 QQ 各自 new 一个 repository 时，两把实例锁
+# 互不相斥，读-合并-写会丢更新。按 resolve 后的路径共享锁即可。
+_LOCKS: dict[str, threading.Lock] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _lock_for(path: Path) -> threading.Lock:
+    """Return the process-wide lock guarding ``path`` (created on first use)."""
+    key = os.path.normcase(str(path.resolve()))
+    with _LOCKS_GUARD:
+        lock = _LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _LOCKS[key] = lock
+    return lock
 
 
 class ActiveCardError(Exception):
@@ -49,14 +66,14 @@ def default_active_cards_path() -> Path:
 class ActiveCardRepository:
     """Read/modify the ``user openid -> active card id`` map on disk.
 
-    One instance owns one file. ``set()`` is a read-merge-write under a per-instance
-    lock, so concurrent writers inside one process cannot drop each other's entries.
-    Readers (proactive) always re-read the file, so they see QQ's latest switch.
+    Every instance over the same file shares one process-wide lock (``_lock_for``), so
+    ``set()`` — a read-merge-write — cannot drop another instance's entry. Readers
+    (proactive) always re-read the file, so they see QQ's latest switch.
     """
 
     def __init__(self, path: Path | None = None) -> None:
         self._path = Path(path) if path is not None else default_active_cards_path()
-        self._lock = threading.Lock()
+        self._lock = _lock_for(self._path)
 
     @property
     def path(self) -> Path:
@@ -124,15 +141,14 @@ class ActiveCardRepository:
             raise ActiveCardError(f"cannot read {self._path}: {exc}") from exc
         cards = _parse_cards(raw)
         if cards is None:
-            raise ActiveCardCorruptError(
-                f"{self._path} is not a valid card map; refusing to overwrite it"
-            )
+            raise ActiveCardCorruptError(f"{self._path} is not a valid card map; refusing to overwrite it")
         return cards
 
     def _write(self, cards: dict[str, str]) -> None:
         """Atomically replace the state file with ``cards`` (temp file + os.replace)."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_name(self._path.name + ".tmp")
+        # 唯一临时名：同目录多个进程/实例同时写时，谁也不会吃掉对方的临时文件。
+        tmp = self._path.with_name(f"{self._path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
         tmp.write_text(json.dumps(cards, ensure_ascii=False, indent=2), encoding="utf-8")
         for attempt in range(_REPLACE_RETRIES):
             try:
@@ -140,6 +156,7 @@ class ActiveCardRepository:
                 return
             except PermissionError:
                 if attempt == _REPLACE_RETRIES - 1:
+                    tmp.unlink(missing_ok=True)
                     raise
                 time.sleep(_REPLACE_BACKOFF_SECONDS * (attempt + 1))
 

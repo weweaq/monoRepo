@@ -19,6 +19,7 @@ from gacore.companion.identity import (
     ActiveCardRepository,
     default_active_cards_path,
 )
+from gacore.config import Config
 
 
 def test_missing_file_reads_empty(tmp_path: Path) -> None:
@@ -175,9 +176,29 @@ def test_concurrent_sets_keep_every_update(tmp_path: Path) -> None:
     assert repo.snapshot() == {f"user-{i}": f"card-{i}" for i in range(4)}
 
 
+def test_two_instances_do_not_drop_each_other(tmp_path: Path) -> None:
+    """QQ and proactive hold separate instances of the same file; a shared lock keeps both writes."""
+    path = tmp_path / "active_cards.json"
+    qq_repo = ActiveCardRepository(path)
+    proactive_repo = ActiveCardRepository(path)
+    barrier = threading.Barrier(4)
+
+    def _worker(repo: ActiveCardRepository, user: str, card: str) -> None:
+        barrier.wait()
+        repo.set(user, card)
+
+    threads = [
+        threading.Thread(target=_worker, args=(qq_repo if i % 2 else proactive_repo, f"user-{i}", f"card-{i}"))
+        for i in range(4)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert qq_repo.snapshot() == {f"user-{i}": f"card-{i}" for i in range(4)}
+
+
 def test_default_path_is_project_data_dir() -> None:
     """Both QQ and proactive must resolve the one canonical state file."""
-    path = default_active_cards_path()
-
-    assert path.parts[-2:] == ("data", "active_cards.json")
-    assert path.parent.parent.name == "withlanggraph"
+    assert default_active_cards_path() == Config.default().root / "data" / "active_cards.json"

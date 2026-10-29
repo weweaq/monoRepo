@@ -97,7 +97,7 @@ from langgraph.types import Command
 
 
 from gacore.character import card_name, card_prompt, list_cards
-from gacore.companion.identity import ActiveCardRepository, default_active_cards_path
+from gacore.companion.identity import ActiveCardError, ActiveCardRepository
 from gacore.config import Config, load_dotenv
 from gacore.graph import DEFAULT_RECURSION_LIMIT, build_graph
 from gacore.heartbeat import DEFAULT_INTERVAL_SECONDS, Heartbeat, run_dir
@@ -299,7 +299,7 @@ def _save_user_threads() -> None:
 _user_threads: dict[str, str] = _load_user_threads()      # user_id -> thread_id (persisted)
 
 
-_active_card_repo = ActiveCardRepository(default_active_cards_path())
+_active_card_repo = ActiveCardRepository()
 
 
 def _set_user_card(user_id: str, card_id: str | None) -> None:
@@ -316,16 +316,19 @@ def _set_user_card(user_id: str, card_id: str | None) -> None:
         _user_card[user_id] = card_id
     try:
         _active_card_repo.set(user_id, card_id)
-    except Exception as exc:  # noqa: BLE001 — persistence must never break /角色
+    except (ActiveCardError, OSError, ValueError) as exc:  # persistence must never break /角色
         logger.warning(
             "failed to persist active_cards.json",
             user=user_id,
             error_type=type(exc).__name__,
-            stack_trace=str(exc),
+            error_message=str(exc),
         )
 
 
-_user_card: dict[str, str] = _active_card_repo.snapshot()   # user_id -> active card id
+# Process cache of user_id -> active card id. Only _set_user_card() may write it; a
+# repository instance is the only component allowed to persist the same mapping, so the
+# cache cannot go stale behind our back (revisit if another writer appears).
+_user_card: dict[str, str] = _active_card_repo.snapshot()
 
 
 def _known_users_file() -> Path:
