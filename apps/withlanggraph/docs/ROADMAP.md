@@ -4826,3 +4826,51 @@ README 自检命令在 `apps/withlanggraph` 下原样执行可跑通。
 - [ ] `.env.example` 第 12 行等历史注释是**二次编码乱码**（文件本身是合法 UTF-8；原 UTF-8 字节
       曾被按 latin-1 单字节解码后又存成 UTF-8），需按原意重写文案；**不要**按"转码"处理，会把中文写坏
 - [ ] PowerShell 5.1 下查看 UTF-8 文件需带 `-Encoding UTF8`，否则显示乱码（显示层问题）
+
+## 2026-10-29 · 主动询问 4.0 设计稿（双通道分家 + tick 驱动出题）
+
+**背景**：3.0 的代码（变化面 / 出题人 / 随报问）已全部落地，但线上 4 天只产生 3 条日报题、
+**composed 0 条**，且 10-28 08:30 整轮三个 target 全部 AGENT_ERROR。用户提出三条改变：
+①日报的提问归日报、韩立的提问归韩立（内部可共用）；②不要固定时刻出题，改成每 30 分钟 tick
+由 agent 结合周报/长期记忆/上条消息是否被回复决定要不要问；③确认 DeepSeek 缓存成本。
+需要先出一份可评审的设计，再动代码。
+
+**已完成**：新增 `docs/proactive-inquiry-4.0-design.md`（v1.1），含现状审计 14 条（每条带
+`file:line` 与线上证据）、决策记录（5 条用户已定 + 7 条文档代拍）、设计（双通道模型 /
+tick 流水线 / 触发器 / last_outreach 状态注入 / 推送去 agent 化 / 回答捕获 / 缓存与预算）、
+数据兼容与回滚、P0–P3 分期验收、14 条测试、5 条待拍板。
+
+**builder check 回修（一轮后改稿）**：把文档逐条对照代码后，纠正了 9 处会让实现跑偏的设计
+与 6 处与代码不符的断言，主要是：
+- `u_<uid>.daily_count` 是 **per-user 跨 job 共享**（`proactive.py:751-766`），08:30 提醒会吃掉
+  当天额度 → 新增 `daily_by_channel`；assistant 配额改为独立两档，不复用 `quota_cap` 的 1–4 档；
+- `guard` 是全局单份（`load_guard_config`），"tick 内不叠 jitter"会连带关掉 08:30 的抖动
+  → 加 job 级覆盖；
+- composed 行的 anchor 是 `composed-<day>-N`，取数字得 `202610281`，**永远匹配不上
+  `[想问你-N]`** → 明确 `[Qn]` 只解析 report 通道，assistant 只走裸答指针；
+- 裸答指针会喂 `reply_stats.answer_rate` 进而喂配额与候选打分，**误判会自我放大**
+  → 加 12h 窗口 + 语气词黑名单 + 命中不吞消息（现在 `try_answer` 命中即 return）；
+- `build_surface` 只产 anomalies，没有 gain/freshness，`compose()` 又自己重建 surface
+  → 补 `surface_candidates()` 适配层与 `compose(candidate=...)`；
+- 打分公式改为与 `proactive_candidates.py:47-52` 一致（原稿自己编了一套权重，且少了 intrusion）；
+- `open_state` 只写 v2 会让旧代码读不到 `keys` 而静默失效 → 顶层三键**双写**，回滚安全；
+- "推送不建图"只对生成路径成立，写回主线程仍 `build_graph`（`proactive.py:1490`）→ 改断言口径。
+
+**实测验证**：本轮只写文档，未动代码；核实到的事实包括 `data/qa/*.jsonl` 4 条问题（1 答 /
+2 归档 / 1 开放，回答率 25%）、10-28 08:30 三轮 AGENT_ERROR、`data/qq_known_users.json` 含占位
+`user-1`/`admin-1`、10-27 日志里能看到 `"cache_read": 0`（但那条是智谱请求）。
+
+**偏差说明**：
+- **不得用智谱样本推断 DeepSeek 缓存**。原稿差点按 `cache_read=0` 下结论；已改为"切到 deepseek
+  后抓两条连续请求实测"。真正杀缓存的是「生活事实卡每轮都变、却排在时间锚之前」
+  （`context.py:207-310`），不是"每次新 session"。
+- 现有 `llm_request_log` 已透传 `usage_metadata`（含 `cache_read`），M1 因此缩水为「ops 聚合 +
+  验证 DeepSeek 字段映射」，不是"新增埋点"。
+- P0 原验收判据「连续 3 天不再全 AGENT_ERROR」没有判别力（余额恢复也能过），改为代码路径判据。
+
+**待办更新**：
+- [ ] 用户拍板 5 条（tick 频率固定/自适应、rerun 重推策略、日报是否避开韩立问过的 topic、
+        是否确认 assistant 无编号单问、P0 验收判据改法）后才进入实现
+- [ ] 拍板后按 P0（修血）→ P1（分家+记账）→ P2（tick，含 L3 周上限）→ P3（观测）推进
+- [ ] P1 顺带做 prompt 顺序调整：把每轮必变的块挪到稳定块之后、时间锚之前，并让 ops 打出
+        cache 命中率
