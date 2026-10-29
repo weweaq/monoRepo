@@ -199,6 +199,24 @@ def test_two_instances_do_not_drop_each_other(tmp_path: Path) -> None:
     assert qq_repo.snapshot() == {f"user-{i}": f"card-{i}" for i in range(4)}
 
 
+def test_read_retries_transient_permission_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Windows: reading while a writer sits in os.replace must not look like 'no character'."""
+    path = tmp_path / "active_cards.json"
+    path.write_text(json.dumps({"user-1": "linwan"}), encoding="utf-8")
+    real_read = Path.read_text
+    calls = {"n": 0}
+
+    def _flaky(self: Path, *args: object, **kwargs: object) -> str:
+        if self == path and calls["n"] == 0:
+            calls["n"] += 1
+            raise PermissionError("file is being replaced")
+        return real_read(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _flaky)
+
+    assert ActiveCardRepository(path).get("user-1") == "linwan"
+
+
 def test_default_path_is_project_data_dir() -> None:
     """Both QQ and proactive must resolve the one canonical state file."""
     assert default_active_cards_path() == Config.default().root / "data" / "active_cards.json"

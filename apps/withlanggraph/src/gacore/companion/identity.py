@@ -32,6 +32,9 @@ _ACTIVE_CARDS_FILE: Final = "active_cards.json"
 # Windows 上 os.replace 偶发 PermissionError（杀毒/索引器瞬时占用目标文件），重试几次即可。
 _REPLACE_RETRIES: Final = 5
 _REPLACE_BACKOFF_SECONDS: Final = 0.02
+# 读侧同理：写者正在 os.replace 时读同一路径会短暂 PermissionError，别把它当"文件损坏/无角色"。
+_READ_RETRIES: Final = 3
+_READ_BACKOFF_SECONDS: Final = 0.005
 
 # 一个状态文件全进程一把锁：proactive 与 QQ 各自 new 一个 repository 时，两把实例锁
 # 互不相斥，读-合并-写会丢更新。按 resolve 后的路径共享锁即可。
@@ -41,13 +44,23 @@ _LOCKS_GUARD = threading.Lock()
 
 def _lock_for(path: Path) -> threading.Lock:
     """Return the process-wide lock guarding ``path`` (created on first use)."""
-    key = os.path.normcase(str(path.resolve()))
+    key = os.path.normcase(str(path.resolve()))  # 文件系统调用，放在 guard 外
     with _LOCKS_GUARD:
-        lock = _LOCKS.get(key)
-        if lock is None:
-            lock = threading.Lock()
-            _LOCKS[key] = lock
-    return lock
+        return _LOCKS.setdefault(key, threading.Lock())
+
+
+def _read_text(path: Path) -> str:
+    """``Path.read_text`` with a short PermissionError retry (Windows replace window)."""
+    for attempt in range(_READ_RETRIES):
+        try:
+            return path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            raise
+        except PermissionError:
+            if attempt == _READ_RETRIES - 1:
+                raise
+            time.sleep(_READ_BACKOFF_SECONDS)
+    raise RuntimeError("unreachable: read retry loop")
 
 
 class ActiveCardError(Exception):
@@ -112,7 +125,7 @@ class ActiveCardRepository:
     def _read(self) -> dict[str, str]:
         """Read the map, degrading to ``{}`` for missing/empty/corrupt files."""
         try:
-            raw = self._path.read_text(encoding="utf-8")
+            raw = _read_text(self._path)
         except FileNotFoundError:
             return {}
         except OSError as exc:
@@ -134,7 +147,7 @@ class ActiveCardRepository:
     def _read_for_update(self) -> dict[str, str]:
         """Read the map for a read-merge-write; a damaged file raises instead of {}."""
         try:
-            raw = self._path.read_text(encoding="utf-8")
+            raw = _read_text(self._path)
         except FileNotFoundError:
             return {}
         except OSError as exc:
@@ -149,16 +162,19 @@ class ActiveCardRepository:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         # 唯一临时名：同目录多个进程/实例同时写时，谁也不会吃掉对方的临时文件。
         tmp = self._path.with_name(f"{self._path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
-        tmp.write_text(json.dumps(cards, ensure_ascii=False, indent=2), encoding="utf-8")
-        for attempt in range(_REPLACE_RETRIES):
-            try:
-                os.replace(tmp, self._path)
-                return
-            except PermissionError:
-                if attempt == _REPLACE_RETRIES - 1:
-                    tmp.unlink(missing_ok=True)
-                    raise
-                time.sleep(_REPLACE_BACKOFF_SECONDS * (attempt + 1))
+        try:
+            tmp.write_text(json.dumps(cards, ensure_ascii=False, indent=2), encoding="utf-8")
+            for attempt in range(_REPLACE_RETRIES):
+                try:
+                    os.replace(tmp, self._path)
+                    return
+                except PermissionError:
+                    if attempt == _REPLACE_RETRIES - 1:
+                        raise
+                    time.sleep(_REPLACE_BACKOFF_SECONDS * (attempt + 1))
+        finally:
+            # replace 成功后临时名已不存在，unlink 是 no-op；写失败/被占用时别留垃圾。
+            tmp.unlink(missing_ok=True)
 
 
 def _parse_cards(raw: str) -> dict[str, str] | None:
