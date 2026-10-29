@@ -4897,19 +4897,45 @@ tick 流水线 / 触发器 / last_outreach 状态注入 / 推送去 agent 化 / 
   `_active_card_repo = ActiveCardRepository(default_active_cards_path())`；
   `_set_user_card(user_id, card_id)` 是进程内 `_user_card` 的唯一更新点（先更新缓存，再
   `repo.set()` 落盘，落盘失败只记 WARNING 不打断 `/角色`）；启动时 `_user_card = repo.snapshot()`。
-- 测试：新增 `tests/test_companion_identity.py`（14 条）；`tests/test_qq.py` 三处 `/角色` 用例
-  由 patch `_save_user_cards` 改为 patch `_active_card_repo` 并断言 `set()` 调用参数。
+- 测试：新增 `tests/test_companion_identity.py`（15 条）；`tests/test_qq.py` 的 `/角色` 用例：
+  `switch` / `off` 两条改 patch `_active_card_repo` 并断言 `set()` 参数，`lists` 那条只是删掉了
+  无用的 `_save_user_cards` patch（列表分支本来就不写盘）。
+- 连带修复：mono 根 `conftest.py` 的 `_KNOWN_UPSTREAM_FAILURES` 里还挂着
+  `test_role_command_switches_card_and_clears_thread`（上游 churn 留下的过期 skip）。该用例在本
+  仓库早已修好（`test_qq.py:307-308` 已用 `Mock` checkpointer + `AsyncMock adelete_thread`），
+  不删这条 skip，本次新增的 `repo.set` 断言会被整条跳过 = 假绿。已删除该条，`test_qq.py` 现在
+  28 passed / 0 skipped。
 
 **实测验证**：
 
-- `uv run pytest tests/test_companion_identity.py -q` → 14 passed
-- `uv run pytest tests/test_qq.py tests/test_companion_identity.py -q` → 41 passed, 1 skipped
-  （100s，`test_qq` 里建真图的老用例本来就慢，与本次改动无关）
-- `uv run pytest tests -q`（apps/withlanggraph 全量）→ 1785 passed, 1 skipped（214s）
+- `uv run pytest tests/test_companion_identity.py -q` → 15 passed
+- `uv run pytest tests/test_qq.py tests/test_companion_identity.py -q` → 43 passed
+  （40s，`test_qq` 里建真图的老用例本来就慢，与本次改动无关）
+- `uv run pytest tests -q`（apps/withlanggraph 全量）→ 1787 passed（208s）
 - `uv run ruff check`（companion 包 + qq.py + 两个测试文件）→ All checks passed
 - 新用例覆盖：文件缺失/空白、正常读、非字符串值丢弃、set 持久化后新实例可见、解绑、
   set 不吞其他用户、损坏 JSON 读降级且 set 不覆盖、非 dict 视为损坏、snapshot 隔离、
-  写盘不留临时文件、`os.replace` 被锁时旧内容不丢、4 线程并发 set 不丢更新。
+  写盘不留临时文件、`os.replace` 被锁时旧内容不丢、单/双实例 4 线程并发 set 不丢更新。
+
+**检视回修（独立 review agent，FAIL → 2 条 blocking 全修）**：
+
+1. **切卡断言假绿**：`test_role_command_switches_card_and_clears_thread` 被根 `conftest.py`
+   的过期 skip 整条跳过，"切卡 → `repo.set()`"这条主路径等于没有在跑的断言。已删该 skip（见上）。
+2. **ROADMAP 描述失真**：初稿写"三处用例都改成 patch `_active_card_repo`"，实际是 2 处 patch
+   + 1 处仅删无效 patch。按 R5"不失真"已改正。
+
+顺手处置的非阻断项：
+
+- 进程锁从"每实例一把"改为"按 `resolve()` 路径全进程共享"，临时文件名加 `pid + uuid`。否则
+  Step 2 中 proactive 在 scheduler 线程另造一个 repository 实例时，两把实例锁互不相斥会
+  读-合并-写丢更新，且共用的固定 tmp 名会互吃（`os.replace` 抛 `FileNotFoundError`）。
+  已补 `test_two_instances_do_not_drop_each_other` 验收。
+- `qq.py` 落盘失败日志改用 `error_message`，不再把异常文本塞进 `stack_trace`；异常范围收窄为
+  `ActiveCardError/OSError/ValueError`（不再用 `except Exception` 吞掉代码 bug）。
+- 默认路径断言改为与 `Config.default().root` 比对，不再绑定 checkout 目录名 `withlanggraph`。
+
+未处置（记录在案）：损坏 JSON 仍按设计文档"保留现场 + 抛错"，不做改名自愈；重复 WARNING 未做
+按 mtime 去重（等 Step 2 proactive 真按消息调用 `get()` 时再评估）。
 
 **偏差说明**：
 
