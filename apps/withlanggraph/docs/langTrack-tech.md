@@ -725,12 +725,19 @@ flowchart LR
     A["config/assets/characters/*.md<br/>纯数据资产"] --> B["character.py<br/>扫描+读取(只读)"]
     B --> C["state.py active_card<br/>会话内指定"]
     C --> D["context.py 唯一注入点<br/>L0工具准则 + 人物卡 + 工具桥接句"]
-    E["frontends/qq.py /角色<br/>查看/切换/off"] -->|持久化| F["data/active_cards.json<br/>user->card 映射,重启不丢"]
+    E["frontends/qq.py /角色<br/>查看/切换/off"] -->|"set()/snapshot()"| R["companion/identity.py<br/>ActiveCardRepository<br/>唯一读写入口"]
+    R -->|"临时文件 + os.replace"| F["data/active_cards.json<br/>user->card 映射,重启不丢"]
+    P["proactive.py<br/>(Step 2 接入)"] -.->|"get()/snapshot()"| R
 ```
 
 - 角色激活时 system prompt = **L0 工具准则 + 人物卡 + 工具桥接句**（“保留系统智能体全部能力，可调用系统工具，用角色口吻表达”），实例见 `context.py`。
 - 切换角色即新开一段对话（复用 `/new` 清理逻辑），历史互不串戏（`qq.py:1107`）。
-- 持久化：`qq.py:_card_state_file()/_load_user_cards()/_save_user_cards()`，文件 `data/active_cards.json`，损坏降级为 `{}`。
+- **持久化（2026-10-29 起收敛到单一入口）**：`companion/identity.py::ActiveCardRepository` 是 `data/active_cards.json` 唯一的读写实现，QQ 与 proactive 共用，避免两处各解析一遍 JSON。
+  - `get(openid)` / `snapshot()` 只读；`set(openid, card_id)` 为读-合并-写（进程内锁串行化），`card_id=None` 表示解绑（`/角色 off`）。
+  - 写入走「临时文件 + `os.replace`」，并对 Windows 的 `PermissionError` 重试 5 次（0.02s 递增退避）。
+  - 文件不存在或空白视为首次启动，返回 `{}`；**JSON 损坏时读取降级为 `{}` 但不覆盖**——`set()` 抛 `ActiveCardCorruptError`，由 `qq.py::_set_user_card` 记 WARNING 后仅更新内存缓存，保证 `/角色` 不报错、磁盘上的人工改动不被静默清空。
+  - `qq.py` 的进程内 `_user_card` 缓存只在 `_set_user_card()` 一处更新（角色切换 / 退出角色），启动时由 `repo.snapshot()` 填充。
+
 
 ### 9.3 测试
 

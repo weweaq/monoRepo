@@ -4874,3 +4874,53 @@ tick 流水线 / 触发器 / last_outreach 状态注入 / 推送去 agent 化 / 
 - [ ] 拍板后按 P0（修血）→ P1（分家+记账）→ P2（tick，含 L3 周上限）→ P3（观测）推进
 - [ ] P1 顺带做 prompt 顺序调整：把每轮必变的块挪到稳定块之后、时间锚之前，并让 ops 打出
         cache 命中率
+
+## 2026-10-29 · Companion 自我记忆 V1 Step 1：Active-Card Repository 收敛
+
+**背景**：`docs/companion-self-memory-v1-plan.md` Step 1。此前 QQ 与 proactive 只能各自解析
+`data/active_cards.json`：QQ 侧 `_card_state_file/_load_user_cards/_save_user_cards` 私有实现，
+写盘是普通 `write_text`（非原子），proactive 侧根本没有共享读取入口——两边一旦各写一版就会
+出现"主动消息用的角色 ≠ 普通聊天用的角色"。
+
+**已完成**：
+
+- 新增 `src/gacore/companion/{__init__,identity}.py`：`ActiveCardRepository(path)` 是
+  `data/active_cards.json` 的唯一读写入口。
+  - `get(openid)` / `snapshot()` 只读，后者返回副本（改副本不污染磁盘）。
+  - `set(openid, card_id)` 读-合并-写，进程内 `threading.Lock` 串行化；`card_id=None` 即解绑
+    （对应 `/角色 off`）。
+  - 写盘 = 临时文件 + `os.replace`，`PermissionError` 重试 5 次（0.02s 递增退避，Windows
+    杀毒/索引器瞬时占用场景）。
+  - 文件不存在 / 全空白 → 首次启动，返回 `{}`；`json` 非法或顶层不是对象 → 读降级 `{}` 并
+    WARNING，`set()` 抛 `ActiveCardCorruptError`，**不覆盖**损坏文件。
+- `frontends/qq.py`：删除 `_card_state_file/_load_user_cards/_save_user_cards`，改为
+  `_active_card_repo = ActiveCardRepository(default_active_cards_path())`；
+  `_set_user_card(user_id, card_id)` 是进程内 `_user_card` 的唯一更新点（先更新缓存，再
+  `repo.set()` 落盘，落盘失败只记 WARNING 不打断 `/角色`）；启动时 `_user_card = repo.snapshot()`。
+- 测试：新增 `tests/test_companion_identity.py`（14 条）；`tests/test_qq.py` 三处 `/角色` 用例
+  由 patch `_save_user_cards` 改为 patch `_active_card_repo` 并断言 `set()` 调用参数。
+
+**实测验证**：
+
+- `uv run pytest tests/test_companion_identity.py -q` → 14 passed
+- `uv run pytest tests/test_qq.py tests/test_companion_identity.py -q` → 41 passed, 1 skipped
+  （100s，`test_qq` 里建真图的老用例本来就慢，与本次改动无关）
+- `uv run pytest tests -q`（apps/withlanggraph 全量）→ 1785 passed, 1 skipped（214s）
+- `uv run ruff check`（companion 包 + qq.py + 两个测试文件）→ All checks passed
+- 新用例覆盖：文件缺失/空白、正常读、非字符串值丢弃、set 持久化后新实例可见、解绑、
+  set 不吞其他用户、损坏 JSON 读降级且 set 不覆盖、非 dict 视为损坏、snapshot 隔离、
+  写盘不留临时文件、`os.replace` 被锁时旧内容不丢、4 线程并发 set 不丢更新。
+
+**偏差说明**：
+
+- **"不覆盖损坏文件"与旧行为相反**。旧实现遇到损坏 JSON 会把内存值原样写回（等于自动修复，
+  也等于静默清空人工改过的文件）。按设计文档改为保留文件 + 抛错 + 调用方降级：代价是文件损坏后
+  `/角色` 切换只在当次进程生效，需要人工修好 JSON 才恢复重启持久化；换来的是不再静默销毁现场。
+- Step 1 **不接** proactive 读取（那是 Step 2），`get()/snapshot()` 已按调用方需要预留。
+
+**待办更新**：
+
+- [x] Step 1 共享 Active-Card Repository（代码 + 测试 + R5 三处同步）
+- [ ] Step 2 Owner 配置与 Proactive 人格贯穿（`COMPANION_OWNER_QQ_OPENID`、
+  删 `build_proactive_prompt` 里的"韩立口吻"、`_headless_run` 透传 `active_card`）
+
