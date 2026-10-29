@@ -4894,10 +4894,11 @@ tick 流水线 / 触发器 / last_outreach 状态注入 / 推送去 agent 化 / 
   - 文件不存在 / 全空白 → 首次启动，返回 `{}`；`json` 非法或顶层不是对象 → 读降级 `{}` 并
     WARNING，`set()` 抛 `ActiveCardCorruptError`，**不覆盖**损坏文件。
 - `frontends/qq.py`：删除 `_card_state_file/_load_user_cards/_save_user_cards`，改为
-  `_active_card_repo = ActiveCardRepository(default_active_cards_path())`；
-  `_set_user_card(user_id, card_id)` 是进程内 `_user_card` 的唯一更新点（先更新缓存，再
-  `repo.set()` 落盘，落盘失败只记 WARNING 不打断 `/角色`）；启动时 `_user_card = repo.snapshot()`。
-- 测试：新增 `tests/test_companion_identity.py`（15 条）；`tests/test_qq.py` 的 `/角色` 用例：
+  `_active_card_repo = ActiveCardRepository()`（路径由 repository 自己解析，避免两处各存一份
+  路径知识）；`_set_user_card(user_id, card_id)` 是进程内 `_user_card` 的唯一更新点（先更新缓存，
+  再 `repo.set()` 落盘，落盘失败只记 WARNING 不打断 `/角色`）；启动时
+  `_user_card = repo.snapshot()`。
+- 测试：新增 `tests/test_companion_identity.py`（16 条）；`tests/test_qq.py` 的 `/角色` 用例：
   `switch` / `off` 两条改 patch `_active_card_repo` 并断言 `set()` 参数，`lists` 那条只是删掉了
   无用的 `_save_user_cards` patch（列表分支本来就不写盘）。
 - 连带修复：mono 根 `conftest.py` 的 `_KNOWN_UPSTREAM_FAILURES` 里还挂着
@@ -4908,10 +4909,10 @@ tick 流水线 / 触发器 / last_outreach 状态注入 / 推送去 agent 化 / 
 
 **实测验证**：
 
-- `uv run pytest tests/test_companion_identity.py -q` → 15 passed
-- `uv run pytest tests/test_qq.py tests/test_companion_identity.py -q` → 43 passed
-  （40s，`test_qq` 里建真图的老用例本来就慢，与本次改动无关）
-- `uv run pytest tests -q`（apps/withlanggraph 全量）→ 1787 passed（208s）
+- `uv run pytest tests/test_companion_identity.py -q` → 16 passed
+- `uv run pytest tests/test_qq.py tests/test_companion_identity.py -q` → 44 passed
+  （42s，`test_qq` 里建真图的老用例本来就慢，与本次改动无关）
+- `uv run pytest tests -q`（apps/withlanggraph 全量）→ 1788 passed（196s）
 - `uv run ruff check`（companion 包 + qq.py + 两个测试文件）→ All checks passed
 - 新用例覆盖：文件缺失/空白、正常读、非字符串值丢弃、set 持久化后新实例可见、解绑、
   set 不吞其他用户、损坏 JSON 读降级且 set 不覆盖、非 dict 视为损坏、snapshot 隔离、
@@ -4936,6 +4937,19 @@ tick 流水线 / 触发器 / last_outreach 状态注入 / 推送去 agent 化 / 
 
 未处置（记录在案）：损坏 JSON 仍按设计文档"保留现场 + 抛错"，不做改名自愈；重复 WARNING 未做
 按 mtime 去重（等 Step 2 proactive 真按消息调用 `get()` 时再评估）。
+
+**二轮检视回修**：原 2 条 blocking 实测已关闭（`test_qq.py -q -rs` → 28 passed / 0 skipped，
+切卡用例真跑；ROADMAP 描述与测试实际一致），但文档又出现一处"引用已不存在的表达式"
+（`ActiveCardRepository(default_active_cards_path())`，`f915fcf` 已去掉该参数）——本轮已改为
+`ActiveCardRepository()` 并注明理由。二轮新增风险处置：
+
+- **读路径也加重试**：`snapshot()/get()` 原本是裸 `read_text`，写者正在 `os.replace` 时 Windows
+  会短暂 `PermissionError`，旧逻辑把它当"文件不可读"→ WARNING + 返回 `{}`（proactive 会瞬间以为
+  用户没角色）。新增 `_read_text()`：`PermissionError` 重试 3 次（5ms），耗尽才降级；
+  `test_read_retries_transient_permission_error` 先红后绿验收。
+- **临时文件必清理**：`_write` 改 `try/finally: tmp.unlink(missing_ok=True)`。唯一 tmp 名的代价是
+  失败路径会越积越多（`PermissionError` 之外，如进程被杀/AV 删 tmp），`finally` 一次性堵住。
+- `_lock_for` 的 `path.resolve()` 移出 `_LOCKS_GUARD`（文件系统调用不该串行化别的路径的构造）。
 
 **偏差说明**：
 

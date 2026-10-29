@@ -736,8 +736,10 @@ flowchart LR
   - `get(openid)` / `snapshot()` 只读；`set(openid, card_id)` 为读-合并-写，锁按 `resolve()`
     后的路径**全进程共享**（`identity._lock_for`）——QQ 与 proactive 各自 new 一个实例也不会丢更新；
     `card_id=None` 表示解绑（`/角色 off`）。
-  - 写入走「临时文件（`<name>.<pid>.<uuid8>.tmp`，避免多写者互吃）+ `os.replace`」，并对 Windows 的
-    `PermissionError` 重试 5 次（0.02s 递增退避），最终失败会清理临时文件再抛。
+  - 写入走「临时文件（`<name>.<pid>.<uuid8>.tmp`，避免多写者互吃）+ `os.replace`」，`finally`
+    清理临时文件，并对 Windows 的 `PermissionError` 重试 5 次（0.02s 递增退避）。
+  - 读取（`snapshot`/`get`）同样对 `PermissionError` 微重试 3 次（5ms）——写者正在 `os.replace`
+    时 Windows 会短暂拒绝读，旧逻辑会把它误判成"无角色"。
   - 文件不存在或空白视为首次启动，返回 `{}`；**JSON 损坏时读取降级为 `{}` 但不覆盖**——`set()` 抛 `ActiveCardCorruptError`，由 `qq.py::_set_user_card` 记 WARNING 后仅更新内存缓存，保证 `/角色` 不报错、磁盘上的人工改动不被静默清空。
   - `qq.py` 的进程内 `_user_card` 缓存只在 `_set_user_card()` 一处更新（角色切换 / 退出角色），启动时由 `repo.snapshot()` 填充。
 
