@@ -1012,8 +1012,10 @@ flowchart LR
 Step 4 验收 21 passed。`TestSent`(11) 覆盖 Step 6：确认写一次、部分成功只记确认前缀、
 unknown/全失败/零段不写、多 receipt 顺序合并、同 attempt 重放幂等、缺 msg_id 回退 source
 hash、非 owner 不写、store 异常不抛、最终回复路径真实接线。
-`tests/test_companion_delivery.py`(9)：markdown 成功 / 明确失败降级 plain / timeout 不降级 /
+`tests/test_qq_receipts.py`(9)：markdown 成功 / 明确失败降级 plain / timeout 不降级 /
 全失败 / 多段部分成功 / 平台 id 为空仍确认 / 无 client / chat log 仅记确认段；Step 5 验收 9 passed。
+（2026-10-30 更正：这 9 条原本放在 `tests/test_companion_delivery.py`，Step 9 重写该文件时被整体
+删除，现已迁至 `tests/test_qq_receipts.py` 并由文件头 provenance 与互指针固定位置。）
 `tests/test_proactive.py` 的 `TestQqPushSent` 扩为严格回执：本人成功返回 `actual_message`、
 别人成功不算、缺 `to`/`ids`/`actual_message` 均不算；各 proactive 端到端 fake 载荷同步补齐
 `to`/`failures`/`ids`/`actual_message`。`TestProactiveSent`(5)：`_qq_push_receipt` 返回

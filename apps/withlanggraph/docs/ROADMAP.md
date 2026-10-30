@@ -5223,6 +5223,8 @@ event**（Step 6 才依据 `SendReceipt.confirmed` 写 `agent.message.sent`）�
 - `tests/test_companion_delivery.py`（新增，9 条）：markdown 成功 / 明确失败降级 plain /
   timeout 不降级 / 全部失败 / 多段部分成功 / 平台 id 为空仍确认 / 无 client /
   chat log 仅记确认段。
+  > 2026-10-30 更正：这 9 条在 Step 9 重写该文件时被整体删除，现已迁至
+  > `tests/test_qq_receipts.py` 并恢复（见文末「Step 5 回执测试恢复」条目）。
 - `tests/test_proactive.py`：`TestQqPushSent` 重写为严格回执用例（本人成功返回正文、
   别人成功不算、缺 `to`/`ids`/`actual_message` 均不算）；各 proactive 端到端 fake 载荷
   统一补齐 `to`/`failures`/`ids`/`actual_message`。
@@ -5557,6 +5559,9 @@ Block（仅表达偏好），并在发送层用 `plan_final_reply()` 做语义�
   - `tests/test_context.py`：新增 Style Block 注入/日志版本、无 companion_context 不注入。
   - `tests/test_companion_delivery.py::test_owner_c2c_plans_segments_while_group_stays_atomic`
     覆盖群聊/非 owner 的 atomic 选择。
+  - **注意**：本步重写 `tests/test_companion_delivery.py` 时，误删了 Step 5 留在该文件的 9 条
+    发送回执用例（`TestSendMarkdown` / `TestSendTextChatLog`）。2026-10-30 已把它们迁到
+    `tests/test_qq_receipts.py` 恢复，两个文件头部互加指针防再次被同名重写吞掉。
 
 **实测验证**：
 
@@ -5587,3 +5592,52 @@ Block（仅表达偏好），并在发送层用 `plan_final_reply()` 做语义�
 - [x] Step 9 Companion 短消息节奏与 E2E（代码 + 测试 + R5 三处同步）
 - [x] Companion V1 全部 Step（1–9）落地完成
 - [ ] 真实 QQ 灰度：观察 owner C2C 分段节奏、插话取消与技术内容原子性
+
+
+## 2026-10-30 · Companion V1 Step 5 回执测试恢复（Step 9 覆盖事故）
+
+**背景**：V1 全部 Step 落地后做计划对照复核，发现一条**静默的覆盖率回归**：Step 9
+（`944e773 feat(gacore): add natural companion reply batches`）重写
+`tests/test_companion_delivery.py` 时，把 Step 5（`e753712`）留在该文件的 9 条发送回执用例
+（`TestSendMarkdown` 7 条 + `TestSendTextChatLog` 2 条）连同类定义一并删除；该文件只保留了
+新的 reply-batch 用例。`_send_markdown` / `_attempt_send` 因此变成**零自动化覆盖**，而它们
+正是「失败/unknown 不记为 sent」这条防线（Step 6 写事件的前提）。
+
+**已完成**：
+
+- 从 `e753712` 还原 9 条用例到新文件 `apps/withlanggraph/tests/test_qq_receipts.py`
+  （按提交时间线逐文件比对测试函数名，全仓仅此一文件丢失用例）。
+  - 覆盖：markdown 成功、明确失败降级 plain、timeout 记 unknown 且**不**降级、全失败、
+    4500 分块多段部分成功、平台 id 为空仍确认、无 client、chat log 只在 receipt 之后
+    记录确认段、无确认段不写 chat log。
+  - 补 `pytestmark = pytest.mark.asyncio`：根 `pyproject.toml` 的 `asyncio_mode=auto`
+    只在 repo root 生效，进入 `apps/withlanggraph` 单跑时这些 async 用例会被当同步用例。
+  - 文件头写明显式 provenance（原文件、被谁删、为何独立成文件），并规定「不要再搬回
+    `test_companion_delivery.py`」。
+- `tests/test_companion_delivery.py` 头部加互指针：本文件只管 Step 9 分批，Step 5 回执契约
+  在 `test_qq_receipts.py`，防止下一次重写再次静默删除。
+- 本文件 Step 5 / Step 9 两处执行记录各补一条更正说明（原先 Step 5 仍写着「9 条」，
+  Step 9 又写同文件「21 条」，同一文件两条互斥记录 = R5 失真）。
+
+**实测验证**：
+
+- `uv run pytest apps/withlanggraph/tests/test_qq_receipts.py -q` → **9 passed**（7.65s）
+- `uv run pytest apps/withlanggraph/tests/test_qq_receipts.py apps/withlanggraph/tests/test_companion_delivery.py
+  apps/withlanggraph/tests/test_companion_events.py apps/withlanggraph/tests/test_companion_e2e.py
+  apps/withlanggraph/tests/test_qq.py -q` → **100 passed**（31.33s）
+- `uv run ruff check apps/withlanggraph/tests/test_qq_receipts.py apps/withlanggraph/tests/test_companion_delivery.py`
+  → All checks passed
+- 还原用例对**当前** `_send_markdown` 直接跑即通过 → 说明这轮只是测试丢失，`qq.py` 的
+  降级/unknown 行为未回归。
+
+**偏差说明**：
+
+- 独立成文件而非并回 `test_companion_delivery.py`：后者已被 Step 9 占为「batch 规划/投递」
+  专用，混放会再次被同名重写波及；代价是与计划 Step 5 的文件名不一致，已在此登记。
+- 未改动 `qq.py` 任何实现，本条目纯测试 + 文档。
+
+**待办更新**：
+
+- [x] Step 5 回执用例恢复（`tests/test_qq_receipts.py`，9 条）
+- [x] ROADMAP Step 5 / Step 9 记录更正（消除同文件互斥描述）
+- [ ] 复核其余 Step 的「计划测试清单 vs 实际用例」逐条映射（本次只按函数名比对，未逐条对齐计划措辞）
