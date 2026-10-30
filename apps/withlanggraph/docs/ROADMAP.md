@@ -6212,3 +6212,44 @@ V1 稳定性缺口里，1/2/3/4/5/6/7 也在同一批未提交改动里。
 - [x] 影子模式接进 scheduler（不发送）
 - [ ] 观察 3–5 天影子日志，决定"叠加闸门"还是"直接替换"
 - [ ] 真实两周观察期（从 2026-10-30 首篇日记起算）
+
+## 2026-10-30 · Companion 生活心跳（V2 收尾，真正"活着"的那一步）
+
+**背景**：设计文档 §16 有完整的主动生活循环（SENSE→APPRAISE→DECIDE→ACT→RECORD→REFLECT
+→EXPRESS，五种决策含 `ACT_SILENTLY`/`ACT_AND_TELL`），但实现只做了决策层：没有心跳、
+少了两种动作、发不出去。用户反馈"不像活人"，判断正确。按用户选定强度 **B（每 1–2 小时
+tick、每天最多 3 条主动消息、五种动作全开）**补齐。
+
+**已完成**：
+
+- `companion/outreach.py`：`ACTIONS` 扩到六值（含 `ACT_SILENTLY`/`ACT_AND_TELL`），
+  prompt 同步五种动作说明；`_tighten` 允许 ACT_* 不带 goal_id（由心跳现场提议并校验）。
+- `companion/loop.py`（新增）：`run_life_tick()` 完整心跳——预拒（无事件/日上限）→ gate →
+  decide → 五种动作 → 记录；`ACT_*` 用确定性小目标 + 只读白名单工具执行，失败只记事件；
+  投递走 `sender` seam，成功写 `proactive.message.sent` 并建 outreach 行。
+- `scheduler.py`：新增 `LIFE_POOL` + `run_life_tick_job()`（真实 sender=qq_push、
+  invoker=只读工具）+ `type == "life"` 分派 + `_log_life_failure`。
+- `config/schedule.json`：新增 `companion-tick`（`every 2h`、`type=life`、`prompt=""`）。
+- `tests/test_companion_loop.py`（新增 12 例）。
+- R5 三处同步：本文件 + tech §9.2.17 + 架构图 `LIFE` 节点与六条边。
+
+**实测验证**：
+
+- `uv run pytest apps/withlanggraph/tests/test_companion_loop.py -q` → **12 passed**
+- 全仓 → **2248 passed, 4 skipped**；ruff 全绿；mermaid 校验 ALL PASS
+- 重启后首个 tick（00:20 前后）应记 `companion life tick finished
+  action=STAY_SILENT reason=QUIET_HOURS llm_calls=0`——静默时段零成本拒答
+
+**偏差说明**：
+
+- 设计里的 `ACT_SILENTLY` 允许"只读公开网络查询"，当前小目标只用本地只读工具
+  （`read_daily`/`get_time` 等），`web_scan` 留给后续，避免夜间无人看守时联网。
+- 每个 tick 只做**一个**只读动作（`max_read_actions=1`），比设计更保守，先看真实效果。
+- 决策事件不落库：`STAY_SILENT` 与有候选的决策都只写日志，避免空 tick 给反思喂噪音
+  （设计 L2431 允许"低重要度 decision event"，本步先不做，等观察期后再定）。
+
+**待办更新**：
+
+- [x] 生活心跳接进 scheduler（五种动作、日上限 3、`every 2h`）
+- [ ] 观察 3–5 天：主动消息条数/时段/是否重复，ACT_SILENTLY 是否真的产生可用素材
+- [ ] 视观察结果把 `web_scan` 纳入 `ACT_SILENTLY`，并考虑把决策事件落库

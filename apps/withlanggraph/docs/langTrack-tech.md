@@ -1316,6 +1316,47 @@ owner 轮注入 / 非 owner 不注入、信任包装与 system prompt 洁净、1
 存储状态判定 USER_BUSY、影子不写事件、日志异常不抛出）+
 `test_scheduler.py::TestOutreachShadow`（3 例：env 关闭、companion 未启用短路、异常吞掉）。
 
+### 9.2.17 Companion 生活心跳（2026-10-30，V2 收尾）
+
+> 设计依据：`docs/companion-self-memory-design.md` §16 主动生活循环、§16.3 五种决策、
+> §15.3 `ACT_SILENTLY` 白名单、§16.4 预算、§17A.8 `companion_tick` 伪代码、D-10
+> 「life tick 不保证发送消息」。
+
+**调度**：`config/schedule.json` 新增 `companion-tick`（`"schedule": "every 2h"`,
+`"type": "life"`, `prompt: ""`）。`run_loop` 里 `type == "life"` → `LIFE_POOL`（单 worker），
+与 proactive / extract / journal 各自隔离；到点立刻写 `last_run`，不会同 tick 重复触发。
+静默时段不靠窗口，而由 tick 内的 `evaluate_gate()` 判定（返回 `QUIET_HOURS`，0 次模型）。
+
+**一次 tick（`companion/loop.py::run_life_tick`）**：
+
+| 阶段 | 做什么 | 成本 |
+|---|---|---|
+| SENSE | 读存储，算 `build_gate_input`（热聊/日配额/间隔/无回复连续数/活动状态） | 0 LLM |
+| 预拒 | 无事件 → `NO_CANDIDATE`；24h 内已发 ≥3 条 → `POLICY_BLOCKED` | 0 LLM |
+| GATE | 静默时段 / 你正忙 / 间隔不足 / 连续没回 | 0 LLM |
+| DECIDE | 有候选且过 gate 才调 1 次 Decision LLM | ≤1 |
+| ACT | 五种动作之一 | 0 额外 LLM |
+| RECORD | 发送写 `proactive.message.sent` + outreach 行；做读写 `goal.*` / `read_action.*` / `activity.completed` | 0 LLM |
+
+**五种动作的落地**：
+
+- `STAY_SILENT`：只返回结果，**不写事件**（避免空 tick 累积反思素材）。
+- `TELL_ONLY`：`sender(text)` 成功后写 `proactive.message.sent`；空文本 → `LOW_VALUE`；
+  发送异常 → `SYSTEM_FAILURE`，**不写任何叙事**。
+- `ASK_PERMISSION`：发绑定参数的征询 token（同 §9.2.14），不执行。
+- `ACT_SILENTLY`：由候选确定性生成一个 ≤120 字、只读白名单内的小目标（`read_daily` /
+  `get_time` 等），`approved → in_progress → read_action.* → goal.*`，**不发消息**。
+- `ACT_AND_TELL`：同样执行，**成功后才**发送；执行失败只记 `read_action.failed` 并保持沉默。
+
+**边界**：日主动上限 3 条（`MAX_SENDS_PER_DAY`）、每次 tick ≤1 次 LLM、活动预算
+`max_read_actions=1` + 30 分钟 deadline、`cancel_on_user_message=True`（主人开口即取消）。
+投递复用 `qq_push` 工具，回执与短消息节奏与 V1 相同。
+
+**测试**：`tests/test_companion_loop.py`（12 例）：无事件 0 次调用且不写事件、无候选不发、
+日上限先拦、TELL_ONLY 只发一次并落事件与 outreach、发送失败 = SYSTEM_FAILURE 且不写叙事、
+空消息不发、ACT_SILENTLY 只做不说、ACT_AND_TELL 成功才说、动作失败不说、
+无 invoker 保持沉默、静默时段 0 次调用、dry-run 只报告不发送。
+
 ### 9.3 测试
 
 `tests/test_character.py`(7)、`tests/test_character_system_prompt.py`(4)、`tests/test_qq.py` `/角色` 相关 3 条、

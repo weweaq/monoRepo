@@ -313,3 +313,13 @@ flowchart TD
 
     %% V2 收尾：影子模式（2026-10-30）
     SC -. "proactive 到点前先跑一次 decide()<br/>只写 outreach shadow decision 日志<br/>绝不发送 · COMPANION_SHADOW_OUTREACH=0 可关" .-> OUTREACH
+
+    %% V2 收尾：生活心跳（2026-10-30）
+    LIFE[("companion/loop.py run_life_tick<br/>SENSE→GATE→DECIDE→ACT→RECORD→EXPRESS<br/>五种动作: STAY_SILENT / TELL_ONLY / ASK_PERMISSION<br/>/ ACT_SILENTLY / ACT_AND_TELL<br/>空 tick 0 次 LLM · 每次 tick ≤1 次<br/>日主动上限 3 · 间隔/静默/忙碌沿用 outreach gate<br/>ACT_* 只读小目标(goal+activity 预算) · 失败只记事件不叙事<br/>投递复用 qq_push 工具")]
+    LIFE -. "collect_candidates / gate / decide" .-> OUTREACH
+    LIFE -. "start_activity / spend / complete" .-> ACT
+    LIFE -. "create_goal / finish_goal（只读白名单）" .-> GOAL
+    LIFE -. "proactive.message.sent 事件 + outreach 归因" .-> CSTORE
+    LIFE -. "TELL_ONLY / ACT_AND_TELL 经 qq_push 送达" .-> QQ
+    SC -. "type=life · every 2h → LIFE_POOL" .-> LIFE
+    class LIFE state
