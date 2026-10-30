@@ -291,6 +291,20 @@ class TestRunReflection:
         payload = json.loads(model.messages[1].content)
         assert [event["occurred_at_ms"] for event in payload["events"]] == [1, 1, 1]
 
+    def test_prompt_declares_the_exact_output_schema(self) -> None:
+        """The prompt must show the JSON keys the validator enforces.
+
+        Production drift 2026-10-30: without an explicit schema the model answered
+        ``{"reflections": [{"content": ...}]}``, which validation rejects — i.e. every
+        run would silently produce zero reflections.
+        """
+        model = _CapturingModel('{"reflections": []}')
+        run_reflection(_events(), model=model)
+
+        system = model.messages[0].content
+        for key in ('"reflections"', '"statement"', '"source_event_ids"', '"confidence"'):
+            assert key in system, f"prompt must declare {key}"
+
     def test_model_exception_is_an_outcome_not_a_crash(self) -> None:
         outcome = run_reflection(_events(), model=_BoomModel())
         assert outcome.ok is False

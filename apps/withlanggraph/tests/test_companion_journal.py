@@ -185,6 +185,21 @@ class TestMigrationV2:
         assert {"companion_journal"} <= _tables(path)
 
 
+class TestJournalPrompt:
+    def test_prompt_declares_the_exact_output_schema(self) -> None:
+        """The prompt must show the keys ``validate_journal_payload`` enforces.
+
+        Production drift 2026-10-30: with no schema in the prompt the model invented
+        ``letter_to_master`` / ``write_to_self``, so every journal run failed validation.
+        """
+        import gacore.companion.journal as journal_mod
+
+        system = journal_mod._SYSTEM_PROMPT
+        for key in ('"to_owner"', '"private"', '"body"', '"source_event_ids"',
+                    '"source_reflection_ids"', '"reflection"'):
+            assert key in system, f"prompt must declare {key}"
+
+
 class TestJournalStore:
     def test_save_writes_both_journals_and_sources(self, tmp_path: Path) -> None:
         store = _store(tmp_path)

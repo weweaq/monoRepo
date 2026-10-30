@@ -75,7 +75,13 @@ _SYSTEM_PROMPT: Final = """你是角色自我反思提取器，不是聊天角�
 5. 不修改角色人格，不推断关系阶段，不创建承诺或目标。
 6. 不输出用户隐私、凭据、完整路径或完整聊天。
 7. 证据不足时返回空数组。
-8. 只输出符合 schema 的 JSON。"""
+8. 只输出符合下面 schema 的 JSON。
+
+输出格式（键名一字不差，不要自创字段；不要输出 schema 以外的键）：
+{"reflections": [{"statement": "一句 1-200 字的第一人称认识", "source_event_ids": ["evt_xxx", "evt_yyy"], "confidence": 0.0}]}
+- 没有可复用认识时输出 {"reflections": []}
+- confidence 是 0 到 1 的小数；source_event_ids 必须取自输入的 event_id。
+"""
 
 Runner = Callable[[Sequence[CompanionEvent]], "ReflectionOutcome"]
 
