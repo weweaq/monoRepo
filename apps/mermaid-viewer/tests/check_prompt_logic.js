@@ -108,23 +108,23 @@ function expect(cond, msg) {
 // symbol -> line sanity against the known file
 // (line numbers track apps/withlanggraph/docs/architecture-flow.mmd; update when
 // the diagram legitimately changes shape — last sync 2026-10-30, Companion V1
-// Step 8 在 ENTRY 区插入 CTX（companion/context.py）节点、REFL 文本扩行，
-// 且底部新增 QQ->CTX / CTX->CSTORE / CTX->PR 三条边：RC=18 · MMX=38 · FB=105 ·
-// MAIN=22 · FLOW=25 · WT 边=29 · 日报正文边=132)
-expect(currentSymLine["RC"] === 18, "RC -> 行 18 (real symbol recovered)");
+// Step 8 插入 CTX（companion/context.py），Step 9 再插入 RB（companion/reply_batch.py），
+// 并在底部新增 QQ->CTX / CTX->CSTORE / CTX->PR / QQ->RB / RB->QQ 五条边：
+// RC=19 · MMX=39 · FB=106 · MAIN=23 · FLOW=26 · WT 边=30 · 日报正文边=133)
+expect(currentSymLine["RC"] === 19, "RC -> 行 19 (real symbol recovered)");
 expect(currentSymLine["SC"] === 9, "SC -> 行 9");
-expect(currentSymLine["MMX"] === 38, "MMX -> 行 38");
-expect(currentSymLine["FB"] === 105, "FB -> 行 105");
-expect(currentSymLine["MAIN"] === 22, "subgraph MAIN -> 行 22");
-expect(currentSymLine["FLOW"] === 25, "subgraph FLOW -> 行 25");
+expect(currentSymLine["MMX"] === 39, "MMX -> 行 39");
+expect(currentSymLine["FB"] === 106, "FB -> 行 106");
+expect(currentSymLine["MAIN"] === 23, "subgraph MAIN -> 行 23");
+expect(currentSymLine["FLOW"] === 26, "subgraph FLOW -> 行 26");
 
 // edge label lookup by normalized text (what a fresh edge click produces)
 const wtLabel = "route_after_wait: 恒进 process(返回值固定为 'process', 无分支)";
 const hit = currentEdgeLines[normKey(wtLabel)];
-expect(!!hit && hit.line === 29, "WT-->PR edge label resolves to 行 29");
+expect(!!hit && hit.line === 30, "WT-->PR edge label resolves to 行 30");
 const cuLabel = "日报正文";
 const hit2 = currentEdgeLines[normKey(cuLabel)];
-expect(!!hit2 && hit2.line === 132, "dotted label 日报正文 resolves to 行 132");
+expect(!!hit2 && hit2.line === 133, "dotted label 日报正文 resolves to 行 133");
 
 // the 6 legacy reviews: what the fixed export produces
 console.log("\n--- exported prompt (per-review part) ---");
@@ -137,10 +137,10 @@ reviews.forEach(function (r, i) {
   console.log("   意见: " + r.text);
 });
 console.log("\n--- checks ---");
-expect(normSymForExport(reviews[0].sym) === "节点 RC（行 18）", "review1 loc -> 节点 RC（行 18）");
-expect(normSymForExport(reviews[4].sym) === "容器 MAIN（行 22）", "review5 loc -> 容器 MAIN（行 22）");
-expect(srcLineFor("节点 RC（行 18）").startsWith('RC["proactive=定时主动推送'), "review1 源码行 = RC def line");
-expect(srcLineFor("容器 MAIN（行 22）").startsWith("subgraph MAIN["), "review5 源码行 = subgraph MAIN line");
+expect(normSymForExport(reviews[0].sym) === "节点 RC（行 19）", "review1 loc -> 节点 RC（行 19）");
+expect(normSymForExport(reviews[4].sym) === "容器 MAIN（行 23）", "review5 loc -> 容器 MAIN（行 23）");
+expect(srcLineFor("节点 RC（行 19）").startsWith('RC["proactive=定时主动推送'), "review1 源码行 = RC def line");
+expect(srcLineFor("容器 MAIN（行 23）").startsWith("subgraph MAIN["), "review5 源码行 = subgraph MAIN line");
 // legacy junk anchor degrades gracefully (not a crash, no garbage line no)
 expect(typeof normSymForExport(reviews[5].sym) === "string", "review6 legacy edge anchor degrades gracefully");
 

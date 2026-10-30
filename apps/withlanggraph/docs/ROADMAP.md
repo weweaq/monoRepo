@@ -5317,7 +5317,7 @@ Companion 事实源里的 sent 事件。仍**不触发反思**（Step 7 才接�
 - [x] Step 6 已确认发送事件（代码 + 测试 + R5 三处同步）
 - [x] Step 7 Evidence-Bound Reflection（代码 + 测试 + R5 三处同步）
 - [x] Step 8 Self-Memory Prompt 注入（owner C2C 完整 Agent 轮最多注入 3 条反思）
-- [ ] Step 9 Companion 短消息节奏与 E2E（Reply Style Block + 发送层分段）
+- [x] Step 9 Companion 短消息节奏与 E2E（Reply Style Block + 发送层分段）
 
 
 ## 2026-10-30 · Companion 自我记忆 V1 Step 7：Evidence-Bound Reflection
@@ -5500,4 +5500,90 @@ Outreach（Step 2）、Reflection（Step 7）、Self-Memory Context Block（Step
 **待办更新**：
 
 - [x] Step 8 Self-Memory Prompt 注入（代码 + 测试 + R5 三处同步）
-- [ ] Step 9 Companion 短消息节奏与 E2E（§0.6 Reply Style Block + `plan_final_reply()` 分段）
+- [x] Step 9 Companion 短消息节奏与 E2E（§0.6 Reply Style Block + `plan_final_reply()` 分段）
+- [x] Companion V1 完成定义复核（proactive/聊天人格一致、只记录 owner C2C、反思证据链、Self memory 有界注入、1–3 条短消息）
+
+## 2026-10-30 · Companion 自我记忆 V1 Step 9：短消息节奏与 E2E
+
+**背景**：按 V1 计划 §0.6 与 Step 9 规格，给 owner C2C 完整 Agent 轮注入 Reply Style
+Block（仅表达偏好），并在发送层用 `plan_final_reply()` 做语义分段（1–3 条），技术内容
+保持原子；分段投递带每 chat 锁与取消令牌，新消息只丢弃未发送段。operator/scheduler、
+命令回复、trivial 快速回复与工具轨迹都不走该路径。
+
+**已完成**：
+
+- `src/gacore/companion/reply_batch.py`（新增）：
+  - `REPLY_BATCH_VERSION="companion-reply-batch@v1"`、`MAX_REPLY_SEGMENTS=3`、
+    `MAX_SEGMENT_CHARS=200`、`MAX_CHAT_CHARS=400`。
+  - `ReplyBatch(logical_turn_id, segments)`；`plan_final_reply(text, mode)`：
+    `mode != "companion"` 一律 atomic；空文本返回 0 段。
+  - 分段优先级：模型空行段落（2–3 段且每段 ≤200 字）→ 单段时的句末标点兜底（2–3 句、
+    每句 4–200 字、全部以 `。！？!?` 收尾、总长 ≤400）→ 其余 atomic。
+  - 原子判定：fenced code、Markdown 表格、Traceback/`File "...", line N`、Windows/POSIX
+    路径、`$`/`PS>` 命令行、`#` 标题、`【方案N】`（数字或中文序号）、≥3 条列表项、
+    总长 >400 字、超过 3 个段落、或存在未收尾残句。
+  - 不按字符数硬切；不确定时保持原子。
+- `src/gacore/context.py`：
+  - 新增 `REPLY_STYLE_VERSION="companion-reply-style@v1"` 与 §0.6 模板
+    `[即时聊天表达规则]`（1–3 个短小意思、空行表示建议边界、不强制拆分、不逐句复述、
+    技术内容优先完整）。
+  - 仅 `state.companion_context` 非空时注入，位置在记忆背景铁律之后、proposal/checkpoint/
+    time anchor 之前；同时写诊断日志 `reply style block injected`（含 version/actor_id）。
+  - Self memory 注入成功时补 `self memory block injected` 日志（含
+    `companion-self-memory@v1`）。
+- `src/gacore/proactive.py`：新增 `PROACTIVE_PROMPT_VERSION="companion-proactive@v1"`，
+  `_headless_run` 每次执行写 `proactive prompt built` 日志（§0.2.8 Prompt 版本入日志）。
+- `src/gacore/frontends/qq.py`：
+  - `_plan_final_reply(state, final_text)`：`【方案N】` fan-out 优先且每段 atomic；
+    其余按 `state.companion_context` 选择 `companion`/`atomic` 模式。
+  - `_deliver_reply_batch(chat_id, batch, *, is_group, msg_id=None)`：
+    每 chat 一个 `asyncio.Lock`（`_delivery_locks`）保证批次不交错；批次持有
+    `asyncio.Event` 取消令牌（`_delivery_tokens`）；段间 `0.3s` 间隔；令牌置位后只保留
+    已确认段，未发送段丢弃。
+  - `on_message` 在 rollover 之后调用 `_cancel_pending_delivery(chat_id)`：任何新消息
+    （文本/图片）到达即取消旧批次未发送段，新轮立即开始。
+  - `_stream_agent` 最终正文改为 `_plan_final_reply` + `_deliver_reply_batch`，Step 5
+    `SendReceipt` 与 Step 6 `agent.message.sent` 链路保持不变（部分成功仍不记为经历）。
+  - 4500 字 `_SPLIT_LIMIT` 渠道兜底仍在 `_send_markdown` 内，不等于聊天节奏分段。
+- `src/gacore/companion/__init__.py`：导出 `ReplyBatch`、`plan_final_reply`、
+  `REPLY_BATCH_VERSION`、`MAX_REPLY_SEGMENTS`、`REFLECTION_PROMPT_VERSION`。
+- 测试：
+  - `tests/test_companion_delivery.py`（新增，21 条）：版本/上限、空行分段、句末兜底、
+    11 类技术/歧义内容保持原子、atomic 模式、空文本、唯一 turn id、按序投递、取消丢弃
+    未发送段、两批不交错、owner/群聊模式选择、proposal fan-out。
+  - `tests/test_companion_e2e.py`（新增，4 条）：owner 轮 system prompt 同时含 Style
+    Block 与 Self memory 且顺序正确、非 owner 两者皆无、owner 闲聊两段投递、技术回复
+    单条投递。
+  - `tests/test_context.py`：新增 Style Block 注入/日志版本、无 companion_context 不注入。
+  - `tests/test_companion_delivery.py::test_owner_c2c_plans_segments_while_group_stays_atomic`
+    覆盖群聊/非 owner 的 atomic 选择。
+
+**实测验证**：
+
+- `uv run pytest apps/withlanggraph/tests/test_companion_delivery.py
+  apps/withlanggraph/tests/test_companion_e2e.py apps/withlanggraph/tests/test_context.py -q`
+  → **64 passed**
+- `uv run --all-packages pytest -q`（全仓）→ **2018 passed, 4 skipped**（143.81s）
+- `uv run ruff check apps packages tests` → All checks passed
+- `node apps/mermaid-viewer/tests/check_prompt_logic.js` → ALL PASS
+
+**偏差说明**：
+
+- Step 9 未接入真实 QQ 网络做 20 轮人工 transcript；计划中的「固定 20 轮 fixture + 人工
+  记录」改为可自动化的等价验收：分段规则单测 + 投递锁/取消单测 + owner/非 owner prompt
+  与投递 E2E。真实渠道表现仍需后续灰度观察。
+- 段间间隔取 `0.3s`（计划只写「短暂、带上限」，未给具体值）；常数集中在 `qq.py`
+  `_SEGMENT_INTERVAL_SECONDS`，需要调整时改一处。
+- 「新消息取消旧批次」通过 `on_message` 的取消令牌实现；旧轮若正处于 `send_text`
+  网络等待中，由既有任务取消机制打断，已确认段仍是事实，未确认段不会进入
+  `agent.message.sent`（与 Step 5/6 部分成功语义一致）。
+- 技术判定为保守启发式（代码块/表格/路径/栈/命令行/标题/方案/≥3 列表/超长/残句），
+  宁可少拆不多拆；未引入 LLM 分类器，避免额外调用与不确定性。
+- 现有 trivial 快速回复与命令回复仍直接 `send_text`，不经过 batch，符合计划「不得放到
+  command/trivial/tool trace」。
+
+**待办更新**：
+
+- [x] Step 9 Companion 短消息节奏与 E2E（代码 + 测试 + R5 三处同步）
+- [x] Companion V1 全部 Step（1–9）落地完成
+- [ ] 真实 QQ 灰度：观察 owner C2C 分段节奏、插话取消与技术内容原子性

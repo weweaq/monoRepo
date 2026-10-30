@@ -970,6 +970,36 @@ flowchart LR
   `{"actor_id": actor_id, "principal_id": "owner"}`；群聊/非 owner 恒 `None`，不从
   `active_card` 反推 owner。trivial 快速回复不进 graph，因此不读取 self-memory。
 
+### 9.2.8 Companion Reply Style 与短消息投递（2026-10-30，Step 9）
+
+- `context.py`：`REPLY_STYLE_VERSION="companion-reply-style@v1"`；仅
+  `state.companion_context` 非空时注入 §0.6 `[即时聊天表达规则]`（1–3 个短小意思、空行
+  表示建议边界、不强制拆分、不逐句复述、技术内容优先完整）。位置在记忆背景铁律之后、
+  proposal/checkpoint/time anchor 之前；写 `reply style block injected` 诊断日志。
+- `companion/reply_batch.py`（新增）：
+  - `REPLY_BATCH_VERSION="companion-reply-batch@v1"`、`MAX_REPLY_SEGMENTS=3`、
+    `MAX_SEGMENT_CHARS=200`、`MAX_CHAT_CHARS=400`；
+    `ReplyBatch(logical_turn_id, segments)`。
+  - `plan_final_reply(text, mode)`：`mode!="companion"` 恒 atomic；空行段落（2–3 段、
+    每段 ≤200 字）优先，单段时按句末标点保守兜底（2–3 句、每句 4–200 字、全部以
+    `。！？!?` 收尾、总长 ≤400），其余 atomic。
+  - 原子判定：fenced code、Markdown 表格、`Traceback`/`File "...", line N`、
+    Windows/POSIX 路径、`$`/`PS>` 命令行、`#` 标题、`【方案N】`、≥3 条列表项、总长
+    >400、>3 段落、未收尾残句。不按字符数硬切。
+- `frontends/qq.py`：
+  - `_plan_final_reply(state, final_text)`：`【方案N】` fan-out 优先（每段 atomic），
+    否则按 `companion_context` 选 `companion`/`atomic`。
+  - `_deliver_reply_batch()`：每 chat 一个 `asyncio.Lock` 保证批次不交错；批次持有
+    `asyncio.Event` 取消令牌；段间 `_SEGMENT_INTERVAL_SECONDS=0.3s`；令牌置位后已确认段
+    保留、未发送段丢弃。
+  - `on_message` 在 `_maybe_rollover` 后调用 `_cancel_pending_delivery(chat_id)`：任何新
+    消息到达即取消旧批次未发送段。
+  - `_stream_agent` 最终正文 → `_plan_final_reply` → `_deliver_reply_batch` → 既有
+    `SendReceipt`/`agent.message.sent` 链路；4500 字 `_SPLIT_LIMIT` 渠道兜底仍在
+    `_send_markdown`，不等于聊天节奏分段。
+- `proactive.py`：`PROACTIVE_PROMPT_VERSION="companion-proactive@v1"`，`_headless_run`
+  写 `proactive prompt built` 日志。
+
 ### 9.3 测试
 
 `tests/test_character.py`(7)、`tests/test_character_system_prompt.py`(4)、`tests/test_qq.py` `/角色` 相关 3 条、
@@ -1004,6 +1034,12 @@ canonical JSON、最多 3 条、1,000 字预算、空白跳过、边界字符转
 checkpoint resume、`tests/test_context.py` 的角色卡→Self memory→daily 顺序/无 context 不构造/
 空块不注入/store 失败 fail-open/真实反思进入 prompt、`tests/test_qq.py` 的 owner C2C 写入与
 群聊/非 owner 不写入：Step 8 验收 89 passed（四个测试文件合计）。
+`tests/test_companion_delivery.py`(21)：版本/上限、空行分段、句末兜底、11 类技术/歧义内容
+保持原子、atomic 模式、空文本、唯一 turn id、按序投递、取消丢弃未发送段、两批不交错、
+owner/群聊模式选择、proposal fan-out；`tests/test_companion_e2e.py`(4)：owner prompt 同时含
+Style Block 与 Self memory 且顺序正确、非 owner 两者皆无、owner 闲聊两段投递、技术回复单条；
+`tests/test_context.py` 的 Style Block 注入/版本日志/无 context 不注入：Step 9 验收 64 passed
+（三个测试文件合计）。
 
 ### 9.4 主动推送（openid 落库 + qq_push）
 
