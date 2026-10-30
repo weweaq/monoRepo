@@ -288,3 +288,14 @@ flowchart TD
     CMT -. "active commitment → propose_goal 的输入之一" .-> GOAL
     GOAL -. "目标/结果事件 → 后续主动决策与关系可靠性信号" .-> RELSTATE
     class GOAL state
+
+    %% V2-Step 6：活动/偏好/反馈与受控主动循环（migration v7，2026-10-30）
+    ACT[("companion/activity.py 有界活动<br/>day_phase: quiet/morning/daytime/evening<br/>availability: free/chatting/working/cooldown/resting<br/>唯一 active/paused（部分唯一索引）<br/>预算: llm_calls/输入输出token/read_actions/deadline/daily_cost<br/>超预算 → failed + budget_exhausted 原因事件<br/>owner 消息可取消(cancel_on_user_message)")]
+    OUTREACH[("companion/outreach.py 受控主动循环<br/>候选: open_thread / commitment_due / concern / goal_permission<br/>gate: 静默时段/忙碌/日配额/间隔/no_response 衰减<br/>Decision LLM 仅在候选存活时调用<br/>动作: STAY_SILENT / TELL_ONLY / ASK_PERMISSION / ACT_READ_ONLY<br/>代码最终否决 · ASK_PERMISSION 只发 token 不执行<br/>反馈: sent_event → reply_event 关联(positive/negative/boundary/no_response)")]
+    ACT -. "add_activity/set_activity_status/update_activity_spend" .-> CSTORE
+    OUTREACH -. "record_outreach/set_outreach_reply/preferences" .-> CSTORE
+    OUT -. "候选来自 open threads / commitments / mood / goals" .-> OUTREACH
+    GOAL -. "ACT_READ_ONLY 只对 approved 且工具在白名单的 goal" .-> OUTREACH
+    OUTREACH -. "TELL_ONLY 交给既有 proactive 短消息+receipt 通道" .-> QQ
+    class ACT state
+    class OUTREACH state

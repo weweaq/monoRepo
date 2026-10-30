@@ -1195,6 +1195,56 @@ null/越权/超长/超期/模糊期限拒绝、白名单常量、propose 的 run
 propose→approve→start→finish 全链路事件、失败也带真实 result event、第二个 in_progress 被拒、
 终态不可重启、finish 必须 in_progress、取消与终态保护、goal_view、prompt 工具与 schema 守卫。
 
+### 9.2.14 Companion V2-Step 6 活动/偏好/反馈与受控主动循环（migration v7，2026-10-30）
+
+> 计划：`docs/companion-self-memory-v2-plan.md` V2-Step 6。复用已有的静默时段/热聊/日配额/
+> jitter/回复率/owner 范围，只新增"派生状态 + 有界活动 + 受控决策"。
+
+**三张新表（v7）**：
+
+| 表 | 用途 | 关键约束 |
+|---|---|---|
+| `companion_activity` | 一次有界工作（可暂停/恢复） | `ux_one_running_activity`（active/paused 唯一）；`budget_json` / `spent_json`；`source_goal_id`、`last_result_event_id` FK；终态不可再改 |
+| `companion_self_preference` | 角色自己的话题偏好（可衰减/反转） | `weight` −1..1、`novelty`/`fatigue` 0..1、`source_event_ids_json`、`expires_at_ms`；与用户偏好分离，不写 persona |
+| `companion_outreach_feedback` | 一次触达的结局 | `sent_event_id` FK 必填、`reply_event_id` 可空、`kind` 五值、`response_delay_ms`；`ux_companion_outreach_sent` 保证一次触达一行 |
+
+v7 事件词表再扩 `activity.started/paused/resumed/completed/failed/cancelled`。
+
+**派生状态（纯函数，`activity.py`）**：
+`derive_day_phase()` → quiet（23:00–07:00）/ morning / daytime / evening；
+`derive_availability()` → working（有活动）/ chatting（5 分钟内有 owner 消息）/
+cooldown（距上次触达 < 间隔）/ resting（quiet）/ free。
+
+**有界活动**：`ActivityBudget(max_llm_calls, max_input_tokens, max_output_tokens,
+max_read_actions, deadline_ms, cancel_on_user_message, daily_cost_limit)`；
+`spend()` 每步记账，"允许用到上限、超一步即止"（`>` 语义），超预算立刻
+`failed(reason=budget_exhausted:<cap>)` 并写 `activity.failed` 事件——禁止静默加预算重试。
+owner 新消息可在 `cancel_on_user_message=True` 时把活动取消为 `owner_message`。
+
+**受控主动循环（`outreach.py`）**：
+
+1. **候选**（确定性，最多 3 条）：open thread（3）> 到期承诺（2）> 担心情绪（1）> 待批准目标（0）。
+2. **gate**（纯函数，0 次模型）：静默时段 → `QUIET_HOURS`；chatting/working → `USER_BUSY`；
+   日配额 → `POLICY_BLOCKED`；间隔不足 → `TOO_REPETITIVE`；连续无回复 → `LOW_VALUE`。
+3. **Decision LLM**：**只有候选通过 gate 才调用**；无候选时 `llm_calls=0`。
+4. **代码最终否决**：动作不在四值内或模型报错 → `STAY_SILENT` + `SYSTEM_FAILURE`，且**不写任何
+   事件**（系统失败不得伪装成"角色不想说"）；`ACT_READ_ONLY` 仅对 `approved/in_progress`
+   且工具 ⊆ 白名单的目标生效，否则降级为 `ASK_PERMISSION`。
+5. **ASK_PERMISSION 只发 token 不执行**：`{goal_id, action, exact_arguments_hash, expires_at_ms,
+   approved_by: None, status: pending}`，目标状态不变。
+6. **反馈**：`record_sent()` 建未答行；`match_reply()` 在 15h 窗口内把 owner 消息关联到最近一条
+   未答触达，`classify_reply()` 确定性给 positive/negative/boundary；`outreach_multiplier()`
+   按连续 no_response 以 0.5 衰减（下限 0.25），**只降低角色的主动意愿，不写用户负面态度**。
+
+**边界**：本步交付循环本身（含可注入的 sender seam），**不替换**现有 08:30 proactive job；
+统一接线与端到端评估放 Step 7。
+
+**测试**：`tests/test_companion_activity.py`(17) + `tests/test_companion_outreach.py`(23)：
+v7 迁移与唯一索引、单活动约束、暂停/恢复/完成/失败/取消与事件、预算四类上限与
+"超一步即止"、owner 消息取消、day_phase/availability、无候选 0 次 LLM、五类 gate 拒绝理由、
+TELL_ONLY 截断、STAY_SILENT 不发、SYSTEM_FAILURE 不写叙事、未批准目标降级为征询、
+只读执行与工具越权拒绝、token 绑定参数、回复关联/边界分类/窗口外不关联、no_response 衰减。
+
 ### 9.3 测试
 
 `tests/test_character.py`(7)、`tests/test_character_system_prompt.py`(4)、`tests/test_qq.py` `/角色` 相关 3 条、

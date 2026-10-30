@@ -6088,3 +6088,46 @@ V1 稳定性缺口里，1/2/3/4/5/6/7 也在同一批未提交改动里。
 - [x] V2-Step 5 单一只读目标（migration v6）
 - [ ] V2-Step 6：活动/偏好/反馈与受控主动循环（migration v7）
 - [ ] V2-Step 7：生命周期、统一信任边界与端到端评估（migration v8）
+
+## 2026-10-30 · Companion V2-Step 6：活动/偏好/反馈与受控主动循环（migration v7）
+
+**背景**：按 V2 计划 Step 6 把"能不能主动联系、能不能自己动手"收进一个有闸门、有预算、
+有证据的循环里。核心原则：**代码最终否决**，系统失败不得伪装成角色情绪。
+
+**已完成**：
+
+- `companion/store.py`：`SCHEMA_VERSION=7` + `MIGRATION_V7`（三表 + 两个唯一索引）；
+  事件词表扩 `activity.*`；新增 `Activity` / `SelfPreference` / `OutreachFeedback` 与
+  `activities/get_activity/running_activity/add_activity/set_activity_status/
+  update_activity_spend`、`preferences/save_preference`、`record_outreach/outreach_rows/
+  set_outreach_reply`。
+- `companion/activity.py`（新增）：`ActivityBudget` / `ActivitySpend` / `check_budget`、
+  `derive_day_phase` / `derive_availability`、`start/pause/resume/complete/fail/cancel`、
+  `spend()`（超预算即 failed 并写原因事件）、`cancel_on_owner_message()`。
+- `companion/outreach.py`（新增）：`collect_candidates`（4 类确定性候选）、
+  `evaluate_gate`（5 类拒绝理由）、`decide`（有候选才调模型；代码否决；ASK_PERMISSION 只发
+  token 不执行）、`execute_read_only_goal`（工具必须同时属于白名单与该 goal）、
+  `record_sent` / `match_reply` / `classify_reply` / `outreach_multiplier` / `permission_token`。
+- `tests/test_companion_activity.py`(17) + `tests/test_companion_outreach.py`(23)。
+- R5 三处同步：本文件 + tech §9.2.14 + 架构图 `ACT` / `OUTREACH` 两个节点与五条边。
+
+**实测验证**：
+
+- `uv run pytest apps/withlanggraph/tests/test_companion_activity.py
+  apps/withlanggraph/tests/test_companion_outreach.py -q` → **40 passed**
+- 全仓 → **2205 passed, 4 skipped**；ruff 全绿；mermaid 校验 ALL PASS
+
+**偏差说明**：
+
+- 本步**不替换**现有 08:30 的 proactive job：新循环先作为库 + 可注入 sender seam 存在，
+  统一接线（谁来 tick、谁发送）放 Step 7，避免在没有端到端评估前改变线上推送节奏。
+- 偏好表已建但本步只提供 `save_preference`/`preferences` 读写与衰减字段，
+  "从事件自动学习偏好"留给后续（Step 7 之后的迭代），避免用规则臆造喜好。
+- `expire_unanswered()` 只统计窗口外未答数量（行本身在 `record_outreach` 时就是
+  `no_response`），没有额外改写用户状态。
+
+**待办更新**：
+
+- [x] V2-Step 6 活动/偏好/反馈与受控主动循环（migration v7）
+- [ ] V2-Step 7：生命周期、统一信任边界与端到端评估（migration v8）
+- [ ] 把受控主动循环接进 scheduler（Step 7）
