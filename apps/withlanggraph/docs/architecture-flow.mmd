@@ -281,3 +281,10 @@ flowchart TD
     QQ -. "发送事件落地后后台扫描（不阻塞回复）" .-> CMT
     CMT -. "Stage4 的承诺兑现率后续进关系/主动决策" .-> RELSTATE
     class CMT state
+
+    %% V2-Step 5：单一只读目标（migration v6，2026-10-30）
+    GOAL[("companion/goal.py 单一只读目标<br/>propose → validate(工具白名单/≤120字/≤7天)<br/>proposed → approved → in_progress<br/>→ succeeded / failed / cancelled<br/>唯一 in_progress 由部分唯一索引保证<br/>每次转移写真实事件(goal.started / read_action.* / goal.*)<br/>终态不可再改 → 重启不重跑")]
+    GOAL -. "add_goal / get_goal / set_goal_status / active_goal" .-> CSTORE
+    CMT -. "active commitment → propose_goal 的输入之一" .-> GOAL
+    GOAL -. "目标/结果事件 → 后续主动决策与关系可靠性信号" .-> RELSTATE
+    class GOAL state

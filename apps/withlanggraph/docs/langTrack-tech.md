@@ -1157,6 +1157,44 @@ source 必须同 actor、未知 label 拒绝、单行 ≤100 字、Prompt 含/�
 只分析确认发送、quote 精确子串、confidence 三档、同发送不重复、source 必须同 actor、
 日期解析六种形态与模糊词无期限、sweep 两段状态、完成/取消/终态保护、view、prompt schema 守卫。
 
+### 9.2.13 Companion V2-Step 5 单一只读目标（migration v6，2026-10-30）
+
+> 计划：`docs/companion-self-memory-v2-plan.md` §4.5 / §5.3 / V2-Step 5。
+> 目标是角色唯一能"自己动手"的地方，所以规则最紧：**一次只能有一个进行中的目标**，
+> 且只能用只读工具，每一次状态转移都必须写真实事件。
+
+**数据模型**：`companion_goal`（`text` / 六态 `status` / `allowed_tools_json` /
+`deadline_ms NOT NULL` / `commitment_id` FK / `result_event_id` FK）+
+`ux_one_active_goal`（`WHERE status='in_progress'` 的部分唯一索引，并发下第二个 in_progress
+直接被库拒绝）。v6 同时把事件词表扩到 `goal.started` / `read_action.succeeded|failed` /
+`goal.succeeded|failed|cancelled` / `commitment.*`。
+
+**只读白名单（`ALLOWED_TOOLS`）**：`get_time` / `read_daily` / `search_daily` /
+`last_seen` / `bili_history` / `browser_history` / `web_scan` / `web_execute_js` / `ncm_me`。
+`code_run` / `file_write` / `send_email` / `qq_push` 等一律不在其中——模型提出即整条拒绝。
+
+**流程**：
+
+1. `propose_goal(source_text)`：由一条 active commitment 或一条有证据反思驱动，模型只输出
+   `{goal:{text, allowed_tools, deadline_text, success_criteria}}` 或 `{goal:null}`。
+2. `validate_proposal()`：文本 ≤120 字、工具非空且 ⊆ 白名单、`deadline_text` 由
+   `commitment.parse_due_ms` 解析（必须是可解析且 ≤7 天内），任何一项不满足即 `None`。
+3. `create_goal()` → `proposed`；`approve_goal()` → `approved`（主人/人明确同意）；
+   `start_goal()` → `in_progress` 并写 `goal.started`。
+4. `finish_goal(succeeded=...)`：先写 `read_action.succeeded|failed` 拿到真实
+   `result_event_id`，再把目标切成 succeeded/failed 并写 `goal.*` 事件。
+5. `cancel_goal()`：任何未终态目标可取消，写 `goal.cancelled`。
+6. 终态（succeeded/failed/cancelled）在 store 层拒绝再改，`active_goal()` 因此返回 `None`
+   —— 进程重启后不会重跑已完成的目标。
+
+**边界**：Step 5 只提供能力与状态机，**不接线执行器**；真正的"决定是否行动/只读执行"
+属于 Step 6 的受控主动循环（code 拥有最终否决权）。
+
+**测试**：`tests/test_companion_goal.py`（20 例）覆盖 v6 迁移与部分唯一索引、事件词表、
+null/越权/超长/超期/模糊期限拒绝、白名单常量、propose 的 runner seam、
+propose→approve→start→finish 全链路事件、失败也带真实 result event、第二个 in_progress 被拒、
+终态不可重启、finish 必须 in_progress、取消与终态保护、goal_view、prompt 工具与 schema 守卫。
+
 ### 9.3 测试
 
 `tests/test_character.py`(7)、`tests/test_character_system_prompt.py`(4)、`tests/test_qq.py` `/角色` 相关 3 条、

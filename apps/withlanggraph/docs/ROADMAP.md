@@ -6049,3 +6049,42 @@ V1 稳定性缺口里，1/2/3/4/5/6/7 也在同一批未提交改动里。
 
 - [x] V2-Step 4 承诺（migration v5）
 - [ ] V2-Step 5：单一只读目标（migration v6）
+
+## 2026-10-30 · Companion V2-Step 5：单一只读目标（migration v6）
+
+**背景**：按 V2 计划 Step 5 给角色"唯一能自己动手"的能力，但把边界钉死：一次只能有一个
+进行中的目标、只能用只读工具、每次状态转移都写真实事件。
+
+**已完成**：
+
+- `companion/store.py`：`SCHEMA_VERSION=6` + `MIGRATION_V6`（`companion_goal`、
+  `ux_one_active_goal` 部分唯一索引）；事件词表扩到 goal/read_action/commitment 系列；
+  新增 `Goal` 与 `goals()` / `get_goal()` / `active_goal()` / `add_goal()` /
+  `set_goal_status()`（终态拒绝再改；第二个 in_progress 由索引拒绝并翻译成
+  `CompanionStoreError`）。
+- `companion/goal.py`（新增）：`ALLOWED_TOOLS`（9 个只读工具）、
+  `propose_goal()`（模型只提议）、`validate_proposal()`（文本 ≤120 字、工具 ⊆ 白名单、
+  deadline 由代码解析且 ≤7 天）、`create_goal/approve_goal/start_goal/finish_goal/
+  cancel_goal`（每次转移写 `goal.*` / `read_action.*` 事件）、`goal_view()`。
+- `tests/test_companion_goal.py`（新增 20 例）。
+- R5 三处同步：本文件 + tech §9.2.13 + 架构图 `GOAL` 节点与三条边。
+
+**实测验证**：
+
+- `uv run pytest apps/withlanggraph/tests/test_companion_goal.py -q` → **20 passed**
+- 全仓 → **2165 passed, 4 skipped**；ruff 全绿；mermaid 校验 ALL PASS
+
+**偏差说明**：
+
+- Step 5 **不接线执行器**：目标只有状态机与事件，真正的"决定是否行动 + 只读执行"在 Step 6。
+  这样避免在没有决策闸门时让模型提前拿到执行入口。
+- `propose_goal` 的输入（commitment / reflection）由调用方挑选，本步不自动触发提议；
+  自动提议属于 Step 6 的候选生成。
+- 「成功」目前由 `finish_goal` 的调用方判定；等 Step 6 接入真实只读执行后，成功与否
+  以工具真实返回为准。
+
+**待办更新**：
+
+- [x] V2-Step 5 单一只读目标（migration v6）
+- [ ] V2-Step 6：活动/偏好/反馈与受控主动循环（migration v7）
+- [ ] V2-Step 7：生命周期、统一信任边界与端到端评估（migration v8）
