@@ -1123,6 +1123,40 @@ mood 与 relationship / persona 完全隔离，不写任何关系字段。
 角色发送不改 mood、到期清行与不注入、静默不变负面、mood 不改关系状态、
 source 必须同 actor、未知 label 拒绝、单行 ≤100 字、Prompt 含/不含 mood 行。
 
+### 9.2.12 Companion V2-Step 4 承诺（migration v5，2026-10-30）
+
+> 计划：`docs/companion-self-memory-v2-plan.md` §4.4 / §5.2 / V2-Step 4。
+> 只有"角色真的说过"才算承诺，所以输入严格限定为 `agent.message.sent` /
+> `proactive.message.sent` 事件。
+
+**数据模型**：`companion_commitment`（`quote` / `action` / `due_at_ms` /
+`success_criteria` / 六态 `status` / `result_event_id` FK），
+`ux_companion_commitment_key` 唯一索引建在 `(actor_id, principal_id, source_event_id, quote)`
+——这就是"确定性 key"，同一条发送重复抽取不会产生第二条承诺。
+
+**抽取（`companion/commitment.py`）**：
+
+1. **确定性 prefilter**：发送文本不含 `明天/后天/今晚/周末/下周/一会儿/稍后/等会/马上/回头/改天/过两天`
+   就直接跳过，连模型都不调（普通寒暄/回答不花这次钱）。
+2. 模型只输出 `{is_commitment, quote, action, due_text, success_criteria, confidence}`；
+   代码校验：`quote` 必须是该次发送文本的**精确子串**（不精确即丢弃）、action/criteria 非空、
+   confidence 0–1。
+3. **日期由代码解析**（`parse_due_ms`）：`YYYY-MM-DD` / `N天后` / 明天 / 后天 / 今晚 / 周末 /
+   下周 / 一会儿·稍后·等会·马上（+2h）；`回头/改天/以后` 一律无期限，绝不臆造日期。
+4. **状态**：confidence ≥0.85 → `active`；0.60–0.85 → `proposed`；<0.60 不入库。
+
+**生命周期**：`sweep_overdue()`（每天 00:10 与日记 job 同槽执行）把过期 `active` → `overdue`，
+再过 24h 宽限 → `failed`；`complete_commitment()` / `cancel_commitment()` 是人工/后续 Step 的
+收口入口，终态不可再改（store 层拒绝）。`commitment_view()` 提供人工查看/导出。
+
+**触发**：`qq.py::_record_companion_sent` 与 `proactive.py::_record_companion_sent` 在事件
+`inserted=True` 后调用 `schedule_commitment_extraction()`——单 worker 线程池、后台执行，
+回复路径不等待模型。
+
+**测试**：`tests/test_companion_commitment.py`（24 例）覆盖 v5 迁移与唯一键、prefilter 不调模型、
+只分析确认发送、quote 精确子串、confidence 三档、同发送不重复、source 必须同 actor、
+日期解析六种形态与模糊词无期限、sweep 两段状态、完成/取消/终态保护、view、prompt schema 守卫。
+
 ### 9.3 测试
 
 `tests/test_character.py`(7)、`tests/test_character_system_prompt.py`(4)、`tests/test_qq.py` `/角色` 相关 3 条、

@@ -6005,3 +6005,47 @@ V1 稳定性缺口里，1/2/3/4/5/6/7 也在同一批未提交改动里。
 
 - [x] V2-Step 3 临时 Mood（migration v4）
 - [ ] V2-Step 4：承诺（migration v5）
+
+## 2026-10-30 · Companion V2-Step 4：承诺（migration v5）
+
+**背景**：按 V2 计划 Step 4 落地"角色答应过的事"的事实源。承诺只能从**确认发送的文本**里抽，
+且报价（quote）必须是原文精确子串——否则宁可不记。
+
+**已完成**：
+
+- `companion/store.py`：`SCHEMA_VERSION=5` + `MIGRATION_V5`（`companion_commitment`
+  六态 CHECK、`result_event_id` FK、`ux_companion_commitment_key` 唯一索引、
+  status 索引）；`Commitment` 数据类与
+  `commitments()` / `add_commitment()` / `set_commitment_status()` / `commitments_for_sweep()`；
+  终态（succeeded/failed/cancelled）拒绝再改。
+- `companion/commitment.py`（新增）：
+  - `looks_like_promise()` 确定性 prefilter（无时间词不调模型）；
+  - `extract_commitment()` 无工具单次调用 + `_validate()`（quote 精确子串、confidence 0–1）；
+  - `parse_due_ms()` 代码解析日期（YYYY-MM-DD / N天后 / 明天 / 后天 / 今晚 / 周末 / 下周 /
+    一会儿类 +2h；回头·改天·以后 → 无期限）；
+  - `record_commitment()`（≥0.85 active，0.60–0.85 proposed，<0.60 不存；
+    同 `(source_event, quote)` 幂等）；`sweep_overdue()`（+24h 宽限后 failed）；
+    `complete_commitment()` / `cancel_commitment()` / `commitment_view()`；
+  - `schedule_commitment_extraction()`：单 worker 后台线程，回复路径不等模型。
+- 接线：`qq.py` 的 agent 发送、`proactive.py` 的主动发送各一处；`scheduler.run_journal_job`
+  在同一 00:10 槽里跑 `sweep_overdue()`。
+- `tests/test_companion_commitment.py`（新增 24 例）。
+- R5 三处同步：本文件 + tech §9.2.12 + 架构图 `CMT` 节点与三条边。
+
+**实测验证**：
+
+- `uv run pytest apps/withlanggraph/tests/test_companion_commitment.py -q` → **24 passed**
+- 全仓 → **2145 passed, 4 skipped**；ruff 全绿；mermaid 校验 ALL PASS
+
+**偏差说明**：
+
+- prefilter 词表去掉了过宽的"今天"/"周"：否则几乎每条消息都会触发一次抽取调用。
+  代价是"今天下午"这类承诺会漏抽，等真实语料再补更精确的形态。
+- `proposed`（0.60–0.85）目前没有向用户确认的入口，只作为待观察记录；确认/晋升在 Step 6 的
+  受控主动决策里做。
+- 「承诺成功」需要真实结果事件（Step 5 的只读目标），本步只提供 `complete_commitment()` 接口。
+
+**待办更新**：
+
+- [x] V2-Step 4 承诺（migration v5）
+- [ ] V2-Step 5：单一只读目标（migration v6）

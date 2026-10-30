@@ -274,3 +274,10 @@ flowchart TD
     QQ -. "每个 confirmed 事件后<br/>_refresh_companion_state_quietly(关系 → mood)" .-> MOODSTATE
     MOODSTATE -. "build_mood_line 单行 ≤100 字<br/>仅未过期时进 system prompt" .-> CTX
     class MOODSTATE state
+
+    %% V2-Step 4：承诺（migration v5，2026-10-30）
+    CMT[("companion/commitment.py record_commitment<br/>只分析 confirmed 发送（agent/proactive）<br/>确定性 prefilter → 无时间词不进模型<br/>quote 必须精确子串 · due 由代码解析<br/>confidence≥0.85 active / 0.60-0.85 proposed<br/>deterministic key=(source_event, quote)<br/>sweep: active→overdue(过期)→failed(+24h)")]
+    CMT -. "add_commitment / commitments / set_commitment_status / commitments_for_sweep" .-> CSTORE
+    QQ -. "发送事件落地后后台扫描（不阻塞回复）" .-> CMT
+    CMT -. "Stage4 的承诺兑现率后续进关系/主动决策" .-> RELSTATE
+    class CMT state
