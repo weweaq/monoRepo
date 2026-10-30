@@ -5734,3 +5734,54 @@ Block（仅表达偏好），并在发送层用 `plan_final_reply()` 做语义�
 
 - [x] 删除「思考中…」占位气泡（所有轮次）
 - [ ] 视观感决定是否需要延迟提示 / 正在输入状态（当前不做）
+
+## 2026-10-30 · Companion V2-Step 1：两本日记（migration v2）
+
+**背景**：`docs/companion-self-memory-v2-plan.md` V2-Step 1 要求「给主人的信」与「写给自己」两本日记
+都从真实 event/reflection 投影、可回溯 source、不自动发送、private 不直接进 Prompt。V1 只有四表
+（`user_version=1`）且 `apply_migration` 一次成型，必须先把它改成逐版本升级，再加日记三表。
+
+**已完成**：
+
+- `src/gacore/companion/store.py`：
+  - `SCHEMA_VERSION=2`、`MIGRATIONS={1: MIGRATION_V1, 2: MIGRATION_V2}`；
+    `apply_migration(conn, statements=None, *, target_version=None)` 逐版本一个 `BEGIN IMMEDIATE`，
+    每级成功才写 `PRAGMA user_version`（v1 库原地升 v2，事件零丢失）。
+  - v2 三表 `companion_journal` / `companion_journal_event_source` /
+    `companion_journal_reflection_source` + `idx_companion_journal_actor_day`、
+    `idx_companion_event_actor_occurred`。
+  - `day_key` / `day_bounds_ms`（东八区、半开区间）；`events_for_day` / `reflections_for_day` /
+    `journals_for_day` / `journal_sources` / `save_journals` / `mark_journal_stale` /
+    `append_reflection`。source 必须同 actor 且同一天，否则整批 `SourceOwnershipError`；
+    已存在非 stale 日记不改写（同日幂等）。
+- `src/gacore/companion/journal.py`（新增）：`run_journal` / `validate_journal_payload` /
+  `generate_day_journals` / `generate_due_journals` / `export_day_journals`；0 事件或无角色发言
+  → `no_events`（0 次 LLM），已有日记 → `exists`（0 次 LLM）；private 的 `reflection` 字段最多
+  产一条反思，需 ≥2 个当天事件 source 且再过 V1 `validate_reflections`，写库走
+  `append_reflection`（不推进 V1 反思游标）。
+- `src/gacore/companion/reflection.py`：抽出 `is_unsafe_statement`（反思与日记共用写入口径）。
+- 架构图 `JRN` 节点 + 三条边、`CSTORE` 节点更新；tech 新增 §9.2.9。
+
+**实测验证**：
+
+- `uv run pytest tests/test_companion_journal.py tests/test_companion_store.py -q` → **48 passed**
+  （迁移 v1→v2 保事件、source 跨 actor/跨天拒绝、0 事件 0 次 LLM、同日幂等、stale 重写、
+  private→reflection 且游标不动、private 正文不进 Self memory）。
+- `uv run ruff check src/gacore/companion tests/test_companion_journal.py tests/test_companion_store.py`
+  → All checks passed。
+
+**偏差说明**：
+
+- 计划 §5.1 的日记输出示例只有 `{to_owner, private}`；为了让 private「只能通过校验后的
+  reflection 间接影响后续」且不泄露日记原文，private 多一个可选 `reflection` 字段（statement +
+  confidence），由同一次调用产出、代码校验 source。多花 0 次 LLM。
+- `generate_due_journals` 目前只是库 API，**未接后台线程**：V2-Step 6 的受控主动循环负责调度，
+  Step 1 不抢跑；因此当前不会自动产生日记数据。
+- 会话开始时工作区已有未提交的 V1 stabilization 改动（qq.py / coordinator.py / proactive.py 等），
+  本次只提交 Step 1 相关文件，不碰那些改动。
+
+**待办更新**：
+
+- [x] V2-Step 1 数据层 + 生成链路（migration v2、两本日记、private→reflection）
+- [ ] V2-Step 6 接线：`generate_due_journals` 进后台循环（次日首次空闲写昨天）
+- [ ] V2-Step 2：relationship / open_thread（migration v3）

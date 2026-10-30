@@ -1001,6 +1001,46 @@ flowchart LR
 - `proactive.py`：`PROACTIVE_PROMPT_VERSION="companion-proactive@v1"`，`_headless_run`
   写 `proactive prompt built` 日志。
 
+### 9.2.9 Companion V2-Step 1 两本日记（migration v2，2026-10-30）
+
+- `companion/store.py`：
+  - `SCHEMA_VERSION=2`；`MIGRATIONS={1: MIGRATION_V1, 2: MIGRATION_V2}`，
+    `apply_migration(conn, statements=None, *, target_version=None)` 按版本逐级执行，
+    每级一个 `BEGIN IMMEDIATE`，成功后写 `PRAGMA user_version`。`statements` 覆盖参数
+    仍供回滚测试使用。
+  - v2 新增三表：`companion_journal`（`UNIQUE(actor_id, principal_id, day, visibility)`，
+    `visibility IN ('to_owner','private')`，`status IN ('draft','final','stale')`）、
+    `companion_journal_event_source`、`companion_journal_reflection_source`；另加索引
+    `idx_companion_journal_actor_day`、`idx_companion_event_actor_occurred`。
+  - `JournalRecord` / `JournalDraft(visibility, body, source_event_ids, source_reflection_ids)`。
+  - 日界：`day_key(ms)` / `day_bounds_ms(day)` 固定东八区，半开区间。
+  - 查询：`events_for_day` / `reflections_for_day`（`created_at` 文本日界）/
+    `journals_for_day` / `journal_sources`。
+  - `save_journals(..., replace_stale=False)`：单事务写日记+source；每个 source 必须
+    属于同 `(actor, principal)` 且落在当天，否则 `SourceOwnershipError` 整批拒绝；
+    已存在且非 stale 的行不动（同日重复触发幂等）；`replace_stale=True` 时才改写 stale 行。
+  - `mark_journal_stale(...)`、`append_reflection(...)`（写 reflection+source，
+    **不推进** `companion_cursor.last_reflected_seq`，日记投影不得干扰 V1 反思批次）。
+- `companion/journal.py`（新增）：
+  - `JOURNAL_PROMPT_VERSION="companion-journal@v1"`、
+    `PRIVATE_REFLECTION_PROMPT_VERSION="companion-journal-private@v1"`。
+  - `run_journal(events, reflections, model=)`：System=角色日记整理器；Human 为
+    `{events, reflections}` JSON；输出 `{to_owner, private}`，每本 `body` ≤600/≤900 字、
+    必须引用 source，`is_unsafe_statement` 拒绝密钥/路径/命令式文本。
+  - `validate_journal_payload(data, allowed_event_ids, allowed_reflection_ids)`：
+    `JournalPayload(drafts, proposals)`；两本都为 null 判无效。
+  - `generate_day_journals(store, actor, principal, day=, model=/runner=, replace_stale=)`：
+    返回码 `no_events`（0 次 LLM：少于 2 条事件或无 `agent/proactive.message.sent`）、
+    `exists`（0 次 LLM）、`written`、`invalid`、`model_failed`、`store_rejected`；
+    永不抛异常。事件按当天取最近 `MAX_DAY_EVENTS=40` 条。
+  - `generate_due_journals(...)`：次日首次检查时写“昨天”。
+  - `export_day_journals(...)`：日记 + source 的 JSON 视图。
+  - private 日记的 `reflection` 字段最多一条：需 ≥2 个当天事件 source，再经
+    `reflection.validate_reflections` 复检，最后 `store.append_reflection`；重复
+    statement 不重复写。日记正文本身永不进入 Self memory。
+- 未接线：`generate_due_journals` 目前只作为库 API 存在，V2-Step 6 的受控主动循环
+  负责调度；Step 1 不新增后台线程。
+
 ### 9.3 测试
 
 `tests/test_character.py`(7)、`tests/test_character_system_prompt.py`(4)、`tests/test_qq.py` `/角色` 相关 3 条、
