@@ -766,11 +766,50 @@ flowchart LR
     中性口吻，不中断主动推送。卡有正文但无 `# ` 标题时，卡名沿用 `character.card_name`
     既有行为取文件名 stem（不是"助手"）。
 
+### 9.2.1 Companion V1 最小 SQLite Store（2026-10-30，Step 3）
+
+`src/gacore/companion/store.py` 是 Companion 自我记忆的唯一事实源；**本步只建库与 API，
+尚未接入 QQ / proactive（Step 4 起接线）**。
+
+- 表（`PRAGMA user_version = 1`）：`companion_event`（`seq` 自增主键、`event_id` /
+  `idempotency_key` 各自 UNIQUE、`actor_id` / `principal_id` / `kind` / `summary` /
+  `source_id` / `occurred_at_ms`）、`companion_reflection`（`confidence` CHECK 0–1）、
+  `companion_reflection_source`（双 FK 指向 reflection / event，复合主键）、
+  `companion_cursor`（`(actor_id, principal_id)` 主键，含 `last_reflected_seq` /
+  `retry_batch_end_seq` / `failure_count` / `last_error` / `last_reflected_at_ms`）。
+  四表均含 R6 的 `created_at` / `updated_at TEXT DEFAULT (datetime('now','+8 hours'))`。
+- 事件 kind 由版本化注册表 `EVENT_KINDS = {1: {user.message.received, agent.message.sent,
+  proactive.message.sent}}` 校验，未知 kind 抛 `UnknownEventKind`；V2 扩展注册表而不重建表。
+- API：`append_event(kind, actor_id, principal_id, source_id, summary, idempotency_key,
+  event_id=None, occurred_at_ms=None) -> AppendResult(inserted, event_id, seq)`；
+  `events_after(actor, principal, seq, limit=10)`；`events_between(actor, principal,
+  start_seq, end_seq)`；`latest_reflections(actor, principal, limit=3)`；
+  `get_cursor(actor, principal) -> Cursor`（无行返回全零默认）；
+  `commit_reflection_batch(actor_id, principal_id, reflections, prompt_version,
+  last_reflected_seq, retry_batch_end_seq=None, failure_count=0, last_error=None,
+  last_reflected_at_ms=None) -> tuple[str, ...]`。
+- 幂等：`append_event` 用 `INSERT ... ON CONFLICT(idempotency_key) DO NOTHING`，重复键返回
+  既有 `event_id/seq` 且 `inserted=False`，不新增行。
+- 原子性：`commit_reflection_batch` 在单个 `BEGIN IMMEDIATE` 内先校验所有 source 均属于
+  同 `(actor_id, principal_id)`（否则抛 `SourceOwnershipError`、整批不写），再插 reflection +
+  source + upsert cursor；任一步失败（含 confidence CHECK）整段 ROLLBACK。
+- 连接规则：每次调用新建独立连接，统一执行 `foreign_keys=ON` / `journal_mode=WAL` /
+  `busy_timeout=5000`；锁等待超时抛 `sqlite3.OperationalError` 并回滚。schema 创建同样在
+  `BEGIN IMMEDIATE` 内完成，全部成功后才写 `user_version=1`，失败回滚且版本保持 0。
+- 路径：`gacore/config.py` 新增 `Config.companion_db_path`，`COMPANION_DB_PATH` 可覆盖
+  （相对路径以 `cfg.root` 为基准，空值视为未设置），默认 `<root>/data/companion.db`；
+  `CompanionStore.from_config(cfg)` 自动创建父目录。
+- 隔离：所有读 API 都按 `(actor_id, principal_id)` 过滤，跨 actor 的 event / reflection
+  不可见；同进程并发写各自独立连接，不共享 cursor。
+
 ### 9.3 测试
 
 `tests/test_character.py`(7)、`tests/test_character_system_prompt.py`(4)、`tests/test_qq.py` `/角色` 相关 3 条、
 `tests/test_companion_identity.py`(21)、`tests/test_companion_config.py`(5)、
 `tests/test_proactive.py::TestOwnerPersona`(7)；Step 2 验收 89 passed。
+`tests/test_companion_store.py`(17)：migration 幂等 / 失败回滚 / user_version / 每连接 PRAGMA /
+幂等键 / FK / actor 隔离 / 并发独立连接 / reflection-source-cursor 全事务回滚；Step 3 验收 17 passed。
+
 ### 9.4 主动推送（openid 落库 + qq_push）
 
 - 落库：`frontends/qq.py:_record_known_user()` —— 每次收到消息把用户 openid 写入 `data/qq_known_users.json`（`first_seen`/`last_seen`，损坏自动降级重建，失败仅告警不阻塞消息处理）。

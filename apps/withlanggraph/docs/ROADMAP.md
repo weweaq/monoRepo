@@ -5062,3 +5062,70 @@ tick 流水线 / 触发器 / last_outreach 状态注入 / 推送去 agent 化 / 
 - [x] Step 2 Owner 配置与 Proactive 人格贯穿（代码 + 测试 + R5 三处同步 + review-loop）
 - [ ] Step 3 起按 `docs/companion-self-memory-v1-plan.md` 继续
 
+
+## 2026-10-30 · Companion 自我记忆 V1 Step 3：最小 SQLite Store
+
+**背景**：按 `docs/companion-self-memory-v1-plan.md` Step 3 建立 Companion 的 event / reflection
+事实源；本步**只建库与 API，不接入 QQ / proactive**（Step 4 起才在 `QQApp.on_message()` 写事件）。
+
+**已完成**：
+
+- `src/gacore/companion/store.py`（新增）：
+  - 四表 schema v1（`PRAGMA user_version = 1`）：`companion_event`（`seq` 自增主键、
+    `event_id` / `idempotency_key` 各自 UNIQUE）、`companion_reflection`（`confidence` CHECK 0–1）、
+    `companion_reflection_source`（双 FK 指向 reflection / event，复合主键）、
+    `companion_cursor`（`(actor_id, principal_id)` 主键，含 `last_reflected_seq` /
+    `retry_batch_end_seq` / `failure_count` / `last_error` / `last_reflected_at_ms`）。
+    四表均含 R6 的 `created_at` / `updated_at TEXT DEFAULT (datetime('now','+8 hours'))`。
+  - `apply_migration()`：`BEGIN IMMEDIATE` 内逐条建表，全部成功后写 `user_version = 1`；
+    任一步失败 ROLLBACK 且版本保持 0；`user_version >= 1` 时直接 no-op（幂等）。
+  - 每连接统一 `foreign_keys=ON` / `journal_mode=WAL` / `busy_timeout=5000`，
+    每次调用新建独立连接（并发 writer 不共享 cursor）；锁等待超时抛
+    `sqlite3.OperationalError` 并回滚。
+  - `append_event()` 用 `INSERT ... ON CONFLICT(idempotency_key) DO NOTHING`：重复键返回既有
+    `event_id/seq` 且 `inserted=False`。事件 kind 由版本化注册表
+    `EVENT_KINDS = {1: {user.message.received, agent.message.sent, proactive.message.sent}}`
+    校验，未知 kind 抛 `UnknownEventKind`（V2 扩展注册表而不重建表）。
+  - `commit_reflection_batch()` 单事务内先校验全部 source 属于同 `(actor_id, principal_id)`
+    （否则抛 `SourceOwnershipError`、整批不写），再插 reflection + source + upsert cursor；
+    任一步失败（含 confidence CHECK）整段回滚。
+  - 读 API `events_after` / `events_between` / `latest_reflections` / `get_cursor` 一律按
+    `(actor_id, principal_id)` 过滤，跨 actor 不可见；`get_cursor` 无行返回全零默认。
+- `src/gacore/config.py`：新增 `Config.companion_db_path`（默认 `None` → 解析为
+  `<root>/data/companion.db`），`COMPANION_DB_PATH` 可覆盖（绝对路径原样保留、相对路径以
+  `cfg.root` 为基准）。原 `_resolve_dir` 更名为 `_resolve_path`（现在也承载文件路径）。
+  空白值（`.env` 里 `KEY=` 会被 `load_dotenv` 导出为空串）视为未设置，否则 `Path("")`
+  会静默解析成仓库根目录本身（目录而非文件）。
+- `tests/test_companion_store.py`（新增，19 条）：migration 幂等 / 失败回滚 + `user_version`、
+  每连接 PRAGMA、幂等键、未知 kind、actor 隔离、`limit` 与顺序、reflection + source + cursor
+  全事务回滚、跨 actor source 拒绝、缺失 source 先拒绝后不写、FK、并发独立连接、
+  `Config` 路径解析（绝对 / 相对 / 空值 / `for_tests` / 父目录创建）。
+- 基础设施修复（`conftest.py` / `pyproject.toml`）：原 `addopts --basetemp=tmp_pytest_run`
+  的固定目录已被**另一 Windows 身份**（凌晨 00:00 定时任务）创建成私有 ACL 目录，本用户连
+  列举都被拒绝，pytest 在 `getbasetemp` 的 `rm_rf` 处抛 `WinError 5`，全部 `tmp_path` 用例
+  setup 即失败。改为根 `conftest.py` 的 `pytest_configure(trylast=True)` 每次运行分配
+  `data/pytest-tmp/run-<pid>-<ns>`（`data/` 已 gitignore），并 best-effort 清理 7 天前的运行目录。
+
+**实测验证**：
+
+- `uv run pytest apps/withlanggraph/tests/test_companion_store.py -q` → **19 passed**（1.48s）
+- `uv run pytest -q`（全仓）→ **1878 passed, 4 skipped**（142s）
+- `uv run ruff check apps packages tests conftest.py` → All checks passed
+- `node apps/mermaid-viewer/tests/check_prompt_logic.js` → ALL PASS（CSTORE 节点插入后
+  RC/MMX/FB/MAIN/FLOW/WT 边/日报正文 边行号各 +1，锚点已同步）
+
+**偏差说明**：
+
+- 修 basetemp 时无法删除两个已锁目录（`tmp_pytest` / `tmp_pytest_run`，ACL 拒绝、需管理员
+  权限）；两者均在 `.gitignore` 的 `tmp_pytest*/` 覆盖内，不影响工作区，保留原样。
+- `commit_reflection_batch` 的 source 校验在写前完成（先 SELECT 再 INSERT），因此跨 actor /
+  缺失 source 的拒绝不会留下半截数据；`companion_cursor` 用 upsert，首次写入即建行。
+- `latest_reflections` 以 `created_at DESC, rowid DESC` 排序：`created_at` 为秒级字符串，
+  同秒内以 `rowid` 兜底保证「最新在前」稳定。
+- 本步未提供 `retry_batch_end_seq` / `failure_count` 的读写业务逻辑（仅按列落库），
+  留给 Step 5 反思流水线使用。
+
+**待办更新**：
+
+- [x] Step 3 最小 Companion SQLite Store（代码 + 测试 + R5 三处同步 + basetemp 基础设施修复）
+- [ ] Step 4 Owner C2C 收件事件（`QQApp.on_message()` 写 owner 文本事件，不调用反思）
