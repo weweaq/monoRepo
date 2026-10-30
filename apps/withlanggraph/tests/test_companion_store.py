@@ -91,7 +91,11 @@ class TestSchema:
         conn = sqlite3.connect(str(path), isolation_level=None)
         try:
             with pytest.raises(sqlite3.OperationalError):
-                apply_migration(conn, statements=(MIGRATION_V1[0], "CREATE TABLE broken ("))
+                apply_migration(
+                    conn,
+                    statements=(MIGRATION_V1[0], "CREATE TABLE broken ("),
+                    target_version=1,
+                )
             assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
             tables = {
                 row[0]
@@ -100,6 +104,16 @@ class TestSchema:
         finally:
             conn.close()
         assert "companion_event" not in tables
+
+    def test_overriding_statements_without_a_target_version_is_refused(self, tmp_path: Path) -> None:
+        path = tmp_path / "broken.db"
+        conn = sqlite3.connect(str(path), isolation_level=None)
+        try:
+            with pytest.raises(ValueError):
+                apply_migration(conn, statements=(MIGRATION_V1[0],))
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 0
+        finally:
+            conn.close()
 
     def test_every_connection_sets_pragmas(self, tmp_path: Path) -> None:
         store = _store(tmp_path)

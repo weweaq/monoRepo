@@ -22,14 +22,19 @@ from typing import Final
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from gacore.companion.reflection import is_unsafe_statement, validate_reflections
+from gacore.companion.reflection import (
+    MAX_SOURCES,
+    MIN_SOURCES,
+    is_unsafe_statement,
+    validate_reflections,
+)
 from gacore.companion.store import (
     CompanionEvent,
     CompanionStore,
-    CompanionStoreError,
     JournalDraft,
     JournalRecord,
     ReflectionRecord,
+    day_bounds_ms,
     day_key,
 )
 from gacore.jsonl_logger import get_logger
@@ -48,9 +53,6 @@ MAX_DAY_EVENTS: Final = 40
 MAX_DAY_REFLECTIONS: Final = 10
 MAX_TO_OWNER_CHARS: Final = 600
 MAX_PRIVATE_CHARS: Final = 900
-MIN_REFLECTION_SOURCES: Final = 2
-MAX_REFLECTION_SOURCES: Final = 5
-PRIVATE_REFLECTION_CONFIDENCE: Final = 0.6
 
 _SENT_KINDS: Final = frozenset({"agent.message.sent", "proactive.message.sent"})
 _JSON_OBJECT: Final = re.compile(r"\{.*\}", re.S)
@@ -245,11 +247,17 @@ def generate_day_journals(
 ) -> JournalOutcome:
     """Project one day of events into the two journals; never raises.
 
-    Codes: ``no_events`` (0 model calls), ``exists`` (0 model calls), ``written``,
-    ``invalid``, ``model_failed``, ``store_rejected``.
+    ``day`` must be a product-local ``YYYY-MM-DD``; ``None`` means "today in
+    UTC+8 at ``now_ms``". Codes: ``no_events`` (0 model calls), ``exists``
+    (0 model calls, or a concurrent run won the write), ``written``, ``invalid``,
+    ``model_failed``, ``store_rejected``.
     """
     now = int(time.time() * 1000) if now_ms is None else int(now_ms)
     resolved_day = day or day_key(now)
+    try:
+        day_bounds_ms(resolved_day)
+    except ValueError as exc:
+        return JournalOutcome(ok=False, code="invalid", error=str(exc))
     try:
         existing = store.journals_for_day(actor_id, principal_id, resolved_day)
     except Exception as exc:  # noqa: BLE001 — journaling must never break chat/reflection
@@ -268,28 +276,40 @@ def generate_day_journals(
     if not _is_substantive(events):
         return JournalOutcome(ok=False, code="no_events")
 
-    batch = events[-MAX_DAY_EVENTS:]
-    reflection_batch = reflections[-MAX_DAY_REFLECTIONS:]
-    outcome = (
-        runner(batch, reflection_batch)
-        if runner is not None
-        else run_journal(batch, reflection_batch, model=model)
-    )
+    batch = _batch_events(events)
+    reflection_batch = list(reflections[-MAX_DAY_REFLECTIONS:])
+    try:
+        outcome = (
+            runner(batch, reflection_batch)
+            if runner is not None
+            else run_journal(batch, reflection_batch, model=model)
+        )
+    except Exception as exc:  # noqa: BLE001 — a runner seam must not crash the caller
+        logger.warning(
+            "companion journal runner failed",
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+        )
+        return JournalOutcome(ok=False, code="model_failed", error=f"runner failed: {exc}")
     if not outcome.ok or outcome.payload is None:
         code = "model_failed" if outcome.code == "model_failed" else "invalid"
         return JournalOutcome(ok=False, code=code, error=outcome.error)
 
     # Re-validate whatever the runner returned: the store is the last line of defence.
-    payload, error = validate_journal_payload(
-        _payload_to_dict(outcome.payload),
-        {event.event_id for event in batch},
-        {reflection.reflection_id for reflection in reflection_batch},
-    )
+    try:
+        payload, error = validate_journal_payload(
+            _payload_to_dict(outcome.payload),
+            {event.event_id for event in batch},
+            {reflection.reflection_id for reflection in reflection_batch},
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("companion journal payload re-validation failed", error_message=str(exc))
+        return JournalOutcome(ok=False, code="invalid", error=str(exc))
     if payload is None:
         return JournalOutcome(ok=False, code="invalid", error=error)
 
     try:
-        store.save_journals(
+        result = store.save_journals(
             actor_id=actor_id,
             principal_id=principal_id,
             day=resolved_day,
@@ -297,12 +317,21 @@ def generate_day_journals(
             prompt_version=JOURNAL_PROMPT_VERSION,
             replace_stale=replace_stale,
         )
-    except (CompanionStoreError, ValueError) as exc:
+    except Exception as exc:  # noqa: BLE001 — a store contract failure is a normal outcome
         logger.warning("companion journal write rejected", error_message=str(exc))
         return JournalOutcome(ok=False, code="store_rejected", error=str(exc))
 
+    journals = _read_journals(store, actor_id, principal_id, resolved_day)
+    if not result.wrote_any:
+        # A concurrent run wrote the day first; do not double-spend a reflection.
+        logger.info(
+            "companion journal already written by another run",
+            actor_id=actor_id,
+            day=resolved_day,
+        )
+        return JournalOutcome(ok=True, code="exists", payload=payload, journals=journals)
+
     reflection_id = _commit_proposals(store, actor_id, principal_id, payload)
-    journals = tuple(store.journals_for_day(actor_id, principal_id, resolved_day))
     logger.info(
         "companion journal written",
         actor_id=actor_id,
@@ -360,6 +389,14 @@ def export_day_journals(
                 "prompt_version": record.prompt_version,
                 "source_event_ids": list(event_ids),
                 "source_reflection_ids": list(reflection_ids),
+                "corrections": [
+                    {
+                        "correction_id": correction.correction_id,
+                        "note": correction.note,
+                        "source_event_ids": list(correction.source_event_ids),
+                    }
+                    for correction in store.journal_corrections(record.journal_id)
+                ],
             }
         )
     return exported
@@ -367,6 +404,34 @@ def export_day_journals(
 
 def _is_substantive(events: Sequence[CompanionEvent]) -> bool:
     return len(events) >= MIN_DAY_EVENTS and any(e.kind in _SENT_KINDS for e in events)
+
+
+def _batch_events(events: Sequence[CompanionEvent]) -> list[CompanionEvent]:
+    """Newest ``MAX_DAY_EVENTS`` events, always keeping the latest character reply.
+
+    A day with more than ``MAX_DAY_EVENTS`` events would otherwise lose the only
+    confirmed reply when the owner keeps writing after the character spoke, and
+    the model would be asked to write "a day the character never spoke".
+    """
+    if len(events) <= MAX_DAY_EVENTS:
+        return list(events)
+    tail = list(events[-(MAX_DAY_EVENTS - 1):])
+    if not any(event.kind in _SENT_KINDS for event in tail):
+        sent = [event for event in events if event.kind in _SENT_KINDS]
+        if sent:
+            tail = [sent[-1], *tail]
+    return sorted(tail, key=lambda event: event.seq)
+
+
+def _read_journals(
+    store: CompanionStore, actor_id: str, principal_id: str, day: str
+) -> tuple[JournalRecord, ...]:
+    """Best-effort read-back; a failure here must not turn a written day into an error."""
+    try:
+        return tuple(store.journals_for_day(actor_id, principal_id, day))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("companion journal read-back failed", error_message=str(exc))
+        return ()
 
 
 def _source_ids(
@@ -399,10 +464,10 @@ def _validate_proposal(
         return None, "private.reflection.confidence is not a number"
     if not 0 <= float(confidence) <= 1:
         return None, "private.reflection.confidence out of range"
-    if len(private_event_ids) < MIN_REFLECTION_SOURCES:
+    if len(private_event_ids) < MIN_SOURCES:
         # Not enough evidence for a V1 reflection; the journal itself is still valid.
         return None, None
-    sources = private_event_ids[:MAX_REFLECTION_SOURCES]
+    sources = private_event_ids[:MAX_SOURCES]
     drafts, error = validate_reflections(
         {
             "reflections": [
@@ -416,7 +481,12 @@ def _validate_proposal(
         set(sources),
     )
     if drafts is None:
-        return None, f"private.reflection rejected: {error}"
+        # A rejected proposal must not cost the owner the journal itself.
+        logger.warning(
+            "companion journal reflection proposal rejected",
+            error_message=str(error),
+        )
+        return None, None
     return (
         JournalReflectionProposal(
             statement=drafts[0].statement,
@@ -451,18 +521,22 @@ def _commit_proposals(
     principal_id: str,
     payload: JournalPayload,
 ) -> str | None:
-    """Persist at most one journal-derived reflection; returns its id when written."""
+    """Persist at most one journal-derived reflection; returns its id when written.
+
+    Every failure here is swallowed: the journal is already saved, and a rejected
+    or duplicate proposal must not turn the day into an error.
+    """
     for proposal in payload.proposals:
-        if len(proposal.source_event_ids) < MIN_REFLECTION_SOURCES:
-            continue
-        recent = store.latest_reflections(actor_id, principal_id, limit=50)
-        if any(
-            record.prompt_version == PRIVATE_REFLECTION_PROMPT_VERSION
-            and record.statement == proposal.statement
-            for record in recent
-        ):
+        if len(proposal.source_event_ids) < MIN_SOURCES:
             continue
         try:
+            recent = store.latest_reflections(actor_id, principal_id, limit=50)
+            if any(
+                record.prompt_version == PRIVATE_REFLECTION_PROMPT_VERSION
+                and record.statement == proposal.statement
+                for record in recent
+            ):
+                continue
             return store.append_reflection(
                 actor_id=actor_id,
                 principal_id=principal_id,
@@ -471,8 +545,12 @@ def _commit_proposals(
                 source_event_ids=proposal.source_event_ids,
                 prompt_version=PRIVATE_REFLECTION_PROMPT_VERSION,
             )
-        except CompanionStoreError as exc:
-            logger.warning("companion journal reflection rejected", error_message=str(exc))
+        except Exception as exc:  # noqa: BLE001 — the journal is already written
+            logger.warning(
+                "companion journal reflection rejected",
+                error_type=type(exc).__name__,
+                error_message=str(exc),
+            )
             return None
     return None
 

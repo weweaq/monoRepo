@@ -1,8 +1,9 @@
 """Self-memory context block: verified reflections as background for owner C2C turns.
 
-Only reflections written by Step 7 are eligible. The block is a canonical JSON data
-payload wrapped in an explicit ``<self_memory_json>`` boundary; statements are escaped
-so a reflection can never break out of the data block or act like a system instruction.
+Both V1 reflection runs and V2 journal-derived reflections are eligible; a private
+journal body never is. The block is a canonical JSON data payload wrapped in an
+explicit ``<self_memory_json>`` boundary; statements are escaped so a reflection can
+never break out of the data block or act like a system instruction.
 
 Fail-open by design: a missing database, a store error or an empty reflection list
 simply omits the block, so companion storage problems never block normal chat.

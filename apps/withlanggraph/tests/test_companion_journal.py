@@ -190,7 +190,7 @@ class TestJournalStore:
         store = _store(tmp_path)
         events = _seed_day(store)
 
-        ids = store.save_journals(
+        result = store.save_journals(
             actor_id="linwan",
             principal_id="owner",
             day=_DAY,
@@ -202,7 +202,8 @@ class TestJournalStore:
         )
 
         rows = store.journals_for_day("linwan", "owner", _DAY)
-        assert {r.journal_id for r in rows} == set(ids)
+        assert {r.journal_id for r in rows} == set(result.ids)
+        assert result.created == (True, True)
         assert {r.visibility for r in rows} == {"to_owner", "private"}
         assert all(r.status == "final" for r in rows)
         to_owner = next(r for r in rows if r.visibility == "to_owner")
@@ -227,7 +228,9 @@ class TestJournalStore:
             prompt_version=JOURNAL_PROMPT_VERSION,
         )
 
-        assert first == second
+        assert first.ids == second.ids
+        assert first.created == (True,)
+        assert second.created == (False,)
         rows = store.journals_for_day("linwan", "owner", _DAY)
         assert [r.body for r in rows] == ["第一版"]
 

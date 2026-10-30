@@ -19,7 +19,7 @@ import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from pathlib import Path
 from typing import Final
 
@@ -31,13 +31,14 @@ DEFAULT_BUSY_TIMEOUT_MS: Final = 5000
 # Versioned registry: V1/V2 allow the three message events only. Journal data is a
 # projection of those events, so v2 adds no event kind. A future version extends
 # this dict instead of rebuilding the event table or adding a CHECK.
-EVENT_KINDS: Final[dict[int, frozenset[str]]] = {
-    1: frozenset({"user.message.received", "agent.message.sent", "proactive.message.sent"}),
-    2: frozenset({"user.message.received", "agent.message.sent", "proactive.message.sent"}),
-}
+_EVENT_KINDS_V1: Final = frozenset(
+    {"user.message.received", "agent.message.sent", "proactive.message.sent"}
+)
+EVENT_KINDS: Final[dict[int, frozenset[str]]] = {1: _EVENT_KINDS_V1, 2: _EVENT_KINDS_V1}
 SUPPORTED_EVENT_KINDS: Final = EVENT_KINDS[SCHEMA_VERSION]
 
 JOURNAL_VISIBILITIES: Final = frozenset({"to_owner", "private"})
+JOURNAL_STATUSES: Final = frozenset({"draft", "final", "stale"})
 # UTC+8 is the product's "today" (R6 timestamps use the same offset).
 _DAY_TZ: Final = timezone(timedelta(hours=8))
 
@@ -120,6 +121,31 @@ class JournalDraft:
 
 
 @dataclass(frozen=True, slots=True)
+class JournalSaveResult:
+    """Journal ids in draft order plus whether each draft was actually written."""
+
+    ids: tuple[str, ...]
+    created: tuple[bool, ...]
+
+    @property
+    def wrote_any(self) -> bool:
+        """True when at least one draft was inserted or rewrote a stale row."""
+        return any(self.created)
+
+
+@dataclass(frozen=True, slots=True)
+class JournalCorrection:
+    """One owner correction against a journal, with the events it disputes."""
+
+    correction_id: str
+    journal_id: str
+    note: str
+    source_event_ids: tuple[str, ...]
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
 class Cursor:
     actor_id: str
     principal_id: str
@@ -139,8 +165,17 @@ def day_key(ms: int) -> str:
 
 
 def day_bounds_ms(day: str) -> tuple[int, int]:
-    """Half-open ``[start, end)`` epoch-millisecond bounds of one product-local day."""
-    start = datetime.fromisoformat(day).replace(tzinfo=_DAY_TZ)
+    """Half-open ``[start, end)`` epoch-millisecond bounds of one product-local day.
+
+    Only a bare ``YYYY-MM-DD`` is accepted. ``datetime.fromisoformat`` would also
+    take ``2026-10-29T08:00:00+00:00`` and silently reinterpret that instant as a
+    UTC+8 wall clock, so the date is parsed strictly instead.
+    """
+    try:
+        start_date = date.fromisoformat(day)
+    except ValueError as exc:
+        raise ValueError(f"day must be YYYY-MM-DD, got {day!r}") from exc
+    start = datetime.combine(start_date, dt_time.min, tzinfo=_DAY_TZ)
     return int(start.timestamp() * 1000), int((start + timedelta(days=1)).timestamp() * 1000)
 
 
@@ -243,6 +278,28 @@ MIGRATION_V2: Final[tuple[str, ...]] = (
     CREATE INDEX IF NOT EXISTS idx_companion_event_actor_occurred
     ON companion_event(actor_id, principal_id, occurred_at_ms)
     """,
+    f"""
+    CREATE TABLE IF NOT EXISTS companion_journal_correction (
+        correction_id    TEXT PRIMARY KEY,
+        journal_id       TEXT NOT NULL REFERENCES companion_journal(journal_id),
+        note             TEXT NOT NULL,
+        created_at       TEXT NOT NULL DEFAULT ({_TIMESTAMP_DEFAULT}),
+        updated_at       TEXT NOT NULL DEFAULT ({_TIMESTAMP_DEFAULT})
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_companion_journal_correction_journal
+    ON companion_journal_correction(journal_id)
+    """,
+    f"""
+    CREATE TABLE IF NOT EXISTS companion_journal_correction_source (
+        correction_id    TEXT NOT NULL REFERENCES companion_journal_correction(correction_id),
+        event_id         TEXT NOT NULL REFERENCES companion_event(event_id),
+        created_at       TEXT NOT NULL DEFAULT ({_TIMESTAMP_DEFAULT}),
+        updated_at       TEXT NOT NULL DEFAULT ({_TIMESTAMP_DEFAULT}),
+        PRIMARY KEY (correction_id, event_id)
+    )
+    """,
 )
 
 MIGRATIONS: Final[dict[int, tuple[str, ...]]] = {1: MIGRATION_V1, 2: MIGRATION_V2}
@@ -262,8 +319,12 @@ def apply_migration(
     """Bring the schema up to ``target_version`` (default: current), one atomic step per version.
 
     ``statements`` overrides the statements of the target step; tests use it to
-    prove a broken step rolls back and leaves ``user_version`` untouched.
+    prove a broken step rolls back and leaves ``user_version`` untouched. It
+    requires an explicit ``target_version``: otherwise the broken step would be
+    stamped with the current version and the next real migration would be skipped.
     """
+    if statements is not None and target_version is None:
+        raise ValueError("statements= requires an explicit target_version")
     target = SCHEMA_VERSION if target_version is None else int(target_version)
     current = int(conn.execute("PRAGMA user_version").fetchone()[0])
     if current >= target:
@@ -522,8 +583,14 @@ class CompanionStore:
             reflection_ids = tuple(
                 row["reflection_id"]
                 for row in conn.execute(
-                    "SELECT reflection_id FROM companion_journal_reflection_source"
-                    " WHERE journal_id = ? ORDER BY reflection_id",
+                    """
+                    SELECT source.reflection_id
+                    FROM companion_journal_reflection_source AS source
+                    JOIN companion_reflection AS reflection
+                      ON reflection.reflection_id = source.reflection_id
+                    WHERE source.journal_id = ?
+                    ORDER BY reflection.created_at, reflection.rowid
+                    """,
                     (journal_id,),
                 )
             )
@@ -538,13 +605,14 @@ class CompanionStore:
         drafts: Sequence[JournalDraft],
         prompt_version: str,
         replace_stale: bool = False,
-    ) -> tuple[str, ...]:
+    ) -> JournalSaveResult:
         """Insert (or rewrite stale) journals and their sources in one transaction.
 
         Every cited event/reflection must belong to the same ``(actor_id,
         principal_id)`` and fall inside ``day``; a violation rejects the whole
         batch before anything is written. An existing non-stale row is left
-        untouched, which makes a repeated same-day run idempotent.
+        untouched, which makes a repeated same-day run idempotent — callers must
+        check ``created`` before claiming a write.
         """
         if not drafts:
             raise ValueError("at least one journal draft is required")
@@ -571,6 +639,7 @@ class CompanionStore:
                 reflection_ids={r for draft in drafts for r in draft.source_reflection_ids},
             )
             saved: list[str] = []
+            created: list[bool] = []
             for draft in drafts:
                 existing = conn.execute(
                     """
@@ -591,6 +660,7 @@ class CompanionStore:
                         (journal_id, actor_id, principal_id, day, draft.visibility, draft.body, prompt_version),
                     )
                     _insert_journal_sources(conn, journal_id, draft)
+                    created.append(True)
                 elif replace_stale and existing["status"] == "stale":
                     journal_id = str(existing["journal_id"])
                     conn.execute(
@@ -611,15 +681,20 @@ class CompanionStore:
                         (journal_id,),
                     )
                     _insert_journal_sources(conn, journal_id, draft)
+                    created.append(True)
                 else:
                     journal_id = str(existing["journal_id"])
+                    created.append(False)
                 saved.append(journal_id)
-        return tuple(saved)
+        return JournalSaveResult(ids=tuple(saved), created=tuple(created))
 
     def mark_journal_stale(
         self, actor_id: str, principal_id: str, day: str, visibility: str
     ) -> bool:
         """Flag one journal as stale so the next run may rewrite it; False if it did not exist."""
+        if visibility not in JOURNAL_VISIBILITIES:
+            raise ValueError(f"unknown journal visibility {visibility!r}")
+        day_bounds_ms(day)  # fail fast on a malformed day
         with self._transaction() as conn:
             cur = conn.execute(
                 f"""
@@ -631,6 +706,112 @@ class CompanionStore:
                 (actor_id, principal_id, day, visibility),
             )
         return cur.rowcount > 0
+
+    def record_journal_correction(
+        self,
+        *,
+        journal_id: str,
+        note: str,
+        source_event_ids: Sequence[str] = (),
+    ) -> str:
+        """Record an owner correction against one journal and mark that journal stale.
+
+        ``source_event_ids`` must be a subset of the events the journal itself
+        cites, so a correction can never be re-attributed to evidence the journal
+        never used. The correction, its sources and the stale flag land in one
+        transaction: a rejected correction changes nothing.
+        """
+        _require_non_empty("journal_id", journal_id)
+        _require_non_empty("note", note)
+        cited = tuple(dict.fromkeys(source_event_ids))
+        correction_id = f"corr_{uuid.uuid4().hex}"
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT journal_id FROM companion_journal WHERE journal_id = ?",
+                (journal_id,),
+            ).fetchone()
+            if row is None:
+                raise CompanionStoreError(f"journal {journal_id!r} does not exist")
+            if cited:
+                placeholders = ",".join("?" for _ in cited)
+                known = {
+                    source["event_id"]
+                    for source in conn.execute(
+                        f"""
+                        SELECT event_id FROM companion_journal_event_source
+                        WHERE journal_id = ? AND event_id IN ({placeholders})
+                        """,
+                        (journal_id, *cited),
+                    )
+                }
+                unknown = [event_id for event_id in cited if event_id not in known]
+                if unknown:
+                    raise SourceOwnershipError(
+                        f"correction cites events the journal never used: {unknown}"
+                    )
+            conn.execute(
+                """
+                INSERT INTO companion_journal_correction (correction_id, journal_id, note)
+                VALUES (?, ?, ?)
+                """,
+                (correction_id, journal_id, note),
+            )
+            for event_id in cited:
+                conn.execute(
+                    """
+                    INSERT INTO companion_journal_correction_source (correction_id, event_id)
+                    VALUES (?, ?)
+                    """,
+                    (correction_id, event_id),
+                )
+            conn.execute(
+                f"""
+                UPDATE companion_journal
+                SET status = 'stale', updated_at = {_TIMESTAMP_DEFAULT}
+                WHERE journal_id = ?
+                """,
+                (journal_id,),
+            )
+        return correction_id
+
+    def journal_corrections(self, journal_id: str) -> list[JournalCorrection]:
+        """Corrections recorded against one journal, oldest first."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM companion_journal_correction
+                WHERE journal_id = ?
+                ORDER BY created_at ASC, rowid ASC
+                """,
+                (journal_id,),
+            ).fetchall()
+            corrections = []
+            for row in rows:
+                sources = tuple(
+                    source["event_id"]
+                    for source in conn.execute(
+                        """
+                        SELECT source.event_id
+                        FROM companion_journal_correction_source AS source
+                        JOIN companion_event AS event ON event.event_id = source.event_id
+                        WHERE source.correction_id = ?
+                        ORDER BY event.seq
+                        """,
+                        (row["correction_id"],),
+                    )
+                )
+                corrections.append(
+                    JournalCorrection(
+                        correction_id=row["correction_id"],
+                        journal_id=row["journal_id"],
+                        note=row["note"],
+                        source_event_ids=sources,
+                        created_at=row["created_at"],
+                        updated_at=row["updated_at"],
+                    )
+                )
+        return corrections
+
 
     def append_reflection(
         self,

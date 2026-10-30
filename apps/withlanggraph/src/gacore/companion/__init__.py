@@ -1,10 +1,11 @@
-"""Companion self-memory (V1): the character remembers what it really said and did.
+"""Companion self-memory: the character remembers what it really said and did.
 
-Modules land step by step per ``docs/companion-self-memory-v1-plan.md``:
+V1 modules land per ``docs/companion-self-memory-v1-plan.md``; V2 additions follow
+``docs/companion-self-memory-v2-plan.md``:
 
 - ``config`` — master switch + the single owner openid (Step 2)
 - ``identity`` — the shared per-user active-card repository and owner gate (Step 1/2)
-- ``store`` — the SQLite fact source for events / reflections / cursor (Step 3)
+- ``store`` — the SQLite fact source for events / reflections / journals / cursor (Step 3, V2-Step 1)
 - ``summary`` — redacted, bounded event summaries (Step 4)
 - ``reflection`` — evidence-bound 0-2 takeaways from a fixed batch (Step 7)
 - ``coordinator`` — single-flight background reflection checks (Step 7)
