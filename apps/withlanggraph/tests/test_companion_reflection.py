@@ -474,6 +474,42 @@ class TestCoordinator:
         assert coordinator.schedule("actor", "owner") is True
         coordinator.shutdown(timeout=5)
 
+    def test_event_during_running_check_triggers_one_rerun(self, tmp_path: Path) -> None:
+        """A schedule() that lands while a check is running must not be lost (V1 gap 6)."""
+        store = _store(tmp_path)
+        _add_events(store, 3)
+        started = threading.Event()
+        release = threading.Event()
+        second_check = threading.Event()
+        calls: list[int] = []
+        checks: list[int] = []
+
+        def factory() -> CompanionStore:
+            checks.append(1)
+            if len(checks) >= 2:
+                second_check.set()
+            return store
+
+        def runner(events) -> ReflectionOutcome:
+            calls.append(len(events))
+            started.set()
+            release.wait(5)
+            return ReflectionOutcome(ok=True, drafts=())
+
+        coordinator = ReflectionCoordinator(store_factory=factory, runner=runner)
+        try:
+            assert coordinator.schedule("actor", "owner") is True
+            assert started.wait(5)
+            # Arrives mid-run: rejected as a second concurrent check, but remembered.
+            assert coordinator.schedule("actor", "owner") is False
+        finally:
+            release.set()
+        # The rerun happens (second check) but finds nothing new, so it spends no model call.
+        assert second_check.wait(5), "the lost-wakeup event must trigger one rerun check"
+        coordinator.shutdown(timeout=5)
+        assert len(checks) == 2
+        assert calls == [3]
+
     def test_shutdown_rejects_new_checks(self, tmp_path: Path) -> None:
         coordinator = ReflectionCoordinator(store_factory=lambda: _store(tmp_path))
         coordinator.shutdown(timeout=1)

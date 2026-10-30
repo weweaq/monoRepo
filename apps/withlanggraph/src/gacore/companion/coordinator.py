@@ -50,6 +50,10 @@ class ReflectionCoordinator:
         )
         self._lock = threading.Lock()
         self._pending: set[tuple[str, str]] = set()
+        # Keys that received a new event while a check was already running. Without
+        # this flag that event would wait for the next external schedule() call
+        # (lost wakeup); instead _finish resubmits once.
+        self._rerun: set[tuple[str, str]] = set()
         self._futures: set[Future[None]] = set()
         self._closed = False
 
@@ -57,7 +61,10 @@ class ReflectionCoordinator:
         """Submit one check; False means it was already in flight or the runner is closed."""
         key = (actor_id, principal_id)
         with self._lock:
-            if self._closed or key in self._pending:
+            if self._closed:
+                return False
+            if key in self._pending:
+                self._rerun.add(key)
                 return False
             self._pending.add(key)
         try:
@@ -75,6 +82,7 @@ class ReflectionCoordinator:
         """Refuse new checks, cancel queued ones, and wait ``timeout`` for running ones."""
         with self._lock:
             self._closed = True
+            self._rerun.clear()
             futures = list(self._futures)
         self._executor.shutdown(wait=False, cancel_futures=True)
         wait(futures, timeout=timeout)
@@ -101,6 +109,13 @@ class ReflectionCoordinator:
         with self._lock:
             self._pending.discard(key)
             self._futures.discard(_future)
+            rerun = key in self._rerun
+            self._rerun.discard(key)
+            closed = self._closed
+        # An event arrived while this check was running: run one more check so the
+        # newer event is never left unexamined until some unrelated future trigger.
+        if rerun and not closed:
+            self.schedule(key[0], key[1])
 
 
 # One process-wide coordinator; the store is created lazily so importing this
