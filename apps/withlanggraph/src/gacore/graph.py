@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 import time
 import uuid
+from collections.abc import Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Final, Iterator
@@ -25,6 +26,7 @@ from langchain.agents import create_agent
 from langchain.agents.middleware import ModelRetryMiddleware
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage
+from langchain_core.tools import BaseTool
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
@@ -246,13 +248,14 @@ def _build_core_agent(
     llm: BaseChatModel | None,
     cfg: Config,
     checkpointer: BaseCheckpointSaver,
+    tool_list: Sequence[BaseTool] | None = None,
 ) -> CompiledStateGraph:
     """Build the core agent subgraph (model + tools loop) via create_agent."""
-    tool_list = build_tool_list(cfg)
-    resolved_llm = llm or get_llm(tool_list, bind_tools=False)
+    tools = list(tool_list) if tool_list is not None else build_tool_list(cfg)
+    resolved_llm = llm or get_llm(tools, bind_tools=False)
     return create_agent(
         resolved_llm,
-        tools=tool_list,
+        tools=tools,
         state_schema=GAState,
         middleware=[
             GAPromptMiddleware(cfg),
@@ -277,6 +280,7 @@ def build_graph(
     llm: BaseChatModel | None = None,
     cfg: Config | None = None,
     checkpointer: BaseCheckpointSaver | None = None,
+    tool_list: Sequence[BaseTool] | None = None,
 ) -> CompiledStateGraph:
     """Assemble the full image-aware agent graph.
 
@@ -298,11 +302,13 @@ def build_graph(
         cfg: Runtime configuration; defaults to Config.default().
         checkpointer: Persistence backend; defaults to a fresh MemorySaver. Shared
             between the wrapper and the core subgraph.
+        tool_list: Optional tool subset bound into the agent. ``None`` keeps the full
+            registry; proactive runs pass a single-use ``qq_push`` wrapper instead.
     """
     resolved_cfg = cfg or Config.default()
     resolved_checkpointer = checkpointer or MemorySaver()
 
-    core_agent = _build_core_agent(llm, resolved_cfg, resolved_checkpointer)
+    core_agent = _build_core_agent(llm, resolved_cfg, resolved_checkpointer, tool_list)
 
     workflow = StateGraph(GAState)
     workflow.add_node("classify_message", classify_message)

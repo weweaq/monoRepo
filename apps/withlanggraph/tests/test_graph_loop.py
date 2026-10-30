@@ -52,6 +52,27 @@ def _human_count(messages: list[BaseMessage]) -> int:
     return sum(isinstance(m, HumanMessage) for m in messages)
 
 
+def test_tool_list_restricts_the_tools_bound_into_the_agent(
+    tmp_cfg: Config, monkeypatch
+) -> None:
+    """Given an explicit tool_list, When the graph is built, Then only that subset is bound."""
+    from gacore.tools.qq_tools import qq_push
+    from gacore.tools.single_use import SingleUseTool
+
+    captured: dict[str, list] = {}
+
+    def fake_get_llm(tools, *, bind_tools=False):
+        captured["tools"] = list(tools)
+        return BindableFakeMessagesListChatModel(responses=[AIMessage(content="ok")])
+
+    monkeypatch.setattr("gacore.graph.get_llm", fake_get_llm)
+    tool = SingleUseTool.wrap(qq_push, max_calls=1)
+
+    build_graph(cfg=tmp_cfg, tool_list=[tool])
+
+    assert captured["tools"] == [tool]
+
+
 def test_tool_loop_then_final_answer_marks_task_done(
     message_llm: Callable[[list[BaseMessage]], FakeMessagesListChatModel],
     tmp_cfg: Config,
