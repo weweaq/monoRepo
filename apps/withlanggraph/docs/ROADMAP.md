@@ -5960,3 +5960,48 @@ V1 稳定性缺口里，1/2/3/4/5/6/7 也在同一批未提交改动里。
 - [x] V2-Step 2 关系与 Open Threads（migration v3）
 - [ ] V2-Step 3：临时 Mood（migration v4）
 - [ ] 关系投影词表随真实语料校准（观察到误判再补 `_BOUNDARY_PHRASES`）
+## 2026-10-30 · Companion V2-Step 3：临时 Mood（migration v4）
+
+**背景**：按 V2 计划 Step 3 落地"有来源、会自动衰减、不改人格"的临时心情。仍然**零模型调用**：
+一条 owner 消息按规则映射成 label + TTL，到期自动回 neutral。
+
+**已完成**：
+
+- `companion/store.py`：`SCHEMA_VERSION=4` + `MIGRATION_V4`（`companion_mood`：
+  六值 CHECK、valence/arousal 约束、`source_event_id` FK、`expires_at_ms`、
+  PK(actor,principal)、expiry 索引）；新增 `Mood` 数据类与
+  `mood()` / `save_mood()` / `clear_mood()`，`save_mood` 校验 source 必须同 actor、
+  label 必须在词表内。
+- `companion/mood.py`（新增）：`detect_signal()`（纯函数，只吃 owner 事件）、
+  `refresh_mood()`（写/清行）、`active_mood()`（过期即视为 neutral）、
+  `build_mood_line()`（单行 ≤100 字）。
+  映射与优先级：frustrated > concerned > happy > curious > tired，跨消息取最新信号；
+  深夜 00:00–05:00 的 owner 消息 → tired。
+- `context.py`：把 `_self_memory_block` 重构为 `_companion_blocks()`（一次构建 store，
+  同时返回 Self memory 与 mood 行），这样每轮不再开两次库；mood 行仅在未过期时注入，
+  日志 `mood line injected` + `companion-mood@v1`。
+- `frontends/qq.py`：`_refresh_relationship_quietly` → `_refresh_companion_state_quietly`，
+  在事件落库后先刷关系再刷 mood（mood 失败不影响关系刷新）。
+- `companion/__init__.py`：导出 `refresh_mood` / `active_mood` / `build_mood_line` /
+  `detect_signal` / `MoodSignal` / `MOOD_BLOCK_VERSION` / `MAX_MOOD_LINE_CHARS`。
+- `tests/test_companion_mood.py`（新增 17 例）；`test_context.py` 三处 stub 跟随
+  `_companion_blocks`；`test_companion_relationship.py` 的迁移断言跟随 `SCHEMA_VERSION`。
+- R5 三处同步：本文件 + tech §9.2.11 + 架构图 `MOODSTATE` 节点与三条边。
+
+**实测验证**：
+
+- `uv run pytest apps/withlanggraph/tests/test_companion_mood.py -q` → **17 passed**
+- 全仓 `uv run pytest` → **2121 passed, 4 skipped**
+- `uv run ruff check` → All checks passed
+- `node apps/mermaid-viewer/tests/check_prompt_logic.js` → ALL PASS
+
+**偏差说明**：
+
+- 「模型只可建议 label」本步未提供该入口：当前 label 完全由规则决定，模型连建议都不做。
+  等 Step 6 的受控主动决策需要时再加"建议 → 规则复核"的通道，避免现在多一条写入路径。
+- mood 是"单行状态"而非历史表：计划只要求注入当前心情，历史留痕由 event/reflection 承担。
+
+**待办更新**：
+
+- [x] V2-Step 3 临时 Mood（migration v4）
+- [ ] V2-Step 4：承诺（migration v5）

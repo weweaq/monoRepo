@@ -1089,6 +1089,40 @@ flowchart LR
 open thread 建/解/去重、thread source 必须同 actor、`project()` 无副作用且
 positive 窗口计数正确。
 
+### 9.2.11 Companion V2-Step 3 临时 Mood（migration v4，2026-10-30）
+
+> 计划：`docs/companion-self-memory-v2-plan.md` §4.3 / V2-Step 3。同样**不调用模型**：
+> 一条 owner 消息按规则映射成一个 label + TTL，到期自动回到 neutral。
+
+**数据模型**：`companion_mood`（`label` CHECK 六值、`valence` −1..1、`arousal` 0..1、
+`source_event_id` FK→`companion_event`、`expires_at_ms`，PK `(actor_id, principal_id)`，
+另加 `idx_companion_mood_expiry`）。一行只保留"当前心情"，不是历史表。
+
+**规则映射（`companion/mood.py`）**：
+
+| label | 触发（owner 消息原文） | valence / arousal | TTL |
+|---|---|---|---|
+| `frustrated` | 你烦 / 闭嘴 / 滚开 / 别说了 / 不想听你 | −0.7 / 0.7 | 2h |
+| `concerned` | 累 / 烦 / 难受 / 生气 / 崩溃 / 失眠 / 压力 / 焦虑 / 难过 / 不开心 / 加班 | −0.35 / 0.45 | 12h |
+| `happy` | 谢谢 / 辛苦 / 厉害 / 不错 / 真好 / 喜欢 / 开心 / 哈哈 / 太棒 | 0.6 / 0.45 | 6h |
+| `curious` | ？/?/怎么/为什么/什么/哪/多少/吗/呢 | 0.3 / 0.6 | 3h |
+| `tired` | 00:00–05:00（UTC+8）发来的任何消息 | −0.2 / 0.2 | 8h |
+| `neutral` | 不写行 | — | — |
+
+同一条消息命中多条时按优先级取（frustrated > concerned > happy > curious > tired），
+跨消息取**最新**的那条信号；信号已过期则视为 neutral。
+
+**注入**：`context.py::_companion_blocks()` 一次构建 store，同时取 Self memory 与
+`build_mood_line()`（单行 ≤100 字，"只体现在语气里，别点名心情"），仅当 mood 未过期才拼进
+system prompt；过期/缺失则整行省略。`mood line injected` 日志带 `companion-mood@v1`。
+
+**边界**：只有 `user.message.received` 能改 mood（角色自己说的话不参与，避免自我强化）；
+mood 与 relationship / persona 完全隔离，不写任何关系字段。
+
+**测试**：`tests/test_companion_mood.py`（17 例）覆盖 v4 迁移、五类映射、优先级、最新信号、
+角色发送不改 mood、到期清行与不注入、静默不变负面、mood 不改关系状态、
+source 必须同 actor、未知 label 拒绝、单行 ≤100 字、Prompt 含/不含 mood 行。
+
 ### 9.3 测试
 
 `tests/test_character.py`(7)、`tests/test_character_system_prompt.py`(4)、`tests/test_qq.py` `/角色` 相关 3 条、

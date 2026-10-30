@@ -267,3 +267,10 @@ flowchart TD
     QQ -. "每个 confirmed 事件落地后<br/>_refresh_relationship_quietly → refresh_relationship" .-> RELSTATE
     RELSTATE -. "stage/status/boundaries/open threads<br/>供 Step 6 有界 Prompt 与主动 gate 读取" .-> CTX
     class RELSTATE state
+
+    %% V2-Step 3：临时 Mood（migration v4，2026-10-30）
+    MOODSTATE[("companion/mood.py refresh_mood<br/>规则映射：谢谢→happy / 提问→curious<br/>倾诉→concerned / 敌意→frustrated / 深夜→tired<br/>每条带 source_event_id + expires_at_ms<br/>到期即 neutral：清行且不注入<br/>只有 owner 消息能改 mood")]
+    MOODSTATE -. "mood()/save_mood()/clear_mood，source 必须同 actor" .-> CSTORE
+    QQ -. "每个 confirmed 事件后<br/>_refresh_companion_state_quietly(关系 → mood)" .-> MOODSTATE
+    MOODSTATE -. "build_mood_line 单行 ≤100 字<br/>仅未过期时进 system prompt" .-> CTX
+    class MOODSTATE state
