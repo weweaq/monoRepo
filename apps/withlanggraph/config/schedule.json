@@ -10,6 +10,7 @@
       "name": "companion-journal",
       "schedule": "00:10",
       "type": "journal",
+      "prompt": "",
       "enabled": true
     },
     {

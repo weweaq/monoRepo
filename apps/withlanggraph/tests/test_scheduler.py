@@ -1155,3 +1155,20 @@ class TestJournalJob:
 
         assert jobs_run == 1
         assert submitted and submitted[0][0] is run_journal_job
+
+class TestShippedSchedule:
+    def test_repo_schedule_json_has_no_malformed_jobs(self, tmp_path: Path) -> None:
+        """The shipped config/schedule.json must parse fully — a missing prompt silently
+        disables a job (companion-journal was skipped in production on 2026-10-30)."""
+        cfg = Config.for_tests(tmp_path)
+        shipped = Path(__file__).resolve().parents[1] / "config" / "schedule.json"
+        target = cfg.asset_dir.parent / "schedule.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(shipped.read_text(encoding="utf-8"), encoding="utf-8")
+
+        jobs = load_jobs(cfg)
+        declared = json.loads(shipped.read_text(encoding="utf-8"))["jobs"]
+        enabled = [job for job in declared if job.get("enabled", True)]
+
+        assert len(jobs) == len(enabled), "every enabled job in schedule.json must parse"
+        assert "companion-journal" in {job.name for job in jobs}
