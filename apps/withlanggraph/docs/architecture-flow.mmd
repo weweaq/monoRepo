@@ -299,3 +299,14 @@ flowchart TD
     OUTREACH -. "TELL_ONLY 交给既有 proactive 短消息+receipt 通道" .-> QQ
     class ACT state
     class OUTREACH state
+
+    %% V2-Step 7：生命周期 / 信任边界 / CLI（migration v8，2026-10-30）
+    LIFE[("companion/reflection.py 生命周期<br/>active / stale / contradicted / retracted<br/>mark_stale·retract·refute·supersede<br/>注入只取 active ∧ 未过期 ∧ confidence≥0.5<br/>companion_projection_state 记录投影器版本+cursor")]
+    TRUST["companion/trust.py 信任边界<br/>TrustedContext(身份/时间/权限/状态) 进 system<br/>UntrustedData(网页/OCR/日记/工具/用户文本) 只做数据块<br/>wrap_trusted / wrap_untrusted"]
+    CLICMD["companion/cli.py 最小 CLI<br/>status · events · reflections · journals<br/>commitments · goals · export<br/>correct --dry-run · reset --dry-run · rebuild [--apply]"]
+    LIFE -. "set_reflection_status / reflections_for_events / projection_state" .-> CSTORE
+    CLICMD -. "只读查询；reset 仅预览，rebuild 只读事件重算" .-> CSTORE
+    LIFE -. "过期/失效/低置信不进入 Self memory" .-> CTX
+    class LIFE state
+    class TRUST bnd
+    class CLICMD out

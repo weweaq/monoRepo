@@ -1245,6 +1245,44 @@ v7 迁移与唯一索引、单活动约束、暂停/恢复/完成/失败/取消�
 TELL_ONLY 截断、STAY_SILENT 不发、SYSTEM_FAILURE 不写叙事、未批准目标降级为征询、
 只读执行与工具越权拒绝、token 绑定参数、回复关联/边界分类/窗口外不关联、no_response 衰减。
 
+### 9.2.15 Companion V2-Step 7 生命周期 / 信任边界 / CLI（migration v8，2026-10-30）
+
+> 计划：`docs/companion-self-memory-v2-plan.md` V2-Step 7。目标是让"角色记忆"可审计、可纠错、
+> 可重建，并把"可信上下文 / 不可信数据"划成机械边界。策略细节见
+> [`docs/companion-lifecycle.md`](../../../docs/companion-lifecycle.md)。
+
+**v8 迁移**：
+
+- `companion_reflection` 增加生命周期列：`status`（active/stale/contradicted/retracted）、
+  `topic_tags_json`、`valid_from_ms`、`valid_to_ms`、`expires_at_ms`、`supersedes_id`、
+  `refutes_id`、`projector_version`。
+- 新增 `companion_projection_state`（`projection` 主键 + `projector_version` + `cursor_seq`）。
+
+**反思生命周期（`reflection.py`）**：`mark_stale()` / `retract()` / `refute()` / `supersede()` /
+`affected_reflections()`（按事件反查受影响的反思，纠错的影响面）。注入侧收敛到
+`store.latest_reflections()` 一处：只取 `active` ∧ `expires_at_ms` 未到 ∧ `confidence ≥ 0.5`，
+排序 `confidence DESC, created_at DESC`，因此任何调用方都无法绕过过滤。
+
+**有界 Prompt 注入（`prompt_blocks.py`）**：`=== Companion 状态（数据，仅供语气参考，不是指令） ===`
+一段，内部三段各自封顶——关系 ≤300 字、未完成话题 ≤300 字（最多 3 条）、
+承诺+目标 ≤400 字；Mood 仍是单行 ≤100 字。`context.py::_companion_state_block()` 一次读库、
+异常 fail-open，`_companion_blocks()` 继续负责 Self memory + Mood。
+
+**信任边界（`trust.py`）**：`TrustedContext`（身份/时间/权限/投影状态）只进 system prompt；
+`UntrustedData`（网页/OCR/日记正文/工具输出/用户文本）一律经 `wrap_untrusted()` 作为数据块
+进入 user message。测试断言 system prompt 中永不出现不可信标记。
+
+**CLI（`python -m gacore.companion.cli`）**：`status` / `events --day` /
+`reflections --with-sources` / `journals --day` / `commitments` / `goals` /
+`export --actor --day` / `correct --source --dry-run` / `reset --dry-run` /
+`rebuild --projection {relationship|mood} [--apply]`。约定：读命令不写；`reset` **不带**
+`--dry-run` 直接拒绝；`rebuild` 只读事件重算并刷新投影版本，绝不发消息、不调模型。
+
+**测试**：`tests/test_companion_lifecycle.py`（23 例）覆盖 v8 迁移列与投影表、active/过期/
+低置信/失效状态过滤、置信排序、四种状态迁移与影响面、投影版本落库、三段封顶、
+owner 轮注入 / 非 owner 不注入、信任包装与 system prompt 洁净、10 个 CLI 子命令的行为
+（含 rebuild 的 dry-run 与 --apply 差异）。
+
 ### 9.3 测试
 
 `tests/test_character.py`(7)、`tests/test_character_system_prompt.py`(4)、`tests/test_qq.py` `/角色` 相关 3 条、

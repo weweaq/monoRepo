@@ -6131,3 +6131,48 @@ V1 稳定性缺口里，1/2/3/4/5/6/7 也在同一批未提交改动里。
 - [x] V2-Step 6 活动/偏好/反馈与受控主动循环（migration v7）
 - [ ] V2-Step 7：生命周期、统一信任边界与端到端评估（migration v8）
 - [ ] 把受控主动循环接进 scheduler（Step 7）
+
+## 2026-10-30 · Companion V2-Step 7：生命周期 / 信任边界 / CLI（migration v8）
+
+**背景**：V2 最后一步。前三件事：让反思能"失效而不删除"、让信任边界变成机械规则、
+让所有派生状态都能从 CLI 查、从源事件重建。
+
+**已完成**：
+
+- `companion/store.py`：`SCHEMA_VERSION=8` + `MIGRATION_V8`（反思生命周期八列 +
+  `companion_projection_state`）；`ReflectionRecord` 扩展；`latest_reflections()` 收敛过滤
+  （active ∧ 未过期 ∧ confidence ≥0.5，按置信/时间排序）；新增
+  `set_reflection_status()` / `reflection_sources()` / `reflections_for_events()` /
+  `projection_state()` / `record_projection()`；反思与日记写入时 stamp `projector_version`。
+- `companion/reflection.py`：`mark_stale` / `retract` / `refute` / `supersede` /
+  `affected_reflections` 五个生命周期入口。
+- `companion/prompt_blocks.py`（新增）：关系 ≤300 / 话题 ≤300 / 承诺+目标 ≤400 的有界块。
+- `context.py`：`_companion_state_block()` 注入上述块（一次读库、fail-open）。
+- `companion/trust.py`（新增）：`wrap_trusted` / `wrap_untrusted`，动态材料只走数据块。
+- `companion/cli.py`（新增）：10 个子命令；reset 仅预览、rebuild 只读重算。
+- `relationship.py` / `mood.py`：刷新后写 `companion_projection_state`。
+- `docs/companion-lifecycle.md`（新增）：保留期、导出、纠错传播、重建、reset 范围、
+  信任边界、已知边界七节。
+- `tests/test_companion_lifecycle.py`（新增 23 例）。
+- R5 三处同步：本文件 + tech §9.2.15 + 架构图 `LIFE` / `TRUST` / `CLICMD` 三节点与四条边。
+
+**实测验证**：
+
+- `uv run pytest apps/withlanggraph/tests/test_companion_lifecycle.py -q` → **23 passed**
+- 全仓 → **2228 passed, 4 skipped**；ruff 全绿；mermaid 校验 ALL PASS
+
+**偏差说明**：
+
+- `reset` 只做预览、不做物理删除：删除是不可逆动作，按 `docs/companion-lifecycle.md`
+  的手工流程（先导出备份）执行更安全。
+- `rebuild` 仅支持 relationship / mood 两个纯函数投影；日记/承诺/目标的重建需要模型或外部
+  结果，明确留给人工，避免"重建"变成隐式重跑模型。
+- 偏好（`self_preference`）本步只做保留期读取与手工写入，自动学习仍待后续版本。
+- 20 轮真实 QQ transcript 与两周观察期仍是人工项，代码侧无法自证。
+
+**待办更新**：
+
+- [x] V2-Step 7 生命周期 / 信任边界 / CLI（migration v8）
+- [x] V2 全部 7 个 Step 落地
+- [ ] 观察期：从 2026-10-30 首篇日记起两周，关注主动消息模板感/打扰率/沉默比例/成本
+- [ ] 把受控主动循环接进 scheduler（当前为库 + sender seam，未替换 08:30 job）
