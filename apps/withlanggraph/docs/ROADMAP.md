@@ -5186,4 +5186,70 @@ Companion 事实源。本步**只写事件，不调用反思、不调 LLM**；�
 **待办更新**：
 
 - [x] Step 4 Owner C2C 收件事件（代码 + 测试 + R5 三处同步）
-- [ ] Step 5 发送回执基础设施（普通最终回复与 proactive 返回真实发送结果，本步不写 event）
+- [x] Step 5 发送回执基础设施（普通最终回复与 proactive 返回真实发送结果，本步不写 event）
+
+
+## 2026-10-30 · Companion 自我记忆 V1 Step 5：发送回执基础设施
+
+**背景**：按 `docs/companion-self-memory-v1-plan.md` Step 5，把「回复发出去了」从
+「调用没抛异常」升级为**平台真实确认**。本步只建立回执基础设施，**不写 Companion
+event**（Step 6 才依据 `SendReceipt.confirmed` 写 `agent.message.sent`）。
+
+**已完成**：
+
+- `src/gacore/frontends/qq.py`：
+  - 新增不可变数据类 `SegmentReceipt(confirmed, actual_text, provider_message_id,
+    outcome_unknown)` 与 `SendReceipt(confirmed, segments: tuple[SegmentReceipt, ...])`。
+  - 新增 `_UNKNOWN_SEND_ERROR_NAMES` 与 `_is_send_outcome_unknown(exc)`：内置
+    `TimeoutError` / `ConnectionError` 及 aiohttp/httpx 同名连接/超时异常视为 unknown。
+  - `_send_markdown()` 由 `-> None` 改为 `-> SendReceipt`：对 `_split_text()` 的每个
+    4500 字安全分块调用 `_attempt_send()` 并逐段记录回执。
+  - `_attempt_send()`（staticmethod）返回 `(confirmed, provider_message_id, unknown)`；
+    成功时从返回 dict 的 `id` 取平台消息 id（为空记 `None`，但明确成功仍
+    `confirmed=True`）；异常按 `_is_send_outcome_unknown` 分类后记录 warning，不静默吞掉。
+  - markdown（`msg_type=2`）**仅在明确失败**时降级 plain（`msg_type=0`，复用同一
+    `msg_seq`）；timeout/连接不明记 `outcome_unknown=True` 且**不降级**，避免重复送达。
+  - 全段 `confirmed=True` 才 `SendReceipt.confirmed=True`；否则记录
+    `QQ send not fully confirmed`（确认段数 / 总段数 / unknown 段数）并把回执返回调用方。
+  - `send_text()` 由 `-> None` 改为 `-> SendReceipt`；chat archive 移到 receipt 之后，
+    只拼接 `confirmed=True` 的段落写入 `qq_chat_log.jsonl`，失败/unknown 段绝不入库。
+- `src/gacore/tools/qq_tools.py`：`QqPushResult` 新增 `actual_message`，两处返回
+  （正常 / `truncated=True`）均透传真正发送的 `message`（截断时即截断版正文）。
+- `src/gacore/proactive.py`：`_qq_push_sent()` 由 `(list[str]) -> bool` 改为
+  `(list[str], recipient) -> str | None`——要求 `status=="sent"`、`recipient ∈ to`、
+  `recipient ∉ failures`、`ids` 含 `recipient` 键（平台 id 可为空串）、`actual_message`
+  非空，返回实际正文；**不以总 `ok>0` 代替本人成功**。`run_proactive_job()` 逐用户传
+  `uid`，`None` 时走既有 `_mark_failed` + warning。
+- `tests/test_companion_delivery.py`（新增，9 条）：markdown 成功 / 明确失败降级 plain /
+  timeout 不降级 / 全部失败 / 多段部分成功 / 平台 id 为空仍确认 / 无 client /
+  chat log 仅记确认段。
+- `tests/test_proactive.py`：`TestQqPushSent` 重写为严格回执用例（本人成功返回正文、
+  别人成功不算、缺 `to`/`ids`/`actual_message` 均不算）；各 proactive 端到端 fake 载荷
+  统一补齐 `to`/`failures`/`ids`/`actual_message`。
+- `tests/test_proactive_candidates.py` / `test_proactive_p1..p3*` / `test_proactive_questions.py`
+  / `test_tools_qq_push.py`：fake 载荷与断言同步新字段。
+
+**实测验证**：
+
+- `uv run pytest apps/withlanggraph/tests/test_companion_delivery.py -q` → **9 passed**（6.27s）
+- `uv run pytest apps/withlanggraph/tests/test_proactive*.py apps/withlanggraph/tests/test_tools_qq_push.py
+  apps/withlanggraph/tests/test_companion_delivery.py -q` → **258 passed**（9.27s）
+- `uv run pytest -q`（全仓）→ **1915 passed, 4 skipped**
+- `uv run ruff check apps packages tests` → All checks passed
+- `node apps/mermaid-viewer/tests/check_prompt_logic.js` → ALL PASS（本步只改既有节点文案，
+  未新增/删除行，行号锚点未受影响）
+
+**偏差说明**：
+
+- 计划修改文件列出 `src/gacore/langTrack/qq_push.py`，实际 `qq_push` 结果的唯一生产方是
+  `tools/qq_tools.py`，该文件无需改动。
+- 原 `_send_markdown` 的 3 次重试循环被移除：明确失败才降级 plain，unknown 既不降级也
+  不重试，避免 timeout 场景重复送达；失败原因由 `_attempt_send` 的 warning 与
+  `QQ send not fully confirmed` 的 error 两级记录。
+- 非最终回复的调用点（命令回执、反馈、进度提示等）目前只 await 丢弃回执，语义不变；
+  Step 6 只对最终回复与 proactive 使用回执。
+
+**待办更新**：
+
+- [x] Step 5 发送回执基础设施（代码 + 测试 + R5 三处同步）
+- [ ] Step 6 已确认发送事件（基于 `SendReceipt.confirmed` 写 `agent.message.sent`）

@@ -828,6 +828,34 @@ flowchart LR
   单空格并 strip → `gacore/redact.py::redact_text` 脱敏 → 超长截断为 `max_chars-1` 字符 +
   `"…"`；`max_chars<=0` 抛 `ValueError`。
 
+### 9.2.3 QQ 发送回执（2026-10-30，Step 5）
+
+本步只建立“真实发送结果”的基础设施，**不写 Companion event**（Step 6 才据此写 sent）。
+
+- `frontends/qq.py` 新增不可变数据类：
+  `SegmentReceipt(confirmed, actual_text, provider_message_id, outcome_unknown)` 与
+  `SendReceipt(confirmed, segments: tuple[SegmentReceipt, ...])`。
+- `_send_markdown()` 返回 `SendReceipt`，对 `_split_text()` 的每个 4500 字安全分块逐段记录：
+  1. 先发 markdown（`msg_type=2`）；成功即确认，`provider_message_id` 取返回 dict 的
+     `id`（为空则 `None`，但明确成功仍 `confirmed=True`）。
+  2. 只有**明确失败**（平台返回错误，botpy 映射为 `AuthenticationFailedError` /
+     `NotFoundError` / `MethodNotAllowedError` / `ForbiddenError` / `SequenceNumberError` /
+     `ServerError` 等 `RuntimeError` 子类）才允许降级 plain（`msg_type=0`，复用同一 `msg_seq`）。
+  3. **timeout / 连接不明**（`TimeoutError` / `ConnectionError` 及
+     `ClientConnectionError` / `ServerDisconnectedError` / `httpx.ConnectError` 等）记
+     `outcome_unknown=True`，**不降级**——markdown 可能已经送达，再发 plain 会重复。
+  4. 全部段落 `confirmed=True` 才 `SendReceipt.confirmed=True`；否则记录
+     `QQ send not fully confirmed`（含确认段数 / 总段数 / unknown 段数），并把回执返回给调用方，
+     不再吞掉最终失败。
+- `send_text()` 返回 `SendReceipt`；chat archive 在 receipt 之后写，只拼接 `confirmed=True`
+  的段落（`"\n".join`），失败/unknown 段绝不进 `qq_chat_log.jsonl`。
+- `tools/qq_tools.py::QqPushResult` 新增 `actual_message`：截断到 `_PUSH_MAX_CHARS` 后真正
+  发给平台的正文（`truncated=True` 时即截断版），Step 6 用它写 proactive sent event。
+- `proactive.py::_qq_push_sent(qq_push_results, recipient) -> str | None`：仅当
+  `status=="sent"`、`recipient ∈ to`、`recipient ∉ failures`、`ids` 含 `recipient` 键
+  （平台 id 可为空串）且 `actual_message` 非空时返回实际正文，否则 `None`。**不以总
+  `ok>0` 代替本人成功**；`run_proactive_job` 逐用户传 `uid` 校验。
+
 ### 9.3 测试
 
 `tests/test_character.py`(7)、`tests/test_character_system_prompt.py`(4)、`tests/test_qq.py` `/角色` 相关 3 条、
@@ -838,6 +866,11 @@ flowchart LR
 `tests/test_companion_events.py`(21)：摘要折叠/脱敏/200 字截断、actor 判定、owner 命令与各业务
 分支各写一次、群聊/非 owner/图片/空文本不写、重复 message ID 幂等、store 异常不阻断聊天；
 Step 4 验收 21 passed。
+`tests/test_companion_delivery.py`(9)：markdown 成功 / 明确失败降级 plain / timeout 不降级 /
+全失败 / 多段部分成功 / 平台 id 为空仍确认 / 无 client / chat log 仅记确认段；Step 5 验收 9 passed。
+`tests/test_proactive.py` 的 `TestQqPushSent` 扩为严格回执：本人成功返回 `actual_message`、
+别人成功不算、缺 `to`/`ids`/`actual_message` 均不算；各 proactive 端到端 fake 载荷同步补齐
+`to`/`failures`/`ids`/`actual_message`。
 
 ### 9.4 主动推送（openid 落库 + qq_push）
 
