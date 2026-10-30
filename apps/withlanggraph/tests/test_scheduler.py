@@ -9,6 +9,7 @@ due jobs, running them, persisting state, and writing outputs + daily notes.
 from __future__ import annotations
 
 import json
+import types
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -16,6 +17,7 @@ import pytest
 
 from gacore.config import Config
 from gacore.scheduler import (
+    JOURNAL_POOL,
     Job,
     JobState,
     ScheduleResult,
@@ -33,6 +35,7 @@ from gacore.scheduler import (
     next_run_time,
     run_job,
     run_loop,
+    run_journal_job,
     save_state,
 )
 
@@ -1064,3 +1067,91 @@ class TestLoadJobsEmail:
 
         assert jobs[0].deliver_to == "file"
         assert jobs[0].email_to == ""
+
+# ---------- companion journal job (V2-Step 1 trigger) ----------
+
+
+class TestJournalJob:
+    """``type="journal"`` jobs project yesterday's events into the two journals."""
+
+    def test_inactive_companion_skips_without_model_call(self, tmp_path: Path, monkeypatch) -> None:
+        cfg = Config.for_tests(tmp_path)
+        monkeypatch.setenv("COMPANION_MVP_ENABLED", "0")
+        called: list[int] = []
+        monkeypatch.setattr(
+            "gacore.companion.journal.generate_due_journals",
+            lambda *a, **k: called.append(1),
+        )
+
+        outcome = run_journal_job(Job(name="j", schedule="00:10", prompt="", type="journal"), cfg)
+
+        assert outcome is None
+        assert called == []
+
+    def test_owner_active_card_selects_the_actor(self, tmp_path: Path, monkeypatch) -> None:
+        cfg = Config.for_tests(tmp_path)
+        monkeypatch.setenv("COMPANION_MVP_ENABLED", "1")
+        monkeypatch.setenv("COMPANION_OWNER_QQ_OPENID", "owner-1")
+        monkeypatch.setattr(
+            "gacore.companion.identity.ActiveCardRepository.get",
+            lambda self, openid: "linwan",
+        )
+        captured: dict = {}
+
+        def fake_generate(store, actor_id, principal_id, **kwargs):
+            captured.update(actor=actor_id, principal=principal_id)
+            return types.SimpleNamespace(ok=True, code="written", journals=(1, 2))
+
+        monkeypatch.setattr("gacore.companion.journal.generate_due_journals", fake_generate)
+
+        outcome = run_journal_job(Job(name="j", schedule="00:10", prompt="", type="journal"), cfg)
+
+        assert captured == {"actor": "linwan", "principal": "owner"}
+        assert outcome.code == "written"
+
+    def test_no_active_card_uses_the_default_actor(self, tmp_path: Path, monkeypatch) -> None:
+        cfg = Config.for_tests(tmp_path)
+        monkeypatch.setenv("COMPANION_MVP_ENABLED", "1")
+        monkeypatch.setenv("COMPANION_OWNER_QQ_OPENID", "owner-1")
+        monkeypatch.setattr(
+            "gacore.companion.identity.ActiveCardRepository.get",
+            lambda self, openid: None,
+        )
+        captured: dict = {}
+
+        def fake_generate(store, actor_id, principal_id, **kwargs):
+            captured.update(actor=actor_id)
+            return types.SimpleNamespace(ok=True, code="written", journals=())
+
+        monkeypatch.setattr("gacore.companion.journal.generate_due_journals", fake_generate)
+        run_journal_job(Job(name="j", schedule="00:10", prompt="", type="journal"), cfg)
+
+        assert captured["actor"] == "assistant-default"
+
+    def test_run_loop_dispatches_journal_jobs_to_the_pool(self, tmp_path: Path, monkeypatch) -> None:
+        cfg = Config.for_tests(tmp_path)
+        schedule = cfg.asset_dir.parent / "schedule.json"
+        schedule.parent.mkdir(parents=True, exist_ok=True)
+        schedule.write_text(
+            json.dumps({"jobs": [{"name": "journal", "schedule": "00:01", "prompt": "", "type": "journal"}]}),
+            encoding="utf-8",
+        )
+        submitted: list[tuple] = []
+
+        class _FakeFuture:
+            def add_done_callback(self, _cb) -> None:
+                return None
+
+        monkeypatch.setattr(
+            JOURNAL_POOL, "submit", lambda fn, *a: submitted.append((fn, a)) or _FakeFuture()
+        )
+
+        jobs_run = run_loop(
+            cfg=cfg,
+            graph_runner=lambda *a: None,
+            max_iterations=1,
+            clock=lambda: datetime(2026, 8, 3, 12, 0, 0, tzinfo=UTC),
+        )
+
+        assert jobs_run == 1
+        assert submitted and submitted[0][0] is run_journal_job

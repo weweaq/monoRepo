@@ -7,6 +7,12 @@
       "enabled": true
     },
     {
+      "name": "companion-journal",
+      "schedule": "00:10",
+      "type": "journal",
+      "enabled": true
+    },
+    {
       "name": "daily-report",
       "schedule": "23:50",
       "deliver_to": "email",

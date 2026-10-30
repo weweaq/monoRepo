@@ -67,6 +67,9 @@ _POLL_INTERVAL_SECONDS: Final = 30
 # 耗时不确定，绝不能阻塞轮询循环；与 PROACTIVE_POOL 隔离，避免两类重任务互相排队。
 EXTRACT_POOL: Final = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kg-extract")
 
+# Companion 两本日记 job（type="journal"）：内部有一次模型调用，同样不能占轮询循环。
+JOURNAL_POOL: Final = ThreadPoolExecutor(max_workers=1, thread_name_prefix="companion-journal")
+
 # ---- 调度回复清洗与完成性校验（修复 2026-09-03 日报正文被 <summary>/DSML 标签污染）----
 # <summary>...</summary> 完整块（GA 协议思考块）：qq.py 流式路径已在发送前剥离，调度/邮件路径补齐。
 _SUMMARY_BLOCK_RE: Final = re.compile(r"<summary>.*?</summary>", re.DOTALL)
@@ -214,6 +217,55 @@ def _log_extract_failure(fut: object) -> None:
     exc = fut.exception() if hasattr(fut, "exception") else None  # type: ignore[attr-defined]
     if exc is not None:
         logger.exception("kg-extract job raised top-level exception", exc=exc)
+
+
+def _log_journal_failure(fut: object) -> None:
+    """Log a top-level exception from a companion-journal worker (L1: never swallow)."""
+    exc = fut.exception() if hasattr(fut, "exception") else None  # type: ignore[attr-defined]
+    if exc is not None:
+        logger.exception("companion-journal job raised top-level exception", exc=exc)
+
+
+def run_journal_job(job: Job, cfg: Config) -> object | None:
+    """Write yesterday's two companion journals for the owner (V2-Step 1 trigger).
+
+    Dispatched by run_loop for ``type == "journal"`` jobs into JOURNAL_POOL. The actor
+    is the owner's current active card (or ``assistant-default``), so a card switch at
+    midnight separates the two actors' diaries instead of mixing them.
+
+    Never raises: a journal failure must not touch V1 chat or reflection. Returns the
+    ``JournalOutcome`` (or ``None`` when skipped) so callers/tests can assert the code.
+    """
+    from gacore.companion.config import load_companion_config
+    from gacore.companion.identity import DEFAULT_ACTOR_ID, ActiveCardRepository
+    from gacore.companion.journal import generate_due_journals
+    from gacore.companion.store import CompanionStore
+
+    start = time.monotonic()
+    try:
+        companion = load_companion_config()
+        if not companion.active or not companion.owner_openid:
+            logger.info(
+                "companion journal skipped: feature inactive or owner missing",
+                job=job.name,
+            )
+            return None
+        actor_id = ActiveCardRepository().get(companion.owner_openid) or DEFAULT_ACTOR_ID
+        store = CompanionStore.from_config(cfg)
+        outcome = generate_due_journals(store, actor_id, "owner")
+        logger.info(
+            "companion journal finished",
+            job=job.name,
+            actor_id=actor_id,
+            code=getattr(outcome, "code", None),
+            ok=getattr(outcome, "ok", None),
+            journals=len(getattr(outcome, "journals", ()) or ()),
+            duration_seconds=round(time.monotonic() - start, 2),
+        )
+        return outcome
+    except Exception as e:  # noqa: BLE001 — worker must not leak the exception to the pool
+        logger.exception("companion journal failed", exc=e, job=job.name)
+        return None
 
 
 def run_extract_job(job: Job, cfg: Config, for_day: str | None = None) -> RunResult | None:
@@ -1595,6 +1647,24 @@ def run_loop(
                     future.add_done_callback(_log_extract_failure)
                     logger.info(
                         "kg-extract job dispatched",
+                        job=job.name,
+                        schedule=job.schedule,
+                        now=now.isoformat(timespec="seconds"),
+                    )
+                    states[job.name] = JobState(
+                        last_run=now.isoformat(timespec="seconds"),
+                        run_count=state.run_count + 1,
+                    )
+                    save_state(resolved_cfg, states)
+                    jobs_run += 1
+                    continue
+                if job.type == "journal":
+                    # Companion 两本日记：确定性投影 + 一次模型调用，投到独立单 worker，
+                    # 立刻落 last_run 以免同一 tick 重复触发。
+                    future = JOURNAL_POOL.submit(run_journal_job, job, resolved_cfg)
+                    future.add_done_callback(_log_journal_failure)
+                    logger.info(
+                        "companion-journal job dispatched",
                         job=job.name,
                         schedule=job.schedule,
                         now=now.isoformat(timespec="seconds"),
