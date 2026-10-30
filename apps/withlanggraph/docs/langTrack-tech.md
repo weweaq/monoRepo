@@ -968,7 +968,8 @@ flowchart LR
 - `frontends/qq.py::_run_agent`：`companion_context` 仅在**非群聊**且
   `actor_id_for(user_id, load_companion_config(), current_card)` 非空时构造
   `{"actor_id": actor_id, "principal_id": "owner"}`；群聊/非 owner 恒 `None`，不从
-  `active_card` 反推 owner。trivial 快速回复不进 graph，因此不读取 self-memory。
+  `active_card` 反推 owner。2026-10-30 起快速回复也是一次正常 `_run_agent`（`fast=True`），
+  只是不绑工具、跳过 RAG 召回，因此**同样读取 self-memory**、同样写 `agent.message.sent`。
 
 ### 9.2.8 Companion Reply Style 与短消息投递（2026-10-30，Step 9）
 
@@ -1112,39 +1113,52 @@ sequenceDiagram
 
 **核心思想**：消息入口按「随口话 / 真问题」分流。随口话（极短或白名单词、且无意图词）→ 独立轻量 LLM 直接生成 1~2 句即兴回应（不建 agent、不调工具、不跑 graph、不写线程）；真问题 → 正常 agent 回路，决策类问题另注入多方案输出指令，发送端按【方案N】锚点拆多条消息。所有判定 fail-open：边界情形一律放行进完整回路，绝不误杀正经问题。
 
-**Phase 1 分流时序**：
+**Phase 1 分流时序（2026-10-30 重构：只有一条回复路径）**：
 
 ```mermaid
 flowchart LR
-    M[on_message 文本] --> G{trivial_detect}
-    G -- 命中(≤8字或白名单词, 无意图词) --> T[_trivial_reply]
-    G -- 未命中 --> R[_run_agent 正常回路]
-    T --> L[get_llm 无工具 bind temp=1.0 max_tokens=60]
-    L --> P[prompt: 时间/饭点/今日画像/口吻/人物卡]
-    P --> S[发送 1~2 句]
+    M[on_message 文本] --> G{fast_reply_detect}
+    G -- 命中(filler, 无意图词/内容词) --> F[_enqueue_agent_turn fast=True]
+    G -- 未命中 --> N[_enqueue_agent_turn fast=False]
+    F --> FG[_fast_graph: build_graph tool_list=[]]
+    N --> NG[self.graph: 全工具]
+    FG --> P[build_system_prompt: 同一套 prompt, 跳过 RAG]
+    NG --> P
+    P --> S[_plan_final_reply → _deliver_reply_batch → agent.message.sent]
 ```
 
 **关键位置**：
 
 | 职责 | 位置 | 说明 |
 |---|---|---|
-| 随口话判定 | `qq.py:trivial_detect` | ≤`_TRIVIAL_MAX_LEN`(8) 字或命中 `_TRIVIAL_WHITELIST`，且不含 `_INTENT_WORDS`（如何/怎么/为什么/帮我/推荐/方案/对比/能否…）→ True；`any(w in t for w in _INTENT_WORDS)` 优先短路放行 |
-| 轻回应入口 | `qq.py:on_message` 第 4 步前 | `asyncio.create_task(self._trivial_reply(...))` 后 return，不进入停顿图/中断/正常轮 |
-| 轻回应实现 | `qq.py:_trivial_reply` | `get_llm([], bind_tools=False).bind(temperature=1.0, max_tokens=60)`；注入 `_meal_period(now.hour)`/`load_recent_daily_summaries(cfg)`/`_recent_user_voice(user_id)`/人物卡 `card_prompt`；无固定模板；异常降级 `"嗯，我在。"` |
-| 口吻采样 | `qq.py:_recent_user_voice` | `graph.aget_state` 读 thread 最近 1~3 条 HumanMessage.content，失败降级空串 |
-| A0 提示兜底 | `context.py:_RESPONSE_LAYER_RULES` | `build_system_prompt` 恒注入 `[回应分层铁律]`：随口话/情绪话/简短问候 → 一句话带过（20 字内，不调工具不展开）；明确提问/任务 → 全力作答；无法确定一律按正经问题。防漏网随口话仍长篇 |
+| 随口话判定 | `qq.py:fast_reply_detect` | ≤`_FAST_REPLY_MAX_LEN`(5) 字或命中 `_FAST_REPLY_WHITELIST`，且不含 `_INTENT_WORDS`（如何/怎么/帮我/推荐…）与新增的内容词（记忆/特性/提交/代码/报错/日志/数据…）→ True；两类词表都优先短路放行完整轮 |
+| 快速轮入口 | `qq.py:on_message` 第 4 步 | `fast = fast_reply_detect(content)` 随 `_enqueue_agent_turn(..., fast=fast)` 进入合并循环；**不再有独立的轻回应实现** |
+| 快速轮图 | `qq.py:_fast_graph` | 首次使用时 `build_graph(cfg, checkpointer=self.graph.checkpointer, tool_list=[])` 并缓存；与主图同一 middleware、同一 checkpointer，仅工具为空 |
+| 快速轮提示 | `context.py:_rag_recall_block` | `state.fast_reply=True` 时直接返回空串（跳过 embedding 召回），其余 prompt（角色卡/Self memory/daily/事实卡/时间锚/Style Block）完全一致 |
+| 发送与记账 | `qq.py:_stream_agent → _plan_final_reply → _deliver_reply_batch` | 快速轮与普通轮同一条发送/回执/`agent.message.sent` 链路；快速轮不发「思考中…」占位气泡 |
+| A0 提示兜底 | `context.py:_RESPONSE_LAYER_RULES` | `build_system_prompt` 恒注入 `[回应分层铁律]`：随口话 → 一句话带过；明确提问 → 全力作答 |
 | 决策类判定 | `qq.py:proposal_detect` | 命中 `_PROPOSAL_KEYWORDS`（推荐/哪个好/怎么选/方案/对比/帮我决定/建议/选择…）→ True |
-| 模式注入 | `qq.py:_run_agent` → `state["output_mode"]="proposal"` | 仅首轮；`context.py` 在 `output_mode=="proposal"` 时追加 `=== 多方案输出模式 ===`（`_PROPOSAL_HEADER/_PROPOSAL_RULE`）：【方案一】..【方案三】至多 3 个 + “我建议选…”收尾 |
-| 拆条发送 | `qq.py:_split_by_proposal` + `_stream_agent` 尾部 | 按 `_PROPOSAL_RE`(`【方案N】`) 锚点分段，首段=开场、末段=收尾建议；复用 `_SPLIT_LIMIT` 基建逐条发送；锚点 <2 原样整条发送 |
-| 一次性语义 | `state.py:GAState.output_mode` / `graph.py:cleanup_images` | `output_mode: str | None` 注解；`cleanup_images` 返回 `output_mode: None` 首轮后清除不泄漏 |
+| 模式注入 | `qq.py:_run_agent` → `state["output_mode"]="proposal"` | 仅首轮；`context.py` 在 `output_mode=="proposal"` 时追加 `=== 多方案输出模式 ===`（`_PROPOSAL_HEADER/_PROPOSAL_RULE`） |
+| 拆条发送 | `qq.py:_plan_final_reply` + `_deliver_reply_batch` | 【方案N】锚点优先 fan-out；其余按 `state.companion_context` 选 companion/atomic |
+
+**历史与取舍**：2026-08 的实现是「`trivial_detect` → 独立 `_trivial_reply`」——自带一套 prompt、不建 agent、不写 sent 事件、不进 checkpoint。2026-10-30 重构为「快速轮」：同一条图/提示/发送/记账链路，只把「工具」和「RAG 召回」两个最贵的成本项关掉。原因：双实现导致 ①角色随口说的话永远不进自我记忆（2026-10-30 实机 4 条消息里 2 条落在快道，全部未记账）；②第二套 prompt 与 Companion 的 Style/Self-memory 体系并行漂移；③长度判据 ≤8 太粗（「你有自己的记忆了」被当成随口话）。重构后 `_trivial_reply`、`_meal_period`、`_recent_user_voice`、`_stamp_memory_history` 均已删除。
 
 **兜底铁律**：
 
-- `trivial_detect` 未命中 → 一律放行完整回路；轻回应任一环节失败仅降级极简句，绝不抛错阻塞消息循环。
-- 分诊只影响「回复方式」，不触碰 checkpoint/线程映射；`_recent_user_voice` 只读 `aget_state`，异常吞掉返回空串。
-- 未 kill/重启 bot；未改 `.ps1/.bat`；拆条仅影响发送端，不改变 graph 内 state。
+- `fast_reply_detect` 未命中 → 完整轮；命中但模型/图异常 → 走既有 `_stream_agent` 异常分支，不阻塞消息循环。
+- 合并突发消息时 `fast` 取 AND：一条正经问题会把整轮升级成完整轮；被取消轮次的 replay 文本一律强制完整轮。
+- 分诊只影响「工具与 RAG 成本」，不触碰 checkpoint/线程映射，也不再分出第二条发送实现。
 
-**已知边界**：白名单/意图词为静态词表，线上语料可能需微调；今日画像为空时轻回应仅以时间+人物卡接地；`【方案N】` 拆条规定由 prompt 强制，若模型未按锚点输出则整条发送（降级仍可读）。
+**已知边界**：白名单/意图词/内容词均为静态词表，线上语料可能需要微调；快速轮无工具，因此那些本该查库/查文件才能回答的短句（例如「在干嘛」被回「在看火」）仍按闲聊作答。
+
+### 9.7.1 工具轨迹只进日志（2026-10-30）
+
+| 项 | 说明 |
+|---|---|
+| 现象 | 一次带工具的轮次会向私聊发出约 20+ 条 `[agent] -> code_run(...)` / `[tools] <- {...}`，含完整 SQL、绝对路径、命令正文与原始 stderr |
+| 根因 | `_stream_agent` 渲染工具调用/结果时无条件 `send_text`；PowerShell 的 GBK 输出被按 UTF-8 解码，中文变 `��` 后照样外发并回喂模型 |
+| 改法 | 新增 `_trace_tool_event()`：**恒定写 JSONL 日志**（`tool trace`），仅当 `QQ_TOOL_TRACE=1` 时才发到聊天；`"思考中..."` 占位在快速轮不再发送 |
+| 边界 | 轨迹不是角色说的话，因此不进 `agent.message.sent`、不进 Companion 事件；`ask_user` 的真实提问消息（`[ask_user] …`）不受影响，照常发送 |
 
 ## 9.8 聊天护栏：注入勿念 / 禁复述与断言 / 时间权威
 

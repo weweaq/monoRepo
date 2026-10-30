@@ -5641,3 +5641,69 @@ Block（仅表达偏好），并在发送层用 `plan_final_reply()` 做语义�
 - [x] Step 5 回执用例恢复（`tests/test_qq_receipts.py`，9 条）
 - [x] ROADMAP Step 5 / Step 9 记录更正（消除同文件互斥描述）
 - [ ] 复核其余 Step 的「计划测试清单 vs 实际用例」逐条映射（本次只按函数名比对，未逐条对齐计划措辞）
+
+## 2026-10-30 · 单一回复路径（快速轮取代 _trivial_reply）+ 工具轨迹只进日志
+
+**背景**：实机验证 Companion V1 时暴露两个问题，根因同类——「什么进对话、什么只进日志」没划清：
+
+1. `_trivial_reply`（2026-08 落地）是一条**并行于 agent 的回复实现**：自带 prompt、不建图、不写
+   `agent.message.sent`、不写 checkpoint。实机 4 条消息有 2 条走它，角色说过的两句话永远进不了
+   自我记忆；同时它是 Companion Style/Self-memory 体系之外的第二个人格源，长期必然漂移。
+   且判据只看长度（≤8 字），「你有自己的记忆了」被当随口话走了无工具/无 RAG 的通道。
+2. `_stream_agent` 把 `[agent] -> code_run(...)` / `[tools] <- {...}` **无条件发进私聊**：一次带工具
+   的轮次实测吐出约 24 条气泡（含完整 SQL、`data\companion.db` 路径、命令正文与 GBK 乱码 stderr），
+   把角色真正说的 1~3 条消息淹没。
+
+**已完成**：
+
+- `src/gacore/frontends/qq.py`：
+  - 删除 `_trivial_reply` / `_meal_period` / `_recent_user_voice` / `_stamp_memory_history`
+    及随之无用的 `card_prompt`、`load_recent_daily_summaries` 导入。
+  - `trivial_detect` → `fast_reply_detect`：长度阈值 8 → 5，`_FAST_REPLY_WHITELIST` 保留，
+    `_INTENT_WORDS` 追加内容词（记忆/特性/功能/提交/代码/报错/日志/数据/文件/项目/部署/重启/测试/
+    配置/实现/重构/优化/修复），任一命中即走完整轮。
+  - `_enqueue_agent_turn(..., fast=False)` 把 `fast` 随文本带进合并循环（`_fast_pending` 取 AND，
+    一条正经问题升级整轮；被取消轮的 replay 文本强制完整轮）；`_run_agent(..., fast=False)` 写
+    `state.fast_reply` 并选图；`_stream_agent(..., graph=None)` 支持注入图，快速轮不再发「思考中…」。
+  - 新增 `_fast_graph()`：`build_graph(cfg, checkpointer=self.graph.checkpointer, tool_list=[])`
+    懒建 + 缓存，与主图同一 middleware、同一 checkpointer，只少工具。
+  - 新增 `_trace_tool_event()`：工具轨迹恒定写 JSONL（`tool trace`），仅 `QQ_TOOL_TRACE=1` 时
+    外发聊天；`ask_user` 的真实提问消息不受影响。
+- `src/gacore/state.py`：`GAState.fast_reply: bool` + `new_state(..., fast_reply=False)`。
+- `src/gacore/context.py`：`_rag_recall_block` 在 `fast_reply` 时直接返回空串（跳过 embedding
+  召回，这是单轮最贵的一步）；`build_system_prompt` 记录 `fast reply turn` 日志。
+- `tests/test_qq.py`：新增 15 例——`fast_reply_detect` 正反例、随口话走 `fast=True`、正经问题走
+  `fast=False`、`_run_agent` 选图、`_fast_graph` 只建一次且 `tool_list=[]`、工具轨迹默认只记日志 /
+  `QQ_TOOL_TRACE=1` 才外发、**无工具图端到端跑通且无占位气泡**。
+- `tests/test_context.py`：新增 2 例——`fast_reply` 跳过向量召回、普通轮仍召回。
+- `tests/test_companion_events.py` / `tests/test_qq.py`：跟随改名（`trivial_detect` →
+  `fast_reply_detect`、`_trivial_reply` 打桩移除、`test_stream_agent_renders_each_message_once`
+  显式打开 `_TOOL_TRACE_ENABLED` 以继续验证渲染去重）。
+- `apps/withlanggraph/.env.example`：新增 `QQ_TOOL_TRACE`（默认空 = 只进日志）。
+- R5 三处同步：本文件 + `docs/langTrack-tech.md`（§9.7 分流改为快速轮、新增 §9.7.1 工具轨迹、
+  §9.2.7 companion 说明更正）+ `docs/architecture-flow.mmd`（QQ 节点文本与 ingress 边文案；
+  只改行内文案，未增删行，行号锚点不变）。
+
+**实测验证**：
+
+- `uv run pytest apps/withlanggraph/tests/test_qq.py -q` → **48 passed**
+- `uv run pytest`（qq + companion + context + state + graph_loop + character）→ **169 passed**
+- `uv run ruff check apps packages tests` → All checks passed
+- 实机（重启后由用户发消息复验）：随口话只发 1 条角色消息、无「思考中…」、无任何 `[agent] ->`
+  / `[tools] <-` 气泡；正经问题仍是完整轮。
+
+**偏差说明**：
+
+- 没有彻底删除快速通道：删除后每句「在干嘛」都要 49–66 秒（实机测得完整轮耗时），代价不可接受。
+  改为"同一条路 + 两个成本开关"（无工具、无 RAG），换取单一实现与完整记账。
+- 编码问题（PowerShell 的 GBK 输出被按 UTF-8 解码成 `��`）**本次未修**——它属于 `code_run` 工具层，
+  与本次发送边界无关；已记录为待办，轨迹不再外发后它只影响模型可读性，不影响用户。
+- `codemap` skill 本会话不可用，架构图按已核实的源码符号手工同步（只改文案未动拓扑），待 skill
+  可用时再复审一次。
+
+**待办更新**：
+
+- [x] 单一回复路径（快速轮 = 同一 agent 路径 + 无工具 + 无 RAG）
+- [x] 工具轨迹默认只进日志（`QQ_TOOL_TRACE` 可开）
+- [ ] `code_run` powershell 分支编码自适应（utf-8 严格失败回退 cp936），修复中文 stderr 乱码
+- [ ] 真实 QQ 灰度：观察快速轮延迟、分段节奏与「随口话也进自我记忆」的实际观感
