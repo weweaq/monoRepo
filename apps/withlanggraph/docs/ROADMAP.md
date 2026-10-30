@@ -5129,3 +5129,61 @@ tick 流水线 / 触发器 / last_outreach 状态注入 / 推送去 agent 化 / 
 
 - [x] Step 3 最小 Companion SQLite Store（代码 + 测试 + R5 三处同步 + basetemp 基础设施修复）
 - [ ] Step 4 Owner C2C 收件事件（`QQApp.on_message()` 写 owner 文本事件，不调用反思）
+
+
+## 2026-10-30 · Companion 自我记忆 V1 Step 4：Owner C2C 收件事件
+
+**背景**：按 `docs/companion-self-memory-v1-plan.md` Step 4，把 owner 的 QQ 私聊文本落进
+Companion 事实源。本步**只写事件，不调用反思、不调 LLM**；群聊/非 owner/图片/空文本一律不写。
+
+**已完成**：
+
+- `src/gacore/companion/summary.py`（新增）：`minimize_user_message(text, max_chars=200)` —
+  `\s+` 折叠为单空格并 strip → `gacore/redact.py::redact_text` 脱敏 → 超长截为
+  `max_chars-1` 字符 + `"…"`；`max_chars<=0` 抛 `ValueError`。
+- `src/gacore/companion/identity.py`：新增 `DEFAULT_ACTOR_ID = "assistant-default"` 与
+  `actor_id_for(openid, companion, active_card)` — 非 owner / Companion 关闭返回 `None`，
+  owner 有卡返回卡 id，无卡回落默认 actor；取调用方已缓存的卡，保证与传给 graph 的
+  `active_card` 一致。
+- `src/gacore/companion/__init__.py`：导出 `DEFAULT_ACTOR_ID` / `actor_id_for` /
+  `minimize_user_message`。
+- `src/gacore/frontends/qq.py`：
+  - 模块级 `_companion_stores: dict[Path, CompanionStore]` + `_companion_store(cfg)` 按
+    `companion_db_path(cfg)` 懒加载缓存，避免 import 阶段跑 schema migration。
+  - `QQApp._record_companion_ingress(user_id, msg_id, content)`：`load_companion_config()` →
+    `actor_id_for(...)`（`None` 直接返回）→ `asyncio.to_thread(store.append_event, ...)`，
+    写入 `kind="user.message.received"`、`principal_id="owner"`、`source_id=str(msg_id)`、
+    `summary=minimize_user_message(content)`、`idempotency_key=f"qq-user:{msg_id}"`；
+    内部 `try/except Exception`，失败仅 `logger.warning`，不阻断聊天。
+  - `on_message()` 接入点：图片分支与空文本 `return` 之后、`logger.info` / chat archive /
+    command / mute / resume / QA / feedback / trivial / Agent 之前，
+    `if not is_group: await self._record_companion_ingress(...)`。命令、反馈、QA、trivial、
+    普通 Agent 输入各记一条。
+- `tests/test_companion_events.py`（新增，21 条）：摘要折叠/脱敏/200 字截断/空串/非法上限、
+  actor 判定（默认 actor / 角色卡 / 非 owner / 关闭）、owner `/help` 与各业务分支各写一次、
+  群聊/非 owner/图片/空文本不写、重复 message ID 只写一条（绕过进程去重后靠 DB 幂等键）、
+  store 抛异常时 `send_text` 仍被调用且不落库。
+
+**实测验证**：
+
+- `uv run pytest apps/withlanggraph/tests/test_companion_events.py -q` → **21 passed**（6.12s）
+- `uv run pytest apps/withlanggraph/tests/test_qq.py apps/withlanggraph/tests/test_companion_store.py
+  apps/withlanggraph/tests/test_companion_config.py -q` → **52 passed**（22.74s）
+- `uv run pytest -q`（全仓）→ **1901 passed, 4 skipped**（139.16s）
+- `uv run ruff check`（companion 包 + qq.py + test_companion_events.py）→ All checks passed
+- `node apps/mermaid-viewer/tests/check_prompt_logic.js` → ALL PASS（新增 QQ→CSTORE 边位于
+  line 139，既有锚点 RC/SC/MMX/FB/MAIN/FLOW/WT/日报正文 均在 139 之前，行号未受影响）
+
+**偏差说明**：
+
+- 计划 Step 4 的修改文件列出 `config.py` / `store.py`，实际未改：Step 2 的 `CompanionConfig`
+  与 Step 3 的 `append_event` 已满足本步所需，无需扩接口。
+- `on_message` 的 allowlist 检查在写入点之前，因此非 owner 在受限模式下先被拦截；
+  `actor_id_for` 再兜一层 owner 判定，二者都不触库。
+- 重复消息同时受两层保护：进程内 `_processed_ids` 与 DB 幂等键 `qq-user:<msg_id>`；
+  测试显式清空前者以验证后者。
+
+**待办更新**：
+
+- [x] Step 4 Owner C2C 收件事件（代码 + 测试 + R5 三处同步）
+- [ ] Step 5 发送回执基础设施（普通最终回复与 proactive 返回真实发送结果，本步不写 event）

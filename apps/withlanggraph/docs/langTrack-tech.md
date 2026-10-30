@@ -768,8 +768,8 @@ flowchart LR
 
 ### 9.2.1 Companion V1 最小 SQLite Store（2026-10-30，Step 3）
 
-`src/gacore/companion/store.py` 是 Companion 自我记忆的唯一事实源；**本步只建库与 API，
-尚未接入 QQ / proactive（Step 4 起接线）**。
+`src/gacore/companion/store.py` 是 Companion 自我记忆的唯一事实源；本步只建库与 API，
+**Step 4 起由 `QQApp.on_message()` 写入 owner 收件事件**（见 9.2.2）。
 
 - 表（`PRAGMA user_version = 1`）：`companion_event`（`seq` 自增主键、`event_id` /
   `idempotency_key` 各自 UNIQUE、`actor_id` / `principal_id` / `kind` / `summary` /
@@ -802,6 +802,32 @@ flowchart LR
 - 隔离：所有读 API 都按 `(actor_id, principal_id)` 过滤，跨 actor 的 event / reflection
   不可见；同进程并发写各自独立连接，不共享 cursor。
 
+### 9.2.2 Companion V1 Owner C2C 收件事件（2026-10-30，Step 4）
+
+`QQApp.on_message()` 在**任何业务分支之前**写入一条 owner 私聊文本事件；本步只落事件，
+不调用反思、不调 LLM。
+
+- 接入点顺序（`frontends/qq.py`）：message ID 去重 → 解析 content/user → allowlist →
+  图片分支 `return` → 空文本 `return` → **`if not is_group: await
+  self._record_companion_ingress(user_id, msg_id, content)`** → chat archive / command /
+  mute / resume / QA / feedback / trivial / Agent。因此命令、反馈、trivial、普通 Agent 输入
+  各记一条；群聊、图片、空文本、非 owner 不记。
+- 写入字段：`kind="user.message.received"`、`principal_id="owner"`、
+  `source_id=str(msg_id)`、`idempotency_key=f"qq-user:{msg_id}"`、
+  `summary=minimize_user_message(content)`；`actor_id=actor_id_for(user_id, companion,
+  _user_card.get(user_id))`，即 owner 当前角色卡 id，无卡时回落
+  `identity.DEFAULT_ACTOR_ID = "assistant-default"`。
+- 隔离：`actor_id_for` 对非 owner / Companion 关闭直接返回 `None`，不触库；`on_message`
+  的 allowlist 仍在前置生效。
+- 非阻断：`_record_companion_ingress` 内部 `try/except Exception`，失败仅
+  `logger.warning("companion ingress write failed", stack_trace=...)`，聊天继续；
+  `append_event` 经 `asyncio.to_thread` 调用，不阻塞事件循环。
+- Store 复用：模块级 `_companion_stores: dict[Path, CompanionStore]` 按
+  `companion_db_path(cfg)` 懒加载缓存，避免 import 阶段执行 schema migration。
+- 摘要 `companion/summary.py::minimize_user_message(text, max_chars=200)`：`\s+` 折叠为
+  单空格并 strip → `gacore/redact.py::redact_text` 脱敏 → 超长截断为 `max_chars-1` 字符 +
+  `"…"`；`max_chars<=0` 抛 `ValueError`。
+
 ### 9.3 测试
 
 `tests/test_character.py`(7)、`tests/test_character_system_prompt.py`(4)、`tests/test_qq.py` `/角色` 相关 3 条、
@@ -809,6 +835,9 @@ flowchart LR
 `tests/test_proactive.py::TestOwnerPersona`(7)；Step 2 验收 89 passed。
 `tests/test_companion_store.py`(17)：migration 幂等 / 失败回滚 / user_version / 每连接 PRAGMA /
 幂等键 / FK / actor 隔离 / 并发独立连接 / reflection-source-cursor 全事务回滚；Step 3 验收 17 passed。
+`tests/test_companion_events.py`(21)：摘要折叠/脱敏/200 字截断、actor 判定、owner 命令与各业务
+分支各写一次、群聊/非 owner/图片/空文本不写、重复 message ID 幂等、store 异常不阻断聊天；
+Step 4 验收 21 passed。
 
 ### 9.4 主动推送（openid 落库 + qq_push）
 
