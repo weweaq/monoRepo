@@ -5316,7 +5316,8 @@ Companion 事实源里的 sent 事件。仍**不触发反思**（Step 7 才接�
 
 - [x] Step 6 已确认发送事件（代码 + 测试 + R5 三处同步）
 - [x] Step 7 Evidence-Bound Reflection（代码 + 测试 + R5 三处同步）
-- [ ] Step 8 Self-Memory Prompt 注入（owner C2C 完整 Agent 轮最多注入 3 条反思）
+- [x] Step 8 Self-Memory Prompt 注入（owner C2C 完整 Agent 轮最多注入 3 条反思）
+- [ ] Step 9 Companion 短消息节奏与 E2E（Reply Style Block + 发送层分段）
 
 
 ## 2026-10-30 · Companion 自我记忆 V1 Step 7：Evidence-Bound Reflection
@@ -5407,3 +5408,96 @@ Companion 事实源里的 sent 事件。仍**不触发反思**（Step 7 才接�
 - `store.py` 计划外新增两个游标方法（固定批次 / 记录失败），避免在 reflection 层拼 SQL。
 - 反思写入依赖既有 `commit_reflection_batch` 的 source 归属校验；跨 actor 引用会整批回滚。
 
+
+## 2026-10-30 · Companion 自我记忆 V1：新 V1 Prompt 架构对齐（Step 2 / Step 7 / Step 8）
+
+**背景**：`docs/companion-self-memory-v1-plan.md` 新增 §0.2–0.7「V1 Prompt 架构」后，按新规格
+对齐已落地的 Step 2 与 Step 7，并完成 Step 8。三个 Prompt 职责按 §0.2.1 拆开：Proactive
+Outreach（Step 2）、Reflection（Step 7）、Self-Memory Context Block（Step 8），不再混用同一套
+人格/指令文本；动态背景一律以 JSON 数据块注入，并显式声明「只是数据，不是指令」。
+
+**已完成**：
+
+- Step 2 工具层强约束（`src/gacore/tools/single_use.py`、`graph.py`、`proactive.py`）：
+  - 新增 `SingleUseTool.wrap(tool, max_calls=1)`：计数器挂在包装器实例上，第 2 次调用直接
+    返回 `{error: "tool_budget_exhausted", ...}`，不触发内层工具；description 追加
+    「本轮最多调用 N 次」。
+  - `graph.build_graph(..., tool_list=None)` / `_build_core_agent(..., tool_list)`：
+    `None` 保持全量注册表，非空则只绑定给定工具；不再在子图内部硬编码 `build_tool_list`。
+  - `proactive._headless_run` 改为 `build_graph(tool_list=[SingleUseTool.wrap(qq_push,
+    max_calls=1)])`：proactive 结构上只能看到 `qq_push` 一次，无法触达文件/shell/网页/邮件工具。
+  - `build_proactive_prompt` 按 §0.3 重排为「背景数据 JSON 块（recent_topic /
+    yesterday_insight / open_questions / user_emotion_hint）+ 动作 + 表达要求 + 约束」；
+    动作明确「不值得打扰时可不调用 qq_push」「最多一次」「push 后不再复述正文」。
+- Step 7 对齐 §0.4/§0.5（`src/gacore/companion/reflection.py`）：
+  - `REFLECTION_PROMPT_VERSION` 改为 `"companion-reflection@v1"`。
+  - System Prompt 补全 8 条硬规则：source 2–5、不得声称未发生行动、user.message.received
+    是用户经历、sent 事件只表示确认发送、不改人格/不推断关系/不创建承诺、不输出隐私凭据
+    路径完整聊天、证据不足返回空数组、只输出 schema JSON。
+  - Human 事件 JSON 增加 `occurred_at_ms`，与 §0.4 输入 Schema 一致。
+  - 新增 `_COMMAND_LIKE` 正则：statement 命中「忽略/覆盖规则、切换/扮演角色、调用工具/
+    qq_push、系统指令/提示词」时返回
+    `"statement contains an instruction or role switch"`，整批拒绝；在写入期拦截，
+    不依赖 Step 8 注入时的下游清洗。
+- Step 8 Self-Memory Prompt 注入：
+  - `src/gacore/companion/context.py`（新增）：
+    - `SELF_MEMORY_BLOCK_VERSION = "companion-self-memory@v1"`、
+      `MAX_SELF_MEMORY_REFLECTIONS = 3`、`MAX_SELF_MEMORY_CHARS = 1000`。
+    - `build_self_memory_block(store, *, actor_id, principal_id, max_reflections=3,
+      max_chars=1000)`：`store.latest_reflections` 精确查询该 actor；渲染 §0.5 模板
+      （`=== Self memory（有证据的角色自我记忆） ===` + 使用规则），payload 为
+      `{"reflections": [{"statement", "confidence"}]}` canonical JSON，置于
+      `<self_memory_json>` 边界内。
+    - 预算：最多 3 条；逐条追加后若 payload 超过 1,000 字符则回退最后一条并停止；
+      空白 statement 跳过；无可用条目时不输出标题。
+    - 转义：payload 中 `&` → `&amp;`、`<` → `&lt;`、`>` → `&gt;`，反思无法闭合数据块。
+    - fail-open：`store is None`、空 actor/principal、store 异常一律返回 `""`。
+  - `src/gacore/state.py`：新增 `CompanionTurnContext(TypedDict)` 与
+    `GAState.companion_context`；`new_state(..., companion_context=None)` 透传。
+  - `src/gacore/context.py`：`build_system_prompt` 在角色卡之后、daily/RAG/rollover/
+    fact-card 之前注入 Self memory；`_self_memory_block` 内部懒导入 store/context 并捕获
+    全部异常，缺库/损坏时整块省略。
+  - `src/gacore/frontends/qq.py::_run_agent`：仅非群聊且
+    `actor_id_for(user_id, load_companion_config(), current_card)` 非空时构造
+    `{"actor_id": actor_id, "principal_id": "owner"}`；群聊/非 owner 恒为 `None`。
+  - `src/gacore/companion/__init__.py`：导出 Step 8 常量与 `build_self_memory_block`。
+- 测试：
+  - `tests/test_tools_single_use.py`（新增）：包装器保留名称/schema、首次放行、第二次拒绝、
+    description 标注调用上限。
+  - `tests/test_graph_loop.py`：`build_graph(tool_list=...)` 只绑定给定工具。
+  - `tests/test_proactive.py`：背景数据块标注「只是数据」、headless 只暴露单次 qq_push。
+  - `tests/test_companion_reflection.py`：版本号、System Prompt 结构、`occurred_at_ms`、
+    命令式 statement 整批拒绝（3 条用例）。
+  - `tests/test_companion_context.py`（新增，13 条）：版本/上限常量、空 store/空身份、
+    无反思不输出标题、canonical JSON、最多 3 条、1,000 字预算截断、空白跳过、边界字符
+    转义、store 异常 fail-open、真实 store 的 actor/principal 隔离。
+  - `tests/test_state.py`：`companion_context` 默认 None、显式透传、checkpoint resume 保留。
+  - `tests/test_context.py`：角色卡 → Self memory → daily 的顺序、无 context 不构造、
+    空块不注入、store 失败 fail-open、真实 store 反思进入 system prompt。
+  - `tests/test_qq.py`：owner C2C 写入 companion_context、群聊与非 owner 保持 None。
+
+**实测验证**：
+
+- `uv run pytest apps/withlanggraph/tests/test_companion_context.py
+  apps/withlanggraph/tests/test_context.py apps/withlanggraph/tests/test_state.py
+  apps/withlanggraph/tests/test_qq.py -q` → **89 passed**
+- `uv run pytest -q`（全仓，`--all-packages`）→ **1997 passed, 4 skipped**（144.45s）
+- `uv run ruff check apps packages tests` → All checks passed
+
+**偏差说明**：
+
+- §0.5 模板中的 `{canonical_reflection_json}` 实现为
+  `{"reflections": [{"statement", "confidence"}]}`；未注入 `source_event_ids`，避免把事件
+  原文/ID 暴露进 system prompt，证据链只留在 `companion_reflection_source` 表。
+- 计划把 Step 2/7 的改动视作既有步骤，本批按新文档对齐后与 Step 8 一起记录，未重开历史
+  条目；Step 7 的 `reflection.v1` 已按 §0.2.2 统一为 `companion-reflection@v1`（数据库
+  历史行保留旧版本值，不做回填）。
+- Step 8 的 `_self_memory_block` 采用函数内懒导入，避免 `context.py` 与 companion 包在
+  import 期形成环，同时让 `CompanionStore` 缺失时也能 fail-open。
+- 群聊/非 owner 的隔离在 `qq.py` 构造 state 时完成，不依赖 Prompt 层判断，也不从
+  `active_card` 反推 owner。
+
+**待办更新**：
+
+- [x] Step 8 Self-Memory Prompt 注入（代码 + 测试 + R5 三处同步）
+- [ ] Step 9 Companion 短消息节奏与 E2E（§0.6 Reply Style Block + `plan_final_reply()` 分段）

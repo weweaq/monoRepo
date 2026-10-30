@@ -362,6 +362,9 @@ append_event(
 
 ## 7. 反思设计
 
+> V1 全部 Prompt 模板、动态数据边界和版本约定见
+> [`companion-self-memory-v1-plan.md` 的“V1 Prompt 架构”](./companion-self-memory-v1-plan.md#02-v1-prompt-架构)。
+
 ### 7.1 触发
 
 每次成功写入 event 后运行轻量检查，始终处理**最早尚未反思的固定批次**：
