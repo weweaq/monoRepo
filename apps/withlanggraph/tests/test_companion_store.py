@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from gacore.companion.store import (
+    SCHEMA_VERSION,
     MIGRATION_V1,
     AppendResult,
     CompanionStore,
@@ -76,7 +77,7 @@ class TestSchema:
 
         conn = sqlite3.connect(str(path))
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         finally:
             conn.close()
         assert {

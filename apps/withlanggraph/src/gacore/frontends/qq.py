@@ -111,6 +111,7 @@ from gacore.companion.identity import (
     legacy_memory_allowed,
 )
 from gacore.companion.reply_batch import ReplyBatch, plan_final_reply
+from gacore.companion.relationship import refresh_relationship
 from gacore.companion.store import CompanionStore, companion_db_path
 from gacore.companion.summary import minimize_user_message
 from gacore.config import Config, load_dotenv
@@ -994,6 +995,24 @@ async def _heartbeat_loop(heartbeat: Heartbeat, detail: dict[str, object]) -> No
 
 
 
+async def _refresh_relationship_quietly(store: CompanionStore, actor_id: str) -> None:
+    """Recompute the relationship projection off-loop; failures never touch the chat.
+
+    Called right after a confirmed event lands (owner ingress and character send), so a
+    boundary the owner just stated takes effect on the very next message instead of
+    waiting for a nightly job. The projection is a handful of indexed reads plus one
+    upsert, hence safe to run per event.
+    """
+    try:
+        await asyncio.to_thread(refresh_relationship, store, actor_id, "owner")
+    except Exception:  # noqa: BLE001 — projection must never break a turn
+        logger.warning(
+            "companion relationship refresh failed",
+            actor_id=actor_id,
+            stack_trace=traceback.format_exc(),
+        )
+
+
 class QQApp:
 
     """Routes QQ messages into the gacore agent loop and sends back replies."""
@@ -1272,6 +1291,8 @@ class QQApp:
             # of the same message must not spend a second model call.
             if result.inserted:
 
+                await _refresh_relationship_quietly(store, actor_id)
+
                 schedule_reflection_check(actor_id, "owner")
 
         except Exception:  # noqa: BLE001 — memory write must never break the chat path
@@ -1368,6 +1389,8 @@ class QQApp:
             )
 
             if result.inserted:
+
+                await _refresh_relationship_quietly(store, actor_id)
 
                 schedule_reflection_check(actor_id, "owner")
 

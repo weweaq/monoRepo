@@ -26,6 +26,7 @@ from gacore.companion.journal import (
     validate_journal_payload,
 )
 from gacore.companion.store import (
+    SCHEMA_VERSION,
     MIGRATION_V1,
     CompanionStore,
     JournalDraft,
@@ -139,10 +140,10 @@ def _tables(path: Path) -> set[str]:
 class TestMigrationV2:
     def test_v2_creates_journal_tables_and_stamps_version(self, tmp_path: Path) -> None:
         path = tmp_path / "companion.db"
-        CompanionStore(path)
-
-        conn = sqlite3.connect(str(path))
+        # Pin the target: later migrations must not silently invalidate this assertion.
+        conn = sqlite3.connect(str(path), isolation_level=None)
         try:
+            apply_migration(conn, target_version=2)
             assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
         finally:
             conn.close()
@@ -174,7 +175,7 @@ class TestMigrationV2:
         assert [e.event_id for e in store.events_after("linwan", "owner", 0)] == ["evt_old"]
         conn = sqlite3.connect(str(path))
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
         finally:
             conn.close()
 

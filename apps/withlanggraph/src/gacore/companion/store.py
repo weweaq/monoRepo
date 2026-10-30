@@ -13,6 +13,7 @@ v1 database upgrades in place without losing events.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 import uuid
@@ -25,7 +26,7 @@ from typing import Final
 
 from gacore.config import Config
 
-SCHEMA_VERSION: Final = 2
+SCHEMA_VERSION: Final = 3
 DEFAULT_BUSY_TIMEOUT_MS: Final = 5000
 
 # Versioned registry: V1/V2 allow the three message events only. Journal data is a
@@ -34,8 +35,13 @@ DEFAULT_BUSY_TIMEOUT_MS: Final = 5000
 _EVENT_KINDS_V1: Final = frozenset(
     {"user.message.received", "agent.message.sent", "proactive.message.sent"}
 )
-EVENT_KINDS: Final[dict[int, frozenset[str]]] = {1: _EVENT_KINDS_V1, 2: _EVENT_KINDS_V1}
+EVENT_KINDS: Final[dict[int, frozenset[str]]] = {1: _EVENT_KINDS_V1, 2: _EVENT_KINDS_V1, 3: _EVENT_KINDS_V1}
 SUPPORTED_EVENT_KINDS: Final = EVENT_KINDS[SCHEMA_VERSION]
+
+# Relationship vocabulary (V2-Step 2). The projector is the only writer, and stage is
+# derived by rules — a model may never set it directly.
+RELATIONSHIP_STAGES: Final = frozenset({"new", "familiar", "established"})
+RELATIONSHIP_STATUSES: Final = frozenset({"stable", "strained", "repairing"})
 
 JOURNAL_VISIBILITIES: Final = frozenset({"to_owner", "private"})
 JOURNAL_STATUSES: Final = frozenset({"draft", "final", "stale"})
@@ -154,6 +160,40 @@ class Cursor:
     failure_count: int = 0
     last_error: str | None = None
     last_reflected_at_ms: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Relationship:
+    """Derived relationship state: verifiable counters plus a rule-derived stage/status."""
+
+    actor_id: str
+    principal_id: str
+    stage: str
+    status: str
+    meaningful_interactions: int
+    active_days: int
+    positive_feedback: int
+    user_boundaries: tuple[dict[str, object], ...]
+    actor_boundaries: tuple[str, ...]
+    last_negative_event_id: str | None
+    last_repair_event_id: str | None
+    last_interaction_at_ms: int | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class OpenThread:
+    """One unresolved topic the owner raised and the character has not answered yet."""
+
+    open_thread_id: str
+    actor_id: str
+    principal_id: str
+    topic: str
+    source_event_id: str
+    status: str
+    created_at: str
+    updated_at: str
 
 
 _TIMESTAMP_DEFAULT: Final = "datetime('now','+8 hours')"
@@ -302,7 +342,60 @@ MIGRATION_V2: Final[tuple[str, ...]] = (
     """,
 )
 
-MIGRATIONS: Final[dict[int, tuple[str, ...]]] = {1: MIGRATION_V1, 2: MIGRATION_V2}
+MIGRATION_V3: Final[tuple[str, ...]] = (
+    f"""
+    CREATE TABLE IF NOT EXISTS companion_relationship (
+        actor_id                TEXT NOT NULL,
+        principal_id            TEXT NOT NULL,
+        stage                   TEXT NOT NULL CHECK (stage IN (
+                                  'new', 'familiar', 'established'
+                                )),
+        status                  TEXT NOT NULL DEFAULT 'stable' CHECK (status IN (
+                                  'stable', 'strained', 'repairing'
+                                )),
+        meaningful_interactions INTEGER NOT NULL DEFAULT 0,
+        active_days             INTEGER NOT NULL DEFAULT 0,
+        positive_feedback       INTEGER NOT NULL DEFAULT 0,
+        user_boundaries_json    TEXT NOT NULL DEFAULT '[]'
+                                  CHECK (json_valid(user_boundaries_json)),
+        actor_boundaries_json   TEXT NOT NULL DEFAULT '[]'
+                                  CHECK (json_valid(actor_boundaries_json)),
+        last_negative_event_id  TEXT REFERENCES companion_event(event_id),
+        last_repair_event_id    TEXT REFERENCES companion_event(event_id),
+        last_interaction_at_ms  INTEGER,
+        created_at              TEXT NOT NULL DEFAULT ({_TIMESTAMP_DEFAULT}),
+        updated_at              TEXT NOT NULL DEFAULT ({_TIMESTAMP_DEFAULT}),
+        PRIMARY KEY (actor_id, principal_id)
+    )
+    """,
+    f"""
+    CREATE TABLE IF NOT EXISTS companion_open_thread (
+        open_thread_id   TEXT PRIMARY KEY,
+        actor_id         TEXT NOT NULL,
+        principal_id     TEXT NOT NULL,
+        topic            TEXT NOT NULL,
+        source_event_id  TEXT NOT NULL REFERENCES companion_event(event_id),
+        status           TEXT NOT NULL CHECK (status IN (
+                           'open', 'resolved', 'cancelled'
+                         )),
+        created_at       TEXT NOT NULL DEFAULT ({_TIMESTAMP_DEFAULT}),
+        updated_at       TEXT NOT NULL DEFAULT ({_TIMESTAMP_DEFAULT}),
+        FOREIGN KEY (actor_id, principal_id)
+            REFERENCES companion_relationship(actor_id, principal_id)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_companion_open_thread_actor
+    ON companion_open_thread(actor_id, principal_id, status)
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_companion_open_thread_topic
+    ON companion_open_thread(actor_id, principal_id, topic)
+    WHERE status = 'open'
+    """,
+)
+
+MIGRATIONS: Final[dict[int, tuple[str, ...]]] = {1: MIGRATION_V1, 2: MIGRATION_V2, 3: MIGRATION_V3}
 
 
 def companion_db_path(cfg: Config) -> Path:
@@ -1004,6 +1097,195 @@ class CompanionStore:
         return tuple(reflection_ids)
 
 
+    # ---------------------------------------------------------------- relationship
+
+    def relationship(self, actor_id: str, principal_id: str) -> Relationship | None:
+        """Current relationship row for one actor, or ``None`` before the first projection."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM companion_relationship WHERE actor_id = ? AND principal_id = ?",
+                (actor_id, principal_id),
+            ).fetchone()
+        return _row_to_relationship(row) if row is not None else None
+
+    def events_for_actor(
+        self, actor_id: str, principal_id: str, *, limit: int = 500
+    ) -> list[CompanionEvent]:
+        """All events of one actor, oldest first (the projection's input)."""
+        if limit <= 0:
+            return []
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM companion_event
+                WHERE actor_id = ? AND principal_id = ?
+                ORDER BY seq ASC LIMIT ?
+                """,
+                (actor_id, principal_id, int(limit)),
+            ).fetchall()
+        return [_row_to_event(row) for row in rows]
+
+    def save_relationship(
+        self,
+        *,
+        actor_id: str,
+        principal_id: str,
+        stage: str,
+        status: str,
+        meaningful_interactions: int,
+        active_days: int,
+        positive_feedback: int,
+        user_boundaries: Sequence[dict[str, object]],
+        actor_boundaries: Sequence[str],
+        last_negative_event_id: str | None = None,
+        last_repair_event_id: str | None = None,
+        last_interaction_at_ms: int | None = None,
+    ) -> Relationship:
+        """Insert or replace the derived relationship row (one writer: the projector)."""
+        _require_non_empty("actor_id", actor_id)
+        _require_non_empty("principal_id", principal_id)
+        if stage not in RELATIONSHIP_STAGES:
+            raise ValueError(f"unknown relationship stage: {stage!r}")
+        if status not in RELATIONSHIP_STATUSES:
+            raise ValueError(f"unknown relationship status: {status!r}")
+        payload_user = json.dumps(list(user_boundaries), ensure_ascii=False)
+        payload_actor = json.dumps(list(actor_boundaries), ensure_ascii=False)
+        with self._transaction() as conn:
+            conn.execute(
+                f"""
+                INSERT INTO companion_relationship (
+                    actor_id, principal_id, stage, status, meaningful_interactions,
+                    active_days, positive_feedback, user_boundaries_json,
+                    actor_boundaries_json, last_negative_event_id,
+                    last_repair_event_id, last_interaction_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(actor_id, principal_id) DO UPDATE SET
+                    stage = excluded.stage,
+                    status = excluded.status,
+                    meaningful_interactions = excluded.meaningful_interactions,
+                    active_days = excluded.active_days,
+                    positive_feedback = excluded.positive_feedback,
+                    user_boundaries_json = excluded.user_boundaries_json,
+                    actor_boundaries_json = excluded.actor_boundaries_json,
+                    last_negative_event_id = excluded.last_negative_event_id,
+                    last_repair_event_id = excluded.last_repair_event_id,
+                    last_interaction_at_ms = excluded.last_interaction_at_ms,
+                    updated_at = {_TIMESTAMP_DEFAULT}
+                """,
+                (
+                    actor_id,
+                    principal_id,
+                    stage,
+                    status,
+                    int(meaningful_interactions),
+                    int(active_days),
+                    int(positive_feedback),
+                    payload_user,
+                    payload_actor,
+                    last_negative_event_id,
+                    last_repair_event_id,
+                    last_interaction_at_ms,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM companion_relationship WHERE actor_id = ? AND principal_id = ?",
+                (actor_id, principal_id),
+            ).fetchone()
+        assert row is not None  # pragma: no cover - the upsert above always leaves a row
+        return _row_to_relationship(row)
+
+    def open_threads(
+        self, actor_id: str, principal_id: str, *, status: str | None = "open"
+    ) -> list[OpenThread]:
+        """Threads of one actor; ``status=None`` returns every state, oldest first."""
+        with self._connect() as conn:
+            if status is None:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM companion_open_thread
+                    WHERE actor_id = ? AND principal_id = ?
+                    ORDER BY created_at ASC, rowid ASC
+                    """,
+                    (actor_id, principal_id),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM companion_open_thread
+                    WHERE actor_id = ? AND principal_id = ? AND status = ?
+                    ORDER BY created_at ASC, rowid ASC
+                    """,
+                    (actor_id, principal_id, status),
+                ).fetchall()
+        return [_row_to_open_thread(row) for row in rows]
+
+    def add_open_thread(
+        self, *, actor_id: str, principal_id: str, topic: str, source_event_id: str
+    ) -> str:
+        """Record one open thread; a repeated same-topic open thread returns the existing id.
+
+        The thread's ``source_event_id`` must be a real event of the same actor (the FK to
+        ``companion_event`` plus an ownership check), and a relationship row must exist
+        first because ``companion_open_thread`` references it.
+        """
+        _require_non_empty("topic", topic)
+        _require_non_empty("source_event_id", source_event_id)
+        with self._transaction() as conn:
+            owned = conn.execute(
+                """
+                SELECT 1 FROM companion_event
+                WHERE event_id = ? AND actor_id = ? AND principal_id = ?
+                """,
+                (source_event_id, actor_id, principal_id),
+            ).fetchone()
+            if owned is None:
+                raise SourceOwnershipError(
+                    f"open thread source {source_event_id!r} is not an event of "
+                    f"({actor_id!r}, {principal_id!r})"
+                )
+            conn.execute(
+                """
+                INSERT INTO companion_relationship (actor_id, principal_id, stage)
+                VALUES (?, ?, 'new')
+                ON CONFLICT(actor_id, principal_id) DO NOTHING
+                """,
+                (actor_id, principal_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO companion_open_thread (
+                    open_thread_id, actor_id, principal_id, topic, source_event_id, status
+                ) VALUES (?, ?, ?, ?, ?, 'open')
+                ON CONFLICT DO NOTHING
+                """,
+                (f"thr_{uuid.uuid4().hex}", actor_id, principal_id, topic, source_event_id),
+            )
+            row = conn.execute(
+                """
+                SELECT open_thread_id FROM companion_open_thread
+                WHERE actor_id = ? AND principal_id = ? AND topic = ? AND status = 'open'
+                """,
+                (actor_id, principal_id, topic),
+            ).fetchone()
+        if row is None:  # pragma: no cover - the insert above always leaves a row
+            raise CompanionStoreError(f"open thread {topic!r} vanished after insert")
+        return str(row["open_thread_id"])
+
+    def set_open_thread_status(self, open_thread_id: str, *, status: str) -> None:
+        """Move one thread to ``resolved`` or ``cancelled`` (never back to ``open``)."""
+        if status not in {"resolved", "cancelled"}:
+            raise ValueError(f"threads can only be resolved or cancelled, got {status!r}")
+        with self._transaction() as conn:
+            conn.execute(
+                f"""
+                UPDATE companion_open_thread
+                SET status = ?, updated_at = {_TIMESTAMP_DEFAULT}
+                WHERE open_thread_id = ?
+                """,
+                (status, open_thread_id),
+            )
+
+
 def _assert_sources_owned(
     conn: sqlite3.Connection,
     actor_id: str,
@@ -1137,6 +1419,45 @@ def _row_to_journal(row: sqlite3.Row) -> JournalRecord:
         visibility=row["visibility"],
         body=row["body"],
         prompt_version=row["prompt_version"],
+        status=row["status"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+def _row_to_relationship(row: sqlite3.Row) -> Relationship:
+    try:
+        user_boundaries = tuple(json.loads(row["user_boundaries_json"] or "[]"))
+    except ValueError:  # pragma: no cover - the column is CHECK(json_valid)
+        user_boundaries = ()
+    try:
+        actor_boundaries = tuple(json.loads(row["actor_boundaries_json"] or "[]"))
+    except ValueError:  # pragma: no cover
+        actor_boundaries = ()
+    return Relationship(
+        actor_id=row["actor_id"],
+        principal_id=row["principal_id"],
+        stage=row["stage"],
+        status=row["status"],
+        meaningful_interactions=int(row["meaningful_interactions"]),
+        active_days=int(row["active_days"]),
+        positive_feedback=int(row["positive_feedback"]),
+        user_boundaries=user_boundaries,
+        actor_boundaries=actor_boundaries,
+        last_negative_event_id=row["last_negative_event_id"],
+        last_repair_event_id=row["last_repair_event_id"],
+        last_interaction_at_ms=row["last_interaction_at_ms"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _row_to_open_thread(row: sqlite3.Row) -> OpenThread:
+    return OpenThread(
+        open_thread_id=row["open_thread_id"],
+        actor_id=row["actor_id"],
+        principal_id=row["principal_id"],
+        topic=row["topic"],
+        source_event_id=row["source_event_id"],
         status=row["status"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],

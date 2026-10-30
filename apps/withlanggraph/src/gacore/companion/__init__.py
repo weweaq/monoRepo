@@ -57,6 +57,14 @@ from gacore.companion.reflection import (
     run_reflection,
     validate_reflections,
 )
+from gacore.companion.relationship import (
+    DEFAULT_ACTOR_BOUNDARIES,
+    RELATIONSHIP_PROJECTION_VERSION,
+    BoundaryHit,
+    RelationshipProjection,
+    project,
+    refresh_relationship,
+)
 from gacore.companion.reply_batch import (
     MAX_REPLY_SEGMENTS,
     REPLY_BATCH_VERSION,
@@ -70,7 +78,11 @@ __all__ = [
     "ActiveCardError",
     "ActiveCardRepository",
     "CompanionConfig",
+    "DEFAULT_ACTOR_BOUNDARIES",
     "DEFAULT_ACTOR_ID",
+    "RELATIONSHIP_PROJECTION_VERSION",
+    "BoundaryHit",
+    "RelationshipProjection",
     "JOURNAL_PROMPT_VERSION",
     "JournalOutcome",
     "JournalPayload",
@@ -96,6 +108,8 @@ __all__ = [
     "minimize_user_message",
     "owner_active_card",
     "plan_final_reply",
+    "project",
+    "refresh_relationship",
     "reflect_due",
     "run_journal",
     "run_reflection",
