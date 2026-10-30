@@ -428,7 +428,7 @@ class TestRunProactiveJobP1:
         monkeypatch.setattr(
             proactive,
             "_headless_run",
-            lambda job, cfg, prompt, max_turns, active_card=None: (
+            lambda job, cfg, prompt, max_turns, active_card=None, owner_openid="": (
                 "CURRENT_TASK_DONE",
                 "韩立的早安",
                 ['{"status": "sent", "ok": 1, "to": ["u1"], "failures": [], "ids": {"u1": "m1"}, "actual_message": "早"}'],
@@ -446,7 +446,7 @@ class TestRunProactiveJobP1:
         monkeypatch.setattr(
             proactive,
             "_headless_run",
-            lambda job, cfg, prompt, max_turns, active_card=None: (
+            lambda job, cfg, prompt, max_turns, active_card=None, owner_openid="": (
                 "CURRENT_TASK_DONE",
                 "韩立的早安",
                 ['{"status": "sent", "ok": 1, "to": ["u1"], "failures": [], "ids": {"u1": "m1"}, "actual_message": "早"}'],
@@ -464,7 +464,14 @@ class TestRunProactiveJobP1:
         monkeypatch.setattr(proactive, "load_known_users", lambda: {"u1": {}})
         prompts: list[str] = []
 
-        def fake_headless(job: Job, cfg: Config, prompt: str, max_turns: int, active_card: str | None = None) -> tuple:
+        def fake_headless(
+            job: Job,
+            cfg: Config,
+            prompt: str,
+            max_turns: int,
+            active_card: str | None = None,
+            owner_openid: str = "",
+        ) -> tuple:
             prompts.append(prompt)
             return ("CURRENT_TASK_DONE", "接话题", ['{"status": "sent", "ok": 1, "to": ["u1"], "failures": [], "ids": {"u1": "m1"}, "actual_message": "早"}'])
 
@@ -488,7 +495,14 @@ class TestRunProactiveJobP1:
         monkeypatch.setattr(proactive, "load_known_users", lambda: {"u1": {}})
         prompts: list[str] = []
 
-        def fake_headless(job: Job, cfg: Config, prompt: str, max_turns: int, active_card: str | None = None) -> tuple:
+        def fake_headless(
+            job: Job,
+            cfg: Config,
+            prompt: str,
+            max_turns: int,
+            active_card: str | None = None,
+            owner_openid: str = "",
+        ) -> tuple:
             prompts.append(prompt)
             return ("CURRENT_TASK_DONE", "问候", ['{"status": "sent", "ok": 1, "to": ["u1"], "failures": [], "ids": {"u1": "m1"}, "actual_message": "早"}'])
 
@@ -501,5 +515,5 @@ class TestRunProactiveJobP1:
         job = Job(name="proactive-morning", schedule="every 1h", prompt="早安", type="proactive")
         result = proactive.run_proactive_job(job, cfg=cfg, clock=lambda: _dt(2026, 8, 27, 7, 30))
         assert result["sent"] == 1
-        assert "昨日画像线索" in prompts[0]
+        assert "yesterday_insight" in prompts[0]
         assert "昨天在忙重构进度" in prompts[0]

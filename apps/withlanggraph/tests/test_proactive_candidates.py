@@ -359,7 +359,7 @@ def test_questions_scene_falls_back_to_candidate_pool(tmp_path, monkeypatch):
     monkeypatch.setattr("gacore.proactive_candidates.select", lambda *a, **k: [cand])
     captured: dict = {}
 
-    def fake_headless(job, cfg_, prompt, max_turns, active_card=None):
+    def fake_headless(job, cfg_, prompt, max_turns, active_card=None, owner_openid=""):
         captured["prompt"] = prompt
         return "END", "转述完成", [
             json.dumps(
@@ -378,7 +378,8 @@ def test_questions_scene_falls_back_to_candidate_pool(tmp_path, monkeypatch):
     job = Job(name="daily-questions", schedule="08:30", prompt="", scene="questions")
     result = proactive.run_proactive_job(job, cfg, clock=lambda: _dt(2026, 10, 26))
     assert result["sent"] == 1
-    assert "[Q1] 「买相机」这件事后来做了吗？" in captured["prompt"]
+    assert "「买相机」这件事后来做了吗？" in captured["prompt"]
+    assert captured["prompt"].count("「买相机」这件事后来做了吗？") == 1
     rows = all_rows(cfg)
     assert len(rows) == 1 and rows[0]["kind"] == "candidate" and rows[0]["asks"] == 1
 

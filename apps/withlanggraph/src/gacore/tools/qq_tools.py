@@ -14,8 +14,10 @@ owner). Tests replace the module-level ``_default_send`` with a fake via monkeyp
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Final, Literal, NotRequired, TypedDict
 
 from langchain_core.tools import tool
@@ -31,7 +33,24 @@ _PUSH_TIMEOUT_S: Final = 90
 # reading is best under ~200 chars; anything longer is truncated before delivery.
 _PUSH_MAX_CHARS: Final = 200
 
+# Tool-layer recipient pinning (V1 stabilization gap 2): a proactive run may only
+# push to the owner openid the code chose. ``None`` means "unpinned" (CLI usage keeps
+# the historical all-known-users behaviour); a frozenset restricts the tool hard.
+_PINNED_RECIPIENTS: ContextVar[frozenset[str] | None] = ContextVar(
+    "qq_push_pinned_recipients", default=None
+)
+
 _EXECUTOR: ThreadPoolExecutor | None = None
+
+
+@contextmanager
+def pin_recipients(openids: tuple[str, ...] | list[str]) -> Iterator[None]:
+    """Restrict ``qq_push`` to ``openids`` for the current context, then restore."""
+    token = _PINNED_RECIPIENTS.set(frozenset(o for o in openids if o))
+    try:
+        yield
+    finally:
+        _PINNED_RECIPIENTS.reset(token)
 
 
 class QqPushResult(TypedDict):
@@ -122,9 +141,24 @@ def qq_push(
         )
         message = message[:_PUSH_MAX_CHARS]
         truncated = True
+    pinned = _PINNED_RECIPIENTS.get()
+    if pinned is not None and not pinned:
+        return QqPushError(
+            error="no_recipients",
+            message="当前上下文没有允许的收件人",
+            to=[],
+        )
     if not targets:
-        users = load_known_users()
-        targets = list(users.keys())
+        targets = sorted(pinned) if pinned is not None else list(load_known_users().keys())
+    if pinned is not None:
+        disallowed = [target for target in targets if target not in pinned]
+        if disallowed:
+            logger.warning("qq_push recipient rejected by pin", targets=disallowed)
+            return QqPushError(
+                error="recipient_not_allowed",
+                message="本次只能推送给固定的主人 openid，不能指定其他收件人",
+                to=disallowed,
+            )
     if not targets:
         return QqPushError(
             error="no_recipients",

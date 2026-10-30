@@ -21,6 +21,14 @@ from gacore.scheduler import Job
 _TZ = timezone(timedelta(hours=8))
 
 
+def _open_questions(prompt: str) -> list[str]:
+    """The background JSON's ``open_questions`` array — the only place questions are injected."""
+    marker = '"open_questions": '
+    start = prompt.index(marker) + len(marker)
+    end = prompt.index("]", start) + 1
+    return json.loads(prompt[start:end])
+
+
 def _dt(y: int, mo: int, d: int, h: int = 0, mi: int = 0) -> datetime:
     return datetime(y, mo, d, h, mi, tzinfo=_TZ)
 
@@ -395,7 +403,7 @@ class TestSourceMuteWiring:
         monkeypatch.setattr(proactive, "_target_users", lambda job: ["u1"])
         captured: dict = {}
 
-        def fake_headless(job, cfg_, prompt, max_turns, active_card=None):
+        def fake_headless(job, cfg_, prompt, max_turns, active_card=None, owner_openid=""):
             captured["prompt"] = prompt
             return "END", "转述完成", [json.dumps(
                 {
@@ -413,8 +421,7 @@ class TestSourceMuteWiring:
             _questions_job(), cfg, clock=lambda: _dt(2026, 10, 21, 8, 30)
         )
         assert result["sent"] == 1
-        assert "[Q1]" in captured["prompt"]
-        assert "[Q2]" not in captured["prompt"]
+        assert len(_open_questions(captured["prompt"])) == 1  # adaptive cap = 1 question/push
 
 
 # --------------------------------------------------------------------------- ops

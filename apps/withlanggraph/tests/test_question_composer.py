@@ -141,7 +141,9 @@ def test_verbatim_single_prompt_form(tmp_path):
     assert "一字不改" in verbatim and "不加编号" in verbatim and q in verbatim
     assert "[Q1]" not in verbatim
     numbered = build_proactive_prompt(job, "u", now, questions=["问题A", "问题B"])
-    assert "[Q1] 问题A" in numbered and "[Q2] 问题B" in numbered  # 日报提醒保持编号
+    # 缺口 5：问题正文只进背景 JSON，prompt 只保留 [Qn] 编号规则。
+    assert "open_questions" in numbered and "[Q1]" in numbered
+    assert '"open_questions": ["问题A", "问题B"]' in numbered
 
 
 # 拍板 4：静音豁免——mute_exemption 跳过 globally_muted 闸

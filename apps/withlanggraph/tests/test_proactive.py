@@ -442,7 +442,7 @@ class TestRunProactiveJob:
         monkeypatch.setattr(
             proactive,
             "_headless_run",
-            lambda job, cfg, prompt, max_turns, active_card=None: (
+            lambda job, cfg, prompt, max_turns, active_card=None, owner_openid="": (
                 "CURRENT_TASK_DONE",
                 "韩立的早安",
                 [
@@ -475,7 +475,7 @@ class TestRunProactiveJob:
         monkeypatch.setattr(
             proactive,
             "_headless_run",
-            lambda job, cfg, prompt, max_turns, active_card=None: ("CURRENT_TASK_DONE", "", []),
+            lambda job, cfg, prompt, max_turns, active_card=None, owner_openid="": ("CURRENT_TASK_DONE", "", []),
         )
         job = Job(name="proactive-morning", schedule="every 1h", prompt="早安", type="proactive")
         result = proactive.run_proactive_job(job, cfg=cfg, clock=lambda: _dt(2026, 8, 27, 7, 30))
@@ -490,7 +490,7 @@ class TestRunProactiveJob:
         monkeypatch.setattr(
             proactive,
             "_headless_run",
-            lambda job, cfg, prompt, max_turns, active_card=None: (
+            lambda job, cfg, prompt, max_turns, active_card=None, owner_openid="": (
                 "CURRENT_TASK_DONE",
                 "",
                 ['{"error": "no_recipients", "message": "no users"}'],
@@ -550,7 +550,7 @@ class TestRunProactiveJob:
 
         calls = {"n": 0}
 
-        def flaky_headless(job: Job, cfg: Config, prompt: str, max_turns: int, active_card: str | None = None) -> tuple:
+        def flaky_headless(job: Job, cfg: Config, prompt: str, max_turns: int, active_card: str | None = None, owner_openid: str = "") -> tuple:
             # Distinguish users by call order (u1 first, u2 second).
             calls["n"] += 1
             if calls["n"] == 1:
@@ -768,7 +768,7 @@ class TestProactiveSent:
         monkeypatch.setattr(
             proactive,
             "_headless_run",
-            lambda job, cfg, prompt, max_turns, active_card=None: (
+            lambda job, cfg, prompt, max_turns, active_card=None, owner_openid="": (
                 "CURRENT_TASK_DONE",
                 "最后一条 AIMessage（不应入库）",
                 [
@@ -802,7 +802,7 @@ class TestProactiveSent:
         monkeypatch.setattr(
             proactive,
             "_headless_run",
-            lambda job, cfg, prompt, max_turns, active_card=None: (
+            lambda job, cfg, prompt, max_turns, active_card=None, owner_openid="": (
                 "CURRENT_TASK_DONE",
                 "",
                 [
@@ -874,7 +874,14 @@ class TestFailureCap:
         )
         called: list[str] = []
 
-        def fake_headless(job: Job, cfg: Config, prompt: str, max_turns: int, active_card: str | None = None) -> tuple:
+        def fake_headless(
+            job: Job,
+            cfg: Config,
+            prompt: str,
+            max_turns: int,
+            active_card: str | None = None,
+            owner_openid: str = "",
+        ) -> tuple:
             called.append(prompt)
             return (
                 "CURRENT_TASK_DONE",
@@ -899,7 +906,7 @@ class TestFailureCap:
         monkeypatch.setattr(
             proactive,
             "_headless_run",
-            lambda job, cfg, prompt, max_turns, active_card=None: (
+            lambda job, cfg, prompt, max_turns, active_card=None, owner_openid="": (
                 "CURRENT_TASK_DONE",
                 "ok",
                 ['{"status": "sent", "to": ["u1"], "failures": [], "ids": {"u1": "m1"}, "actual_message": "ok"}'],
@@ -950,7 +957,7 @@ class TestOwnerPersona:
         )
         seen: dict = {}
 
-        def fake(job: Job, cfg_: Config, prompt: str, max_turns: int, active_card: str | None = None) -> tuple:
+        def fake(job: Job, cfg_: Config, prompt: str, max_turns: int, active_card: str | None = None, owner_openid: str = "") -> tuple:
             seen.update(prompt=prompt, active_card=active_card)
             return (
                 "CURRENT_TASK_DONE",

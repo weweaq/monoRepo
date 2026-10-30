@@ -8,6 +8,14 @@ from pathlib import Path
 
 from gacore.config import Config
 from gacore.proactive import build_proactive_prompt, run_proactive_job
+def _open_questions(prompt: str) -> list[str]:
+    """The background JSON's ``open_questions`` array — the only place questions are injected."""
+    marker = '"open_questions": '
+    start = prompt.index(marker) + len(marker)
+    end = prompt.index("]", start) + 1
+    return json.loads(prompt[start:end])
+
+
 from gacore.qa_store import all_rows, mark_pushed, open_questions, seed_questions
 from gacore.scheduler import Job, _seed_qa
 
@@ -36,8 +44,11 @@ def test_build_prompt_relays_questions_verbatim():
         datetime(2026, 10, 26, 8, 30),
         questions=["你是在读还是上班？（依据：10-25）", "工学椅还买吗？（依据：长期画像）"],
     )
-    assert "[Q1] 你是在读还是上班？（依据：10-25）" in prompt
-    assert "[Q2] 工学椅还买吗？（依据：长期画像）" in prompt
+    # JSON-only injection (V1 stabilization gap 5): the same text must appear exactly
+    # once — inside the background JSON — never again as a bare line in the prompt body.
+    for question in ("你是在读还是上班？（依据：10-25）", "工学椅还买吗？（依据：长期画像）"):
+        assert prompt.count(question) == 1
+    assert "open_questions" in prompt
     assert "逐条原样转述" in prompt
     assert "[Q1] 你的答案" in prompt
 
@@ -57,7 +68,7 @@ def test_questions_scene_push_marks_asks(tmp_path, monkeypatch):
     monkeypatch.setattr("gacore.proactive._target_users", lambda job: ["u1"])
     captured: dict = {}
 
-    def fake_headless(job, cfg_, prompt, max_turns, active_card=None):
+    def fake_headless(job, cfg_, prompt, max_turns, active_card=None, owner_openid=""):
         captured["prompt"] = prompt
         return "END", "转述完成", [json.dumps(
                 {
@@ -90,7 +101,7 @@ def test_questions_scene_pushes_at_most_three_per_message(tmp_path, monkeypatch)
     monkeypatch.setattr("gacore.proactive._target_users", lambda job: ["u1"])
     captured: dict = {}
 
-    def fake_headless(job, cfg_, prompt, max_turns, active_card=None):
+    def fake_headless(job, cfg_, prompt, max_turns, active_card=None, owner_openid=""):
         captured["prompt"] = prompt
         return "END", "转述完成", [json.dumps(
                 {
@@ -107,7 +118,11 @@ def test_questions_scene_pushes_at_most_three_per_message(tmp_path, monkeypatch)
     job = Job(name="daily-questions", schedule="08:30", prompt="", scene="questions")
     assert run_proactive_job(job, cfg, clock=lambda: datetime(2026, 10, 26, 8, 30))["sent"] == 1
 
-    assert "[Q3]" in captured["prompt"] and "[Q4]" not in captured["prompt"]
+    # Questions are injected only through the background JSON now, so the per-push cap
+    # is measured on that array — the instruction text itself always mentions [Q1]/[Q2].
+    payload = _open_questions(captured["prompt"])
+    assert len(payload) == 3
+    assert not any("问题丁" in question for question in payload)
     asks = sorted(r["asks"] for r in all_rows(cfg))
     assert asks == [0, 1, 1, 1]
 
@@ -120,7 +135,7 @@ def test_questions_scene_archives_before_push_so_last_ask_is_answerable(tmp_path
     mark_pushed(cfg, [key])
     monkeypatch.setattr("gacore.proactive._target_users", lambda job: ["u1"])
 
-    def fake_headless(job, cfg_, prompt, max_turns, active_card=None):
+    def fake_headless(job, cfg_, prompt, max_turns, active_card=None, owner_openid=""):
         return "END", "转述完成", [json.dumps(
                 {
                     "status": "sent",

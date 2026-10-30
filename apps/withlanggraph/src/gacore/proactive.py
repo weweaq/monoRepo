@@ -51,6 +51,7 @@ from gacore.companion.store import CompanionStore, companion_db_path
 from gacore.config import Config
 from gacore.jsonl_logger import get_logger
 from gacore.langTrack.qq_push import load_known_users
+from gacore.redact import redact_text
 
 if TYPE_CHECKING:
     from gacore.companion.config import CompanionConfig
@@ -1339,26 +1340,29 @@ def build_proactive_prompt(
     now_line = now.strftime("%Y-%m-%d %H:%M:%S")
 
     recall_lines: list[str] = []
+    # Values live in the JSON block only (V1 stabilization gap 5): the prompt keeps
+    # instructions that point at the JSON keys, so the same text is never injected twice.
     if questions:
         if verbatim_single:
             recall_lines.append(
                 "本期只问一个问题（3.0 出题人已写成朋友口吻的完整消息）。"
-                "必须把下面这行**一字不改**地作为消息全文发出——不加编号、不加前缀、"
-                "不加任何解释或表情：\n" + questions[0]
+                "必须把背景数据 open_questions[0] 的文本**一字不改**地作为消息全文发出——"
+                "不加编号、不加前缀、不加任何解释或表情。"
             )
         else:
-            q_block = "\n".join(f"[Q{i}] {q}" for i, q in enumerate(questions, 1))
             recall_lines.append(
-                "本期要问主人的问题（可能来自日报「想问你」或候选池；必须逐条原样转述，"
-                "保留 [Q 编号] 与依据，禁止改写、合并、新增或删减；结尾提醒主人可直接回复"
-                "「[Q1] 你的答案」）：\n" + q_block
+                "本期要问主人的问题见背景数据 open_questions（按数组顺序记为 [Q1]、[Q2]…；"
+                "可能来自日报「想问你」或候选池）。必须逐条原样转述，保留 [Q 编号] 与依据，"
+                "禁止改写、合并、新增或删减；结尾提醒主人可直接回复「[Q1] 你的答案」。"
             )
     if topic:
-        recall_lines.append(f"最近话题（主人上次抛出、还没说完）：{topic}")
+        recall_lines.append("若背景数据 recent_topic 非空，可作为「上次聊到…还没说完」的自然引用。")
     if insight:
-        recall_lines.append(f"昨日画像线索（可自然引用\"昨天看到你在忙…\"）：{insight}")
+        recall_lines.append("若背景数据 yesterday_insight 非空，可自然引用「昨天看到你在忙…」。")
     if emotion and emotion in _EMOTION_LABEL_TEXT:
-        recall_lines.append(f"主人最近情绪：{_EMOTION_LABEL_TEXT[emotion]}（可温和关心一句，但别打探隐私、别越界开导）")
+        recall_lines.append(
+            "若背景数据 user_emotion_hint 非空，可温和关心一句，但别打探隐私、别越界开导。"
+        )
     recall_block = ""
     if recall_lines:
         recall_block = "\n".join(recall_lines) + "\n"
@@ -1437,8 +1441,8 @@ def build_proactive_prompt(
         "不得改动、猜测或留空，否则消息会发错人）。\n"
         f"{scene_line}\n"
         f"当前时间（东八区）：{now_line}\n"
-        f"{recall_block}"
         f"{background_block}"
+        f"{recall_block}"
         f"{actions}"
         f"{expression}"
         "约束：\n"
@@ -1453,6 +1457,7 @@ def _headless_run(
     prompt: str,
     max_turns: int,
     active_card: str | None = None,
+    owner_openid: str = "",
 ) -> tuple[str | None, str, list[str]]:
     """Run a single-turn headless agent over a single-use ``qq_push`` tool.
 
@@ -1471,19 +1476,22 @@ def _headless_run(
     from langchain_core.messages import AIMessage, ToolMessage
 
     from gacore.graph import build_graph, run_once
-    from gacore.tools.qq_tools import qq_push
+    from gacore.tools.qq_tools import pin_recipients, qq_push
     from gacore.tools.single_use import SingleUseTool
 
     logger.info("proactive prompt built", version=PROACTIVE_PROMPT_VERSION, max_turns=max_turns)
     graph = build_graph(cfg=cfg, tool_list=[SingleUseTool.wrap(qq_push, max_calls=1)])
     thread_id = f"proactive-{uuid.uuid4().hex[:8]}"
-    state = run_once(
-        graph,
-        prompt,
-        thread_id=thread_id,
-        max_turns=max_turns,
-        active_card=active_card,
-    )
+    # Tool-layer recipient pinning: even if the model invents another openid, the
+    # tool refuses anything outside the owner the scheduler already chose.
+    with pin_recipients([owner_openid]):
+        state = run_once(
+            graph,
+            prompt,
+            thread_id=thread_id,
+            max_turns=max_turns,
+            active_card=active_card,
+        )
     exit_reason = state.get("exit_reason")
     messages = state.get("messages") or []
 
@@ -1694,7 +1702,7 @@ def _record_companion_sent(
             actor_id=actor_id,
             principal_id="owner",
             source_id=source_id,
-            summary=actual_message,
+            summary=redact_text(actual_message),
             idempotency_key=f"proactive-sent:{job_name}:{uid}:{source_id}",
         )
         if result.inserted:
@@ -1979,7 +1987,12 @@ def run_proactive_job(
                 actor_name=actor_name,
             )
             exit_reason, reply, qq_results = _headless_run(
-                job, resolved_cfg, prompt, job.max_turns, active_card=active_card
+                job,
+                resolved_cfg,
+                prompt,
+                job.max_turns,
+                active_card=active_card,
+                owner_openid=uid,
             )
             if not qq_results:
                 logger.info(

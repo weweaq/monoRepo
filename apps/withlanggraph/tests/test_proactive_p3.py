@@ -184,7 +184,7 @@ class TestWriteBackProactive:
 
 
 def _sent_headless(captured: list[str]) -> object:
-    def fake(job: Job, cfg: Config, prompt: str, max_turns: int, active_card: str | None = None) -> tuple:
+    def fake(job: Job, cfg: Config, prompt: str, max_turns: int, active_card: str | None = None, owner_openid: str = "") -> tuple:
         captured.append(prompt)
         return ("CURRENT_TASK_DONE", "早呀船长", ['{"status": "sent", "ok": 1, "to": ["u1"], "failures": [], "ids": {"u1": "m1"}, "actual_message": "早呀船长"}'])
 
@@ -240,7 +240,7 @@ class TestRunProactiveJobWriteBack:
         monkeypatch.setattr(proactive, "load_known_users", lambda: {"u1": {}})
         monkeypatch.setattr(proactive, "recall_topic", lambda cfg_, uid, now: {"kind": "none", "text": "", "thread_id": ""})
 
-        def _fail_headless(job: Job, cfg: Config, prompt: str, max_turns: int, active_card: str | None = None) -> tuple:
+        def _fail_headless(job: Job, cfg: Config, prompt: str, max_turns: int, active_card: str | None = None, owner_openid: str = "") -> tuple:
             return ("CURRENT_TASK_DONE", "回复", ['{"status": "error"}'])
 
         monkeypatch.setattr(proactive, "_headless_run", _fail_headless)

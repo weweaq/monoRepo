@@ -237,27 +237,27 @@ class TestBuildPromptEmotion:
 
     def test_no_emotion_no_concern_hint(self) -> None:
         prompt = proactive.build_proactive_prompt(self._job(), "u1", _dt(2026, 8, 28, 8))
-        assert "主人最近情绪" not in prompt
+        assert "user_emotion_hint" not in prompt
 
     def test_unknown_emotion_ignored(self) -> None:
         prompt = proactive.build_proactive_prompt(
             self._job(), "u1", _dt(2026, 8, 28, 8), emotion="bogus"
         )
-        assert "主人最近情绪" not in prompt
+        assert "user_emotion_hint" not in prompt
 
     def test_down_injects_concern(self) -> None:
         prompt = proactive.build_proactive_prompt(
             self._job(), "u1", _dt(2026, 8, 28, 8), emotion="down"
         )
-        assert "主人最近情绪" in prompt
-        assert "低落/沮丧" in prompt
+        # 缺口 5：情绪值只进背景 JSON 数据块，prompt 只保留“如何用”的指令。
+        assert '"user_emotion_hint": "down"' in prompt
         assert "别打探隐私" in prompt
 
     def test_tired_injects_tired_label(self) -> None:
         prompt = proactive.build_proactive_prompt(
             self._job(), "u1", _dt(2026, 8, 28, 8), emotion="tired"
         )
-        assert "疲惫" in prompt
+        assert '"user_emotion_hint": "tired"' in prompt
 
     # ---- M-3: constraint numbering must be continuous (1..N), no gaps / no out-of-order
 
@@ -320,7 +320,14 @@ class TestBuildPromptEmotion:
 
 
 def _sent_headless(captured: list[str]) -> object:
-    def fake(job: Job, cfg: Config, prompt: str, max_turns: int, active_card: str | None = None) -> tuple:
+    def fake(
+        job: Job,
+        cfg: Config,
+        prompt: str,
+        max_turns: int,
+        active_card: str | None = None,
+        owner_openid: str = "",
+    ) -> tuple:
         captured.append(prompt)
         return ("CURRENT_TASK_DONE", "回复", ['{"status": "sent", "ok": 1, "to": ["u1"], "failures": [], "ids": {"u1": "m1"}, "actual_message": "早"}'])
 
@@ -350,7 +357,7 @@ class TestRunProactiveJobP2:
         result = proactive.run_proactive_job(job, cfg=cfg, clock=lambda: _dt(2026, 8, 28, 8))
         assert result["attempted"] == 1
         assert result["sent"] == 1
-        assert "主人最近情绪" not in prompts[0]
+        assert "user_emotion_hint" not in prompts[0]
 
     def test_concern_injected_and_marked_when_due(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         cfg = Config.for_tests(tmp_path)
@@ -362,7 +369,7 @@ class TestRunProactiveJobP2:
         job = Job(name="proactive-morning", schedule="every 1h", prompt="早安", type="proactive")
         result = proactive.run_proactive_job(job, cfg=cfg, clock=lambda: _dt(2026, 8, 28, 8))
         assert result["sent"] == 1
-        assert "主人最近情绪" in prompts[0]
+        assert '"user_emotion_hint": "down"' in prompts[0]
         state = proactive.load_state(cfg)["u_u1"]
         assert state["last_concern"] == "2026-08-28T08:00:00+08:00"
         assert state["last_concern_emotion"] == "down"  # M-2: delivered concern records its emotion
