@@ -7,6 +7,13 @@
       "enabled": true
     },
     {
+      "name": "companion-tick",
+      "schedule": "every 2h",
+      "type": "life",
+      "enabled": true,
+      "prompt": ""
+    },
+    {
       "name": "companion-journal",
       "schedule": "00:10",
       "type": "journal",

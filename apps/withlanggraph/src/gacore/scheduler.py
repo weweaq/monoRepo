@@ -69,6 +69,9 @@ EXTRACT_POOL: Final = ThreadPoolExecutor(max_workers=1, thread_name_prefix="kg-e
 
 # Companion 两本日记 job（type="journal"）：内部有一次模型调用，同样不能占轮询循环。
 JOURNAL_POOL: Final = ThreadPoolExecutor(max_workers=1, thread_name_prefix="companion-journal")
+# Life tick: the Companion's own heartbeat (design §16). Its own single worker keeps it
+# from queueing behind proactive generation; a tick is cheap by design (0 LLM when empty).
+LIFE_POOL: Final = ThreadPoolExecutor(max_workers=1, thread_name_prefix="companion-life")
 
 # ---- 调度回复清洗与完成性校验（修复 2026-09-03 日报正文被 <summary>/DSML 标签污染）----
 # <summary>...</summary> 完整块（GA 协议思考块）：qq.py 流式路径已在发送前剥离，调度/邮件路径补齐。
@@ -249,6 +252,14 @@ def _log_outreach_shadow(cfg: Config, job: Job) -> None:
         )
 
 
+def _log_life_failure(fut: object) -> None:
+    """Surface a top-level exception from a life-tick worker (never swallow)."""
+    exc = fut.exception() if hasattr(fut, "exception") else None  # type: ignore[attr-defined]
+    if exc is not None:
+        logger.warning(
+            "life tick worker crashed", error_type=type(exc).__name__, error_message=str(exc)
+        )
+
 def _log_proactive_failure(fut: object) -> None:
     """Log a top-level exception from a proactive worker (L1: never swallow)."""
     exc = fut.exception() if hasattr(fut, "exception") else None  # type: ignore[attr-defined]
@@ -315,6 +326,63 @@ def run_journal_job(job: Job, cfg: Config) -> object | None:
         return outcome
     except Exception as e:  # noqa: BLE001 — worker must not leak the exception to the pool
         logger.exception("companion journal failed", exc=e, job=job.name)
+        return None
+
+
+def run_life_tick_job(job: Job, cfg: Config) -> object | None:
+    """One Companion life tick (design §16): sense → decide → act → record.
+
+    Never raises into the pool; the tick runner itself catches everything. Delivery reuses
+    the same ``qq_push`` tool as the existing proactive job, so message rhythm and receipts
+    stay identical to V1.
+    """
+    start = time.monotonic()
+    try:
+        from gacore.companion.config import load_companion_config
+        from gacore.companion.identity import DEFAULT_ACTOR_ID, ActiveCardRepository
+        from gacore.companion.loop import run_life_tick
+        from gacore.companion.store import CompanionStore
+        from gacore.tools import build_tool_list
+
+        companion = load_companion_config()
+        if not companion.active or not companion.owner_openid:
+            logger.info("companion life tick skipped: feature inactive or owner missing", job=job.name)
+            return None
+        actor_id = ActiveCardRepository().get(companion.owner_openid) or DEFAULT_ACTOR_ID
+        store = CompanionStore.from_config(cfg)
+        tools = {tool.name: tool for tool in build_tool_list(cfg)}
+
+        def sender(text: str) -> None:
+            tools["qq_push"].invoke({"message": text, "to": companion.owner_openid})
+
+        def invoker(tool_name: str) -> str:
+            tool = tools.get(tool_name)
+            if tool is None:
+                raise RuntimeError(f"unknown tool: {tool_name}")
+            return str(tool.invoke({}))[:2000]
+
+        result = run_life_tick(
+            store,
+            actor_id,
+            "owner",
+            sender=sender,
+            invoker=invoker,
+        )
+        logger.info(
+            "companion life tick finished",
+            job=job.name,
+            actor_id=actor_id,
+            action=getattr(result, "action", None),
+            reason=getattr(result, "reason", None),
+            sent=bool(getattr(result, "sent_text", None)),
+            goal_id=getattr(result, "goal_id", None),
+            llm_calls=getattr(result, "llm_calls", 0),
+            error=getattr(result, "error", None),
+            duration_seconds=round(time.monotonic() - start, 2),
+        )
+        return result
+    except Exception as exc:  # noqa: BLE001 — worker must not leak to the pool
+        logger.exception("companion life tick failed", exc=exc, job=job.name)
         return None
 
 
@@ -1650,6 +1718,27 @@ def run_loop(
             for job in jobs:
                 state = states.get(job.name, JobState())
                 if not is_due(job, state, now):
+                    continue
+                if job.type == "life":
+                    future = LIFE_POOL.submit(run_life_tick_job, job, resolved_cfg)
+                    if future is None:
+                        logger.warning(
+                            "life pool queue full, skipping this tick", job=job.name
+                        )
+                        continue
+                    future.add_done_callback(_log_life_failure)
+                    logger.info(
+                        "Life tick dispatched",
+                        job=job.name,
+                        schedule=job.schedule,
+                        now=now.isoformat(timespec="seconds"),
+                    )
+                    states[job.name] = JobState(
+                        last_run=now.isoformat(timespec="seconds"),
+                        run_count=state.run_count + 1,
+                    )
+                    save_state(resolved_cfg, states)
+                    jobs_run += 1
                     continue
                 if job.type == "proactive":
                     # Proactive jobs: extra window/cooldown gate, then dispatch to the

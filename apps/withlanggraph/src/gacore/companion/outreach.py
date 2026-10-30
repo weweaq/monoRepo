@@ -60,7 +60,21 @@ REASON_CODES: Final = frozenset(
         "SYSTEM_FAILURE",
     }
 )
-ACTIONS: Final = frozenset({"STAY_SILENT", "TELL_ONLY", "ASK_PERMISSION", "ACT_READ_ONLY"})
+ACTIONS: Final = frozenset(
+    {
+        "STAY_SILENT",
+        "TELL_ONLY",
+        "ASK_PERMISSION",
+        "ACT_READ_ONLY",
+        "ACT_SILENTLY",
+        "ACT_AND_TELL",
+    }
+)
+# Design §16.3: the life loop may do a small read-only thing silently, or do it and then
+# tell the owner. Both are bounded by the goal whitelist and the activity budget.
+ACTING_ACTIONS: Final = frozenset(
+    {"ACT_READ_ONLY", "ACT_SILENTLY", "ACT_AND_TELL"}
+)
 
 _TZ: Final = timezone(timedelta(hours=8))
 _JSON_OBJECT = None  # set below; kept out of the import block for readability
@@ -70,11 +84,13 @@ _JSON_OBJECT = re.compile(r"\{.*\}", re.S)
 
 _SYSTEM_PROMPT: Final = """你是角色主动联系决策器。给定候选与当前状态，决定这一轮做什么。
 
-只能从四个动作里选一个：
+只能从这些动作里选一个：
 - STAY_SILENT：不打扰（价值低/重复/时机不对）。
 - TELL_ONLY：以角色口吻发一条短消息（≤200 字）。
 - ASK_PERMISSION：为一个具体只读目标征得主人同意（必须给 goal_id）。
 - ACT_READ_ONLY：执行已批准的只读目标（必须给 goal_id）。
+- ACT_SILENTLY：自己做一件只读小事，不打扰主人（可选 goal_id）。
+- ACT_AND_TELL：自己做一件只读小事，做完再告诉主人（可选 goal_id）。
 
 硬规则：
 1. 优先沉默；没有值得说的就不要发。
@@ -252,7 +268,7 @@ def decide(
             llm_calls=1,
         )
 
-    if decision.action in {"TELL_ONLY", "ASK_PERMISSION", "ACT_READ_ONLY"}:
+    if decision.action in {"TELL_ONLY", "ASK_PERMISSION"} | ACTING_ACTIONS:
         tightened = _tighten(store, actor_id, principal_id, decision, now)
         if tightened is not None:
             return tightened
@@ -501,6 +517,11 @@ def _tighten(
                 candidates=decision.candidates,
                 llm_calls=decision.llm_calls,
             )
+        return None
+
+    if decision.action in {"ACT_SILENTLY", "ACT_AND_TELL"} and not decision.goal_id:
+        # The loop proposes a small read-only goal itself and validates it against the
+        # whitelist before executing; nothing here can widen that permission.
         return None
 
     goal = store.get_goal(decision.goal_id or "")
