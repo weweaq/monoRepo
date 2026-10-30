@@ -1,4 +1,10 @@
-"""Tests for Step 9 reply batching: planning 1-3 segments and batched delivery."""
+"""Tests for Step 9 reply batching: planning 1-3 segments and batched delivery.
+
+Only batch planning/delivery lives here. The Step 5 send-receipt contract
+(``_send_markdown`` fallback/unknown/partial rules and the chat-log-after-receipt
+rule) is covered by ``test_qq_receipts.py`` — do not move those cases back into this
+file, or a rewrite of the batching tests will delete them again (happened once).
+"""
 
 from __future__ import annotations
 
