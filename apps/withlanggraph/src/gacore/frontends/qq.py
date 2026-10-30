@@ -52,6 +52,8 @@ from __future__ import annotations
 
 import asyncio
 
+import hashlib
+
 import json
 
 import os
@@ -71,6 +73,8 @@ import traceback
 import uuid
 
 from collections import deque
+
+from collections.abc import Sequence
 
 from contextlib import suppress
 from dataclasses import dataclass
@@ -755,6 +759,24 @@ def _is_send_outcome_unknown(exc: BaseException) -> bool:
     return type(exc).__name__ in _UNKNOWN_SEND_ERROR_NAMES
 
 
+def _confirmed_prefix(segments: Sequence[SegmentReceipt]) -> tuple[SegmentReceipt, ...]:
+    """The leading run of confirmed segments; a later success never bridges a gap."""
+    prefix: list[SegmentReceipt] = []
+    for segment in segments:
+        if not segment.confirmed:
+            break
+        prefix.append(segment)
+    return tuple(prefix)
+
+
+def _sent_source_id(segments: Sequence[SegmentReceipt]) -> str:
+    """Stable source id for one delivery attempt: platform ids plus actually sent text."""
+    payload = "\x1f".join(
+        f"{segment.provider_message_id or ''}\x1e{segment.actual_text}" for segment in segments
+    )
+    return "qq-sent:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+
 _TZ_SH = timezone(timedelta(hours=8))
 _WEEK_CN = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
 _MEM_TIMESTAMP_RE = re.compile(r"\d{1,2}[点时]|\d{4}[-/年]\d{1,2}[-/月]\d{1,2}|\d{1,2}月\d{1,2}日")
@@ -1149,6 +1171,77 @@ class QQApp:
         except Exception:  # noqa: BLE001 — memory write must never break the chat path
 
             logger.warning("companion ingress write failed", stack_trace=traceback.format_exc())
+
+
+    async def _record_companion_sent(self, user_id: str, msg_id, receipts: Sequence[SendReceipt]) -> None:
+
+        """Record one ``agent.message.sent`` event for the confirmed prefix (Companion V1).
+
+        Only segments the platform confirmed, in order from the start, enter the summary;
+        a later success never bridges an earlier failure. Zero confirmed segments means
+        no event at all. Best-effort: any failure is logged and the reply is unaffected.
+        """
+
+        try:
+
+            companion = load_companion_config()
+
+            actor_id = actor_id_for(user_id, companion, _user_card.get(user_id))
+
+            if actor_id is None:
+
+                return
+
+            segments = [segment for receipt in receipts for segment in receipt.segments]
+
+            prefix = _confirmed_prefix(segments)
+
+            if not prefix:
+
+                logger.warning(
+                    "companion sent event skipped: no confirmed segment",
+                    total_segments=len(segments),
+                )
+
+                return
+
+            summary = "\n".join(segment.actual_text for segment in prefix)
+
+            if len(prefix) < len(segments):
+
+                summary = f"[仅成功发送 {len(prefix)}/{len(segments)} 段]\n{summary}"
+
+                logger.warning(
+                    "companion sent event records a confirmed prefix only",
+                    confirmed_segments=len(prefix),
+                    total_segments=len(segments),
+                )
+
+            source_id = _sent_source_id(prefix)
+
+            store = _companion_store(Config.default())
+
+            await asyncio.to_thread(
+
+                store.append_event,
+
+                kind="agent.message.sent",
+
+                actor_id=actor_id,
+
+                principal_id="owner",
+
+                source_id=source_id,
+
+                summary=summary,
+
+                idempotency_key=f"qq-agent:{msg_id}" if msg_id else f"qq-agent:{source_id}",
+
+            )
+
+        except Exception:  # noqa: BLE001 — memory write must never break the chat path
+
+            logger.warning("companion sent write failed", stack_trace=traceback.format_exc())
 
 
     async def on_message(self, data, is_group: bool = False) -> None:
@@ -2537,11 +2630,14 @@ class QQApp:
 
                         # Phase 2: fan out 【方案N】 anchors into separate QQ messages.
                         segments = _split_by_proposal(final_text)
+                        receipts: list[SendReceipt] = []
                         if len(segments) > 1:
                             for seg in segments:
-                                await self.send_text(chat_id, seg, is_group=is_group)
+                                receipts.append(await self.send_text(chat_id, seg, is_group=is_group))
                         else:
-                            await self.send_text(chat_id, final_text, is_group=is_group)
+                            receipts.append(await self.send_text(chat_id, final_text, is_group=is_group))
+                        if user_id is not None:
+                            await self._record_companion_sent(user_id, msg_id, receipts)
 
 
 

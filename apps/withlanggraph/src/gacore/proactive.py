@@ -22,6 +22,7 @@ Design constraints inherited from the v0.2 doc:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random
@@ -29,6 +30,7 @@ import re
 import sqlite3
 import threading
 import time
+import traceback
 import uuid
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -38,12 +40,19 @@ from typing import TYPE_CHECKING, Final
 
 from gacore.character import card_name, card_prompt
 from gacore.companion.config import load_companion_config
-from gacore.companion.identity import ActiveCardRepository, active_cards_path, owner_active_card
+from gacore.companion.identity import (
+    ActiveCardRepository,
+    active_cards_path,
+    actor_id_for,
+    owner_active_card,
+)
+from gacore.companion.store import CompanionStore, companion_db_path
 from gacore.config import Config
 from gacore.jsonl_logger import get_logger
 from gacore.langTrack.qq_push import load_known_users
 
 if TYPE_CHECKING:
+    from gacore.companion.config import CompanionConfig
     from gacore.scheduler import Job, JobState
 
 logger = get_logger("proactive")
@@ -1553,8 +1562,8 @@ def _write_back_proactive(
             conn.close()
 
 
-def _qq_push_sent(qq_push_results: list[str], recipient: str) -> str | None:
-    """Return the actual delivered text when ``recipient`` is confirmed sent, else None.
+def _qq_push_receipt(qq_push_results: list[str], recipient: str) -> tuple[str, str] | None:
+    """Return ``(actual_message, recipient_message_id)`` when ``recipient`` is confirmed sent.
 
     ``status == "sent"`` alone is not enough: another recipient succeeding must never
     stand in for the recipient we care about. The recipient must appear in ``to``,
@@ -1581,7 +1590,64 @@ def _qq_push_sent(qq_push_results: list[str], recipient: str) -> str | None:
     actual = parsed.get("actual_message")
     if not isinstance(actual, str) or not actual.strip():
         return None
-    return actual
+    return actual, str(ids[recipient])
+
+
+def _qq_push_sent(qq_push_results: list[str], recipient: str) -> str | None:
+    """Return the actual delivered text when ``recipient`` is confirmed sent, else None."""
+    receipt = _qq_push_receipt(qq_push_results, recipient)
+    return receipt[0] if receipt is not None else None
+
+
+# Companion stores, one per resolved DB path, shared by this worker thread and tests.
+_companion_stores: dict[Path, CompanionStore] = {}
+_companion_stores_lock = threading.Lock()
+
+
+def _companion_store(cfg: Config) -> CompanionStore:
+    """Lazily create the store (schema migration must not run at import time)."""
+    path = companion_db_path(cfg)
+    with _companion_stores_lock:
+        store = _companion_stores.get(path)
+        if store is None:
+            store = _companion_stores[path] = CompanionStore.from_config(cfg)
+        return store
+
+
+def _record_companion_sent(
+    cfg: Config,
+    uid: str,
+    companion: CompanionConfig,
+    active_card: str | None,
+    *,
+    job_name: str,
+    actual_message: str,
+    provider_message_id: str,
+) -> None:
+    """Record one ``proactive.message.sent`` event for a confirmed qq_push delivery.
+
+    Uses the text actually transmitted and the owner's own platform message id; the
+    last AIMessage is never a substitute. Best-effort: failures are only logged.
+    """
+    try:
+        actor_id = actor_id_for(uid, companion, active_card)
+        if actor_id is None:
+            return
+        source_id = provider_message_id or (
+            "proactive-sent:"
+            + hashlib.sha256(f"{uid}\x1f{actual_message}".encode("utf-8")).hexdigest()[:16]
+        )
+        store = _companion_store(cfg)
+        store.append_event(
+            kind="proactive.message.sent",
+            actor_id=actor_id,
+            principal_id="owner",
+            source_id=source_id,
+            summary=actual_message,
+            idempotency_key=f"proactive-sent:{job_name}:{uid}:{source_id}",
+        )
+    except Exception:  # noqa: BLE001 — memory write must never break delivery bookkeeping
+        logger.warning("companion proactive sent write failed", stack_trace=traceback.format_exc())
 
 
 def _snippet(text: str | None, limit: int = 200) -> str:
@@ -1871,8 +1937,8 @@ def run_proactive_job(
                 )
                 result["skipped"].append({"user": uid, "reason": "llm_no_push"})
                 continue
-            actual_message = _qq_push_sent(qq_results, uid)
-            if actual_message is None:
+            receipt = _qq_push_receipt(qq_results, uid)
+            if receipt is None:
                 _mark_failed(resolved_cfg, uid, scene, now)
                 logger.warning(
                     "proactive: qq_push did not confirm delivery",
@@ -1883,8 +1949,18 @@ def run_proactive_job(
                 )
                 result["skipped"].append({"user": uid, "reason": "push_failed", "detail": _snippet(qq_results[-1])})
                 continue
+            actual_message, owner_message_id = receipt
             _mark_sent(resolved_cfg, uid, scene, now)
             result["sent"] += 1
+            _record_companion_sent(
+                resolved_cfg,
+                uid,
+                companion,
+                active_card,
+                job_name=job.name,
+                actual_message=actual_message,
+                provider_message_id=owner_message_id,
+            )
             # P3 questions scene: count this as one re-ask per open question, then
             # archive the ones that already exceeded the re-ask budget (用户不关心).
             if open_qa:

@@ -17,6 +17,7 @@ import pytest
 
 from gacore import proactive
 from gacore.companion.config import CompanionConfig
+from gacore.companion.store import CompanionStore
 from gacore.config import Config
 from gacore.scheduler import Job, JobState, load_jobs, load_state, run_loop
 
@@ -683,6 +684,132 @@ class TestQqPushSent:
         parsed = json.loads(payload)
         parsed.pop("actual_message")
         assert proactive._qq_push_sent([json.dumps(parsed)], "u1") is None
+
+
+def _sent_rows(cfg: Config) -> list[dict]:
+    store = CompanionStore.from_config(cfg)
+    with store._connect() as conn:
+        return [
+            dict(row)
+            for row in conn.execute("SELECT * FROM companion_event ORDER BY seq")
+        ]
+
+
+class TestProactiveSent:
+    def test_receipt_returns_message_and_owner_id(self) -> None:
+        payload = json.dumps(
+            {
+                "status": "sent",
+                "to": ["u1"],
+                "failures": [],
+                "ids": {"u1": "m1"},
+                "actual_message": "实际正文",
+            },
+            ensure_ascii=False,
+        )
+        assert proactive._qq_push_receipt([payload], "u1") == ("实际正文", "m1")
+
+    def test_other_recipient_success_has_no_receipt(self) -> None:
+        payload = json.dumps(
+            {
+                "status": "sent",
+                "to": ["u2"],
+                "failures": ["u1"],
+                "ids": {"u2": "m2"},
+                "actual_message": "别人的正文",
+            },
+            ensure_ascii=False,
+        )
+        assert proactive._qq_push_receipt([payload], "u1") is None
+
+    def test_end_to_end_writes_proactive_sent_event(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        cfg = Config.for_tests(tmp_path)
+        monkeypatch.setenv("COMPANION_MVP_ENABLED", "1")
+        monkeypatch.setenv("COMPANION_OWNER_QQ_OPENID", "u1")
+        proactive._companion_stores.clear()
+        monkeypatch.setattr(proactive, "load_known_users", lambda: {"u1": {}})
+        monkeypatch.setattr(
+            proactive,
+            "_headless_run",
+            lambda job, cfg, prompt, max_turns, active_card=None: (
+                "CURRENT_TASK_DONE",
+                "最后一条 AIMessage（不应入库）",
+                [
+                    '{"status": "sent", "to": ["u1"], "failures": [], '
+                    '"ids": {"u1": "m1"}, "actual_message": "真正发出的正文"}'
+                ],
+            ),
+        )
+        job = Job(name="proactive-morning", schedule="every 1h", prompt="早安", type="proactive")
+
+        result = proactive.run_proactive_job(job, cfg=cfg, clock=lambda: _dt(2026, 8, 27, 7, 30))
+
+        assert result["sent"] == 1
+        rows = _sent_rows(cfg)
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["kind"] == "proactive.message.sent"
+        assert row["actor_id"] == "assistant-default"
+        assert row["principal_id"] == "owner"
+        assert row["source_id"] == "m1"
+        assert row["summary"] == "真正发出的正文"
+
+    def test_failed_push_writes_no_event(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        cfg = Config.for_tests(tmp_path)
+        monkeypatch.setenv("COMPANION_MVP_ENABLED", "1")
+        monkeypatch.setenv("COMPANION_OWNER_QQ_OPENID", "u1")
+        proactive._companion_stores.clear()
+        monkeypatch.setattr(proactive, "load_known_users", lambda: {"u1": {}})
+        monkeypatch.setattr(
+            proactive,
+            "_headless_run",
+            lambda job, cfg, prompt, max_turns, active_card=None: (
+                "CURRENT_TASK_DONE",
+                "",
+                [
+                    '{"status": "sent", "to": ["u2"], "failures": ["u1"], '
+                    '"ids": {"u2": "m2"}, "actual_message": "别人的正文"}'
+                ],
+            ),
+        )
+        job = Job(name="proactive-morning", schedule="every 1h", prompt="早安", type="proactive")
+
+        result = proactive.run_proactive_job(job, cfg=cfg, clock=lambda: _dt(2026, 8, 27, 7, 30))
+
+        assert result["sent"] == 0
+        assert result["skipped"][0]["reason"] == "push_failed"
+        assert _sent_rows(cfg) == []
+
+    def test_empty_provider_id_falls_back_and_replay_is_idempotent(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        cfg = Config.for_tests(tmp_path)
+        monkeypatch.setenv("COMPANION_MVP_ENABLED", "1")
+        monkeypatch.setenv("COMPANION_OWNER_QQ_OPENID", "u1")
+        proactive._companion_stores.clear()
+        companion = CompanionConfig(enabled=True, owner_openid="u1")
+
+        proactive._record_companion_sent(
+            cfg, "u1", companion, None,
+            job_name="proactive-morning",
+            actual_message="正文",
+            provider_message_id="",
+        )
+        proactive._record_companion_sent(
+            cfg, "u1", companion, None,
+            job_name="proactive-morning",
+            actual_message="正文",
+            provider_message_id="",
+        )
+
+        rows = _sent_rows(cfg)
+        assert len(rows) == 1
+        assert rows[0]["source_id"].startswith("proactive-sent:")
+        assert rows[0]["summary"] == "正文"
 
 
 # ---------- M3: failure retry cap ----------
