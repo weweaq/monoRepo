@@ -26,7 +26,7 @@ from typing import Final
 
 from gacore.config import Config
 
-SCHEMA_VERSION: Final = 5
+SCHEMA_VERSION: Final = 6
 DEFAULT_BUSY_TIMEOUT_MS: Final = 5000
 
 # Versioned registry: V1/V2 allow the three message events only. Journal data is a
@@ -35,12 +35,29 @@ DEFAULT_BUSY_TIMEOUT_MS: Final = 5000
 _EVENT_KINDS_V1: Final = frozenset(
     {"user.message.received", "agent.message.sent", "proactive.message.sent"}
 )
+# v6 adds the goal/read-action kinds: a goal's lifecycle must be evidenced by real
+# events, never by a mutable status column alone.
+_EVENT_KINDS_V6: Final = _EVENT_KINDS_V1 | frozenset(
+    {
+        "read_action.succeeded",
+        "read_action.failed",
+        "goal.started",
+        "goal.succeeded",
+        "goal.failed",
+        "goal.cancelled",
+        "commitment.created",
+        "commitment.succeeded",
+        "commitment.failed",
+        "commitment.cancelled",
+    }
+)
 EVENT_KINDS: Final[dict[int, frozenset[str]]] = {
     1: _EVENT_KINDS_V1,
     2: _EVENT_KINDS_V1,
     3: _EVENT_KINDS_V1,
     4: _EVENT_KINDS_V1,
     5: _EVENT_KINDS_V1,
+    6: _EVENT_KINDS_V6,
 }
 SUPPORTED_EVENT_KINDS: Final = EVENT_KINDS[SCHEMA_VERSION]
 
@@ -55,6 +72,13 @@ COMMITMENT_STATUSES: Final = frozenset(
     {"proposed", "active", "overdue", "succeeded", "failed", "cancelled"}
 )
 COMMITMENT_OPEN_STATUSES: Final = frozenset({"proposed", "active", "overdue"})
+
+# Goal lifecycle (V2-Step 5). One goal at a time may be in_progress (partial unique
+# index); execution is restricted to the read-only tool whitelist below.
+GOAL_STATUSES: Final = frozenset(
+    {"proposed", "approved", "in_progress", "succeeded", "failed", "cancelled"}
+)
+GOAL_TERMINAL_STATUSES: Final = frozenset({"succeeded", "failed", "cancelled"})
 
 # Mood vocabulary (V2-Step 3). ``neutral`` is the absence of a live mood, so the
 # prompt block is simply omitted; the other labels always carry a source event.
@@ -228,6 +252,23 @@ class Commitment:
     due_at_ms: int | None
     success_criteria: str
     status: str
+    result_event_id: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class Goal:
+    """One small, read-only, cancellable objective derived from a promise/reflection."""
+
+    goal_id: str
+    actor_id: str
+    principal_id: str
+    commitment_id: str | None
+    text: str
+    status: str
+    allowed_tools: tuple[str, ...]
+    deadline_ms: int
     result_event_id: str | None
     created_at: str
     updated_at: str
@@ -501,12 +542,40 @@ MIGRATION_V5: Final[tuple[str, ...]] = (
     """,
 )
 
+MIGRATION_V6: Final[tuple[str, ...]] = (
+    f"""
+    CREATE TABLE IF NOT EXISTS companion_goal (
+        goal_id            TEXT PRIMARY KEY,
+        actor_id           TEXT NOT NULL,
+        principal_id       TEXT NOT NULL,
+        commitment_id      TEXT REFERENCES companion_commitment(commitment_id),
+        text               TEXT NOT NULL,
+        status             TEXT NOT NULL CHECK (status IN (
+                             'proposed', 'approved', 'in_progress',
+                             'succeeded', 'failed', 'cancelled'
+                           )),
+        allowed_tools_json TEXT NOT NULL DEFAULT '[]'
+                             CHECK (json_valid(allowed_tools_json)),
+        deadline_ms        INTEGER NOT NULL,
+        result_event_id    TEXT REFERENCES companion_event(event_id),
+        created_at         TEXT NOT NULL DEFAULT ({_TIMESTAMP_DEFAULT}),
+        updated_at         TEXT NOT NULL DEFAULT ({_TIMESTAMP_DEFAULT})
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_one_active_goal
+    ON companion_goal(actor_id, principal_id)
+    WHERE status = 'in_progress'
+    """,
+)
+
 MIGRATIONS: Final[dict[int, tuple[str, ...]]] = {
     1: MIGRATION_V1,
     2: MIGRATION_V2,
     3: MIGRATION_V3,
     4: MIGRATION_V4,
     5: MIGRATION_V5,
+    6: MIGRATION_V6,
 }
 
 
@@ -1637,6 +1706,138 @@ class CompanionStore:
             ).fetchall()
         return [_row_to_commitment(row) for row in rows]
 
+    # --------------------------------------------------------------------- goal
+
+    def goals(
+        self, actor_id: str, principal_id: str, *, status: str | None = None
+    ) -> list[Goal]:
+        """Goals of one actor, oldest first; ``status=None`` returns every state."""
+        with self._connect() as conn:
+            if status is None:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM companion_goal
+                    WHERE actor_id = ? AND principal_id = ?
+                    ORDER BY created_at ASC, rowid ASC
+                    """,
+                    (actor_id, principal_id),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM companion_goal
+                    WHERE actor_id = ? AND principal_id = ? AND status = ?
+                    ORDER BY created_at ASC, rowid ASC
+                    """,
+                    (actor_id, principal_id, status),
+                ).fetchall()
+        return [_row_to_goal(row) for row in rows]
+
+    def get_goal(self, goal_id: str) -> Goal | None:
+        """Load one goal by id (``None`` when it does not exist)."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM companion_goal WHERE goal_id = ?", (goal_id,)
+            ).fetchone()
+        return _row_to_goal(row) if row is not None else None
+
+    def active_goal(self, actor_id: str, principal_id: str) -> Goal | None:
+        """The single ``in_progress`` goal (guaranteed by the partial unique index)."""
+        goals = self.goals(actor_id, principal_id, status="in_progress")
+        return goals[0] if goals else None
+
+    def add_goal(
+        self,
+        *,
+        actor_id: str,
+        principal_id: str,
+        text: str,
+        allowed_tools: Sequence[str],
+        deadline_ms: int,
+        status: str = "proposed",
+        commitment_id: str | None = None,
+    ) -> Goal:
+        """Insert one goal; a second ``in_progress`` goal is rejected by the index."""
+        _require_non_empty("actor_id", actor_id)
+        _require_non_empty("principal_id", principal_id)
+        _require_non_empty("text", text)
+        if status not in GOAL_STATUSES:
+            raise ValueError(f"unknown goal status: {status!r}")
+        with self._transaction() as conn:
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO companion_goal (
+                        goal_id, actor_id, principal_id, commitment_id, text,
+                        status, allowed_tools_json, deadline_ms
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        f"goal_{uuid.uuid4().hex}",
+                        actor_id,
+                        principal_id,
+                        commitment_id,
+                        text,
+                        status,
+                        json.dumps(list(allowed_tools), ensure_ascii=False),
+                        int(deadline_ms),
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:  # ux_one_active_goal
+                raise CompanionStoreError(
+                    "another goal is already in progress for this actor"
+                ) from exc
+            row = conn.execute(
+                """
+                SELECT * FROM companion_goal
+                WHERE actor_id = ? AND principal_id = ?
+                ORDER BY rowid DESC LIMIT 1
+                """,
+                (actor_id, principal_id),
+            ).fetchone()
+        assert row is not None  # pragma: no cover
+        return _row_to_goal(row)
+
+    def set_goal_status(
+        self,
+        goal_id: str,
+        *,
+        status: str,
+        result_event_id: str | None = None,
+    ) -> Goal:
+        """Move one goal forward; terminal states are final."""
+        if status not in GOAL_STATUSES:
+            raise ValueError(f"unknown goal status: {status!r}")
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM companion_goal WHERE goal_id = ?", (goal_id,)
+            ).fetchone()
+            if row is None:
+                raise CompanionStoreError(f"unknown goal: {goal_id!r}")
+            if row["status"] in GOAL_TERMINAL_STATUSES:
+                raise CompanionStoreError(
+                    f"goal {goal_id!r} is already {row['status']!r}"
+                )
+            try:
+                conn.execute(
+                    f"""
+                    UPDATE companion_goal
+                    SET status = ?, result_event_id = COALESCE(?, result_event_id),
+                        updated_at = {_TIMESTAMP_DEFAULT}
+                    WHERE goal_id = ?
+                    """,
+                    (status, result_event_id, goal_id),
+                )
+            except sqlite3.IntegrityError as exc:  # second in_progress
+                raise CompanionStoreError(
+                    "another goal is already in progress for this actor"
+                ) from exc
+            updated = conn.execute(
+                "SELECT * FROM companion_goal WHERE goal_id = ?", (goal_id,)
+            ).fetchone()
+        assert updated is not None  # pragma: no cover
+        return _row_to_goal(updated)
+
 def _assert_sources_owned(
     conn: sqlite3.Connection,
     actor_id: str,
@@ -1840,6 +2041,26 @@ def _row_to_commitment(row: sqlite3.Row) -> Commitment:
         due_at_ms=None if row["due_at_ms"] is None else int(row["due_at_ms"]),
         success_criteria=row["success_criteria"],
         status=row["status"],
+        result_event_id=row["result_event_id"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _row_to_goal(row: sqlite3.Row) -> Goal:
+    try:
+        tools = tuple(json.loads(row["allowed_tools_json"] or "[]"))
+    except ValueError:  # pragma: no cover - CHECK(json_valid)
+        tools = ()
+    return Goal(
+        goal_id=row["goal_id"],
+        actor_id=row["actor_id"],
+        principal_id=row["principal_id"],
+        commitment_id=row["commitment_id"],
+        text=row["text"],
+        status=row["status"],
+        allowed_tools=tools,
+        deadline_ms=int(row["deadline_ms"]),
         result_event_id=row["result_event_id"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],

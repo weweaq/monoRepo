@@ -73,6 +73,20 @@ from gacore.companion.commitment import (
     schedule_commitment_extraction,
     sweep_overdue,
 )
+from gacore.companion.goal import (
+    ALLOWED_TOOLS,
+    GOAL_PROMPT_VERSION,
+    MAX_DEADLINE_DAYS,
+    GoalProposal,
+    approve_goal,
+    cancel_goal,
+    create_goal,
+    finish_goal,
+    goal_view,
+    propose_goal,
+    start_goal,
+    validate_proposal,
+)
 from gacore.companion.mood import (
     MAX_MOOD_LINE_CHARS,
     MOOD_BLOCK_VERSION,
@@ -99,7 +113,11 @@ from gacore.companion.reply_batch import (
 from gacore.companion.summary import minimize_user_message
 
 __all__ = [
+    "ALLOWED_TOOLS",
     "AUTO_ACTIVE_CONFIDENCE",
+    "GOAL_PROMPT_VERSION",
+    "MAX_DEADLINE_DAYS",
+    "GoalProposal",
     "COMMITMENT_PROMPT_VERSION",
     "MIN_CONFIDENCE",
     "OVERDUE_GRACE_MS",
@@ -130,6 +148,14 @@ __all__ = [
     "ReplyBatch",
     "SELF_MEMORY_BLOCK_VERSION",
     "active_cards_path",
+    "approve_goal",
+    "cancel_goal",
+    "create_goal",
+    "finish_goal",
+    "goal_view",
+    "propose_goal",
+    "start_goal",
+    "validate_proposal",
     "active_mood",
     "build_mood_line",
     "cancel_commitment",
