@@ -5315,4 +5315,95 @@ Companion 事实源里的 sent 事件。仍**不触发反思**（Step 7 才接�
 **待办更新**：
 
 - [x] Step 6 已确认发送事件（代码 + 测试 + R5 三处同步）
-- [ ] Step 7 Evidence-Bound Reflection（至少 3 条新事件生成 0–2 条带来源反思）
+- [x] Step 7 Evidence-Bound Reflection（代码 + 测试 + R5 三处同步）
+- [ ] Step 8 Self-Memory Prompt 注入（owner C2C 完整 Agent 轮最多注入 3 条反思）
+
+
+## 2026-10-30 · Companion 自我记忆 V1 Step 7：Evidence-Bound Reflection
+
+**背景**：按 `docs/companion-self-memory-v1-plan.md` Step 7，在事件事实源之上加「有证据的
+自我反思」：至少 3 条新事件才允许生成 0–2 条反思，每条反思必须引用同一批内 2–5 条事件；
+模型调用全部在后台线程，不阻塞 QQ 聊天。本步不把反思注入 Prompt（Step 8 才做）。
+
+**已完成**：
+
+- `src/gacore/companion/reflection.py`（新增）：
+  - `run_reflection(events, *, model=None)`：System Prompt 固定为「角色自我反思提取器，
+    不是聊天角色」；Human 只喂 `{event_id, kind, summary}`；输出 JSON 经 `validate_reflections`
+    校验。模型异常 / 非 JSON / 坏 JSON 一律返回 `ReflectionOutcome(ok=False, error=...)`，
+    不抛出。
+  - `validate_reflections(data, allowed_event_ids)`：0–2 条反思；`source_event_ids` 去重后
+    2–5 个且必须全部来自本批；`confidence` 必须是 0–1 的数字（拒绝 bool）；`statement`
+    1–200 字且不含密钥/路径（`redact_text` 有变化或命中路径/Token 正则即拒）。
+  - `reflect_due(store, actor_id, principal_id, *, runner=None, now_ms=None)`：
+    - 有 `retry_batch_end_seq` 时只跑固定旧批（`events_between(last_reflected_seq+1,
+      retry_batch_end_seq)`）；没有则取最早 10 条（`events_after(..., limit=10)`），
+      `<3` 直接返回 `too_few`，否则先 `begin_reflection_batch` 固定批次。
+    - 按东八区日期判断「每角色每天最多一次」（`last_reflected_at_ms` 与 `now_ms` 同日期即
+      `not_due_today`）。
+    - 有效结果（含 `reflections=[]`）走 `commit_reflection_batch` 单事务提交反思+来源+游标；
+      首次失败 `failure_count=1` 保留同一批，第二次失败推进 `last_reflected_seq` 并写
+      `last_error`，批次不跨失败段。
+    - 返回码 `too_few / not_due_today / reflected / retry_scheduled / batch_skipped`，
+      供日志与测试断言。
+  - `REFLECTION_PROMPT_VERSION = "reflection.v1"`；`BATCH_SIZE=10`、`MIN_BATCH_EVENTS=3`、
+    `MAX_REFLECTIONS=2`、`MIN/MAX_SOURCES=2/5`、`MAX_STATEMENT_CHARS=200`。
+- `src/gacore/companion/store.py`：
+  - 新增 `begin_reflection_batch(actor, principal, batch_end_seq)`：upsert cursor 固定批次，
+    重置 `failure_count/last_error`，保留 `last_reflected_at_ms`。
+  - 新增 `record_reflection_failure(..., failure_count, last_error, advance)`：
+    `advance=False` 保留重试批次；`advance=True` 推进 `last_reflected_seq` 并清空重试状态。
+    两者均为单事务。
+- `src/gacore/companion/coordinator.py`（新增）：
+  - `ReflectionCoordinator(store_factory, runner=None, clock_ms=None)`：后台
+    `ThreadPoolExecutor(thread_name_prefix="companion-reflection")`；按
+    `(actor_id, principal_id)` 维护 pending 集合，实现 single-flight（同角色并发触发只跑
+    一次）；`shutdown(timeout)` 关闭新任务、取消排队任务并有限等待运行中任务。
+  - `schedule_reflection_check(actor_id, principal_id)`：进程级默认协调器（store 懒创建，
+    import 阶段不碰 DB）；调度异常只 warning。
+  - `shutdown_reflection_coordinator(timeout=5.0)`：QQ `_boot()` 的 `finally` 调用，
+    保证应用关闭时停止接收新检查。
+- `src/gacore/frontends/qq.py`：
+  - `_record_companion_ingress` / `_record_companion_sent` 捕获 `AppendResult`，仅
+    `inserted=True` 时调用 `schedule_reflection_check(actor_id, "owner")`；重复消息/重放
+    不触发第二次模型调用。
+  - `_boot()` 用 `try/finally` 包住 `QQApp.start()`，退出时
+    `shutdown_reflection_coordinator()`。
+- `src/gacore/proactive.py`：`_record_companion_sent` 捕获 `AppendResult`，仅新插入的
+  `proactive.message.sent` 触发反思检查。
+- `src/gacore/companion/__init__.py`：导出 `ReflectionCoordinator`、`ReflectionOutcome`、
+  `reflect_due`、`run_reflection`、`validate_reflections`、`schedule_reflection_check`、
+  `shutdown_reflection_coordinator`。
+- `tests/test_companion_reflection.py`（新增，31 条）：
+  - `TestRunReflection`：合法 JSON、空数组、非 JSON、0–2 条上限、source 数量/越界 ID、
+    confidence 越界、statement 长度/密钥/路径、模型异常降级。
+  - `TestReflectDue`：<3 条不调模型、3 条提交并推进、空结果推进、首次失败固定最早 10 条
+    并重试同一批、二次失败跳过并记录 `last_error`、东八区每日一次、次日跑固定批、
+    批外 source 不提交、跨 actor source 整批回滚。
+  - `TestCoordinator`：同角色并发只跑一次、runner/store 异常不抛、shutdown 后拒绝新检查。
+  - `TestTriggerWiring`：Step 4 ingress、Step 6 普通 sent、proactive sent 均在
+    `inserted=True` 时触发一次，重放不触发。
+- `tests/test_companion_events.py` / `tests/test_proactive.py`：相关夹具把
+  `schedule_reflection_check` 置空，事件写入测试不再派生真实模型调用。
+
+**实测验证**：
+
+- `uv run pytest apps/withlanggraph/tests/test_companion_reflection.py -q` → **31 passed**
+- `uv run pytest apps/withlanggraph/tests/test_companion_events.py
+  apps/withlanggraph/tests/test_companion_store.py apps/withlanggraph/tests/test_companion_identity.py
+  apps/withlanggraph/tests/test_proactive.py apps/withlanggraph/tests/test_qq.py -q` → **173 passed**
+- `uv run pytest -q`（全仓）→ **1962 passed, 4 skipped**（141.83s）
+- `uv run ruff check apps packages tests` → All checks passed
+- `node apps/mermaid-viewer/tests/check_prompt_logic.js` → ALL PASS
+
+**偏差说明**：
+
+- 计划写「同 actor/principal lock」，实现为 pending 集合 + 单 worker executor 的
+  single-flight：同角色并发触发返回 `False`，不排队第二次检查，效果等价且不占线程。
+- 计划写「首次失败重试同一批」，实际重试发生在**下一条新事件触发的检查**上（与设计
+  §7.1 伪代码一致），不在同一轮内立即重试，避免聊天链路被连续模型调用拖住。
+- 计划测试提到「注入同步 executor」，实际通过注入 `runner`/`store_factory` +
+  `shutdown(timeout)` 观察后台结果；模型调用仍保证不在 QQ event loop 内同步执行。
+- `store.py` 计划外新增两个游标方法（固定批次 / 记录失败），避免在 reflection 层拼 SQL。
+- 反思写入依赖既有 `commit_reflection_batch` 的 source 归属校验；跨 actor 引用会整批回滚。
+

@@ -881,6 +881,44 @@ flowchart LR
   - 幂等键 `proactive-sent:<job>:<uid>:<source_id>`；actor 由
     `actor_id_for(uid, companion, active_card)` 决定，非 owner / 未启用不写。
 
+### 9.2.5 Companion Evidence-Bound Reflection（2026-10-30，Step 7）
+
+在 9.2.4 的事件事实源之上生成「有来源的自我反思」，仍不注入 Prompt（Step 8 才做）。
+
+- 模块：
+  - `companion/reflection.py`：`run_reflection(events, *, model=None)` 调
+    `get_llm([], bind_tools=False)`（懒解析，可注入 fake model）；System Prompt 固定为
+    「角色自我反思提取器，不是聊天角色」；Human 只含 `{event_id, kind, summary}`。
+  - `validate_reflections(data, allowed_event_ids)`：0–2 条反思；`source_event_ids` 去重后
+    2–5 个且全部来自本批；`confidence` 为 0–1 数字（拒绝 bool）；`statement` 1–200 字且
+    不含密钥/路径（`redact_text` 有变化或命中路径/Token 正则即拒）。
+  - `reflect_due(store, actor_id, principal_id, *, runner=None, now_ms=None)`：返回
+    `too_few / not_due_today / reflected / retry_scheduled / batch_skipped`。
+  - `companion/coordinator.py`：`ReflectionCoordinator` 后台单 worker executor +
+    按 `(actor_id, principal_id)` 的 pending 集合实现 single-flight；
+    `schedule_reflection_check()` 使用进程级默认协调器；`shutdown_reflection_coordinator()`
+    在 QQ `_boot()` 的 `finally` 中调用。
+- 批次规则（`REFLECTION_PROMPT_VERSION="reflection.v1"`）：
+  - 没有固定批次时取**最早** 10 条未反思事件（`events_after(..., limit=10)`），少于 3 条
+    直接返回，不调用模型；达到 3 条先 `store.begin_reflection_batch` 固定批次。
+  - 有 `retry_batch_end_seq` 时只跑 `events_between(last_reflected_seq+1,
+    retry_batch_end_seq)`，批次不会随新事件漂移。
+  - 每角色按**东八区日期**最多一次：`last_reflected_at_ms` 与当前时间同日期即
+    `not_due_today`（新批次会被固定并等次日）。
+  - 有效结果（含 `reflections=[]`）走 `store.commit_reflection_batch` 单事务提交
+    reflection + source + cursor，并清空重试状态。
+  - 首次失败：`store.record_reflection_failure(advance=False)` 保留同一批
+    （`failure_count=1`）；第二次失败：`advance=True` 推进 `last_reflected_seq`、清空重试、
+    写入 `last_error`，之后从失败批之后继续。
+  - 批次内 source 不存在 / 跨 actor：`commit_reflection_batch` 的
+    `_assert_sources_owned` 整批拒绝并回滚，reflection 层按失败批次处理。
+- 触发接线（仅 `AppendResult.inserted=True`）：
+  - Step 4 `QQApp._record_companion_ingress` → `user.message.received` 新插入后
+    `schedule_reflection_check(actor_id, "owner")`。
+  - Step 6 `QQApp._record_companion_sent` / `proactive._record_companion_sent` →
+    `agent.message.sent` / `proactive.message.sent` 新插入后同样提交检查。
+  - 重复消息、幂等重放、store 异常均不触发；协调器异常只 warning，不影响聊天/推送。
+
 ### 9.3 测试
 
 `tests/test_character.py`(7)、`tests/test_character_system_prompt.py`(4)、`tests/test_qq.py` `/角色` 相关 3 条、
@@ -900,6 +938,12 @@ hash、非 owner 不写、store 异常不抛、最终回复路径真实接线。
 `to`/`failures`/`ids`/`actual_message`。`TestProactiveSent`(5)：`_qq_push_receipt` 返回
 正文 + owner id、别人成功无回执、端到端写 `proactive.message.sent`（正文与 id 一致）、
 推送失败不写、空平台 id 回退 hash 且重放幂等。
+`tests/test_companion_reflection.py`(31)：反思输出校验（0–2 条 / 2–5 同批 source /
+confidence / statement 长度与密钥路径）、<3 条不调模型、3 条提交并推进、空结果推进、
+首次失败固定最早 10 条并重试同一批、二次失败跳过并记录 `last_error`、东八区每日一次、
+次日跑固定批、批外 source 不提交、跨 actor source 整批回滚、协调器 single-flight /
+异常吞掉 / shutdown 拒绝新检查、Step 4/6 与 proactive 新事件触发一次且重放不触发；
+Step 7 验收 31 passed。
 
 ### 9.4 主动推送（openid 落库 + qq_push）
 
