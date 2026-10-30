@@ -20,10 +20,14 @@ class ConfigError(Exception):
     """Raised when configuration cannot be built from the given environment."""
 
 
-def _resolve_dir(root: Path, env: Mapping[str, str], env_name: str, default_rel: Path) -> Path:
-    """Resolve a directory: absolute override kept, relative override rooted at root, else root/default_rel."""
+def _resolve_path(root: Path, env: Mapping[str, str], env_name: str, default_rel: Path) -> Path:
+    """Resolve a path: absolute override kept, relative override rooted at root, else root/default_rel.
+
+    Blank values (``KEY=`` in .env, which load_dotenv still exports) count as unset,
+    otherwise ``Path("")`` would silently resolve to the root directory itself.
+    """
     raw = env.get(env_name)
-    if raw is None:
+    if raw is None or not raw.strip():
         return root / default_rel
     candidate = Path(raw)
     return candidate if candidate.is_absolute() else root / candidate
@@ -110,6 +114,8 @@ class Config:
     extra_git_repos: tuple[Path, ...] = ()
     max_turns: int = _DEFAULT_MAX_TURNS
     rollover: RolloverConfig = RolloverConfig()
+    # Companion V1 fact source; None means "root/data/companion.db" (see store.from_config).
+    companion_db_path: Path | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Config:
@@ -117,11 +123,14 @@ class Config:
         source = os.environ if env is None else env
         return cls(
             root=_PROJECT_ROOT,
-            asset_dir=_resolve_dir(_PROJECT_ROOT, source, "GACORE_ASSET_DIR", Path("config") / "assets"),
-            memory_dir=_resolve_dir(_PROJECT_ROOT, source, "GACORE_MEMORY_DIR", Path("memory")),
-            logs_dir=_resolve_dir(_PROJECT_ROOT, source, "GACORE_LOGS_DIR", Path("logs")),
-            temp_dir=_resolve_dir(_PROJECT_ROOT, source, "GACORE_TEMP_DIR", Path("temp")),
+            asset_dir=_resolve_path(_PROJECT_ROOT, source, "GACORE_ASSET_DIR", Path("config") / "assets"),
+            memory_dir=_resolve_path(_PROJECT_ROOT, source, "GACORE_MEMORY_DIR", Path("memory")),
+            logs_dir=_resolve_path(_PROJECT_ROOT, source, "GACORE_LOGS_DIR", Path("logs")),
+            temp_dir=_resolve_path(_PROJECT_ROOT, source, "GACORE_TEMP_DIR", Path("temp")),
             extra_git_repos=_resolve_repo_list(_PROJECT_ROOT, source),
+            companion_db_path=_resolve_path(
+                _PROJECT_ROOT, source, "COMPANION_DB_PATH", Path("data") / "companion.db"
+            ),
             max_turns=_parse_max_turns(source.get("DEFAULT_MAX_TURNS", str(_DEFAULT_MAX_TURNS))),
             rollover=RolloverConfig(
                 enabled=_parse_bool(source.get("GACORE_ROLLOVER_ENABLED"), True),
@@ -146,6 +155,7 @@ class Config:
             logs_dir=tmp_path / "logs",
             temp_dir=tmp_path / "temp",
             rollover=RolloverConfig(),
+            companion_db_path=tmp_path / "data" / "companion.db",
         )
 
 
