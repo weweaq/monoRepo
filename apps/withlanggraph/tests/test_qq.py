@@ -236,6 +236,8 @@ async def test_stream_agent_renders_each_message_once(
     full-state updates, so each message used to be sent twice per turn — and previous
     turns' replies replayed inside later turns. Each message must be sent exactly once."""
     qq._rendered_msg_ids.clear()
+    # This test guards the renderer/dedupe, not the trace gate: opt the echo back on.
+    monkeypatch.setattr(qq, "_TOOL_TRACE_ENABLED", True)
 
     responses = [
         AIMessage(
@@ -378,10 +380,10 @@ def test_with_message_timestamp_prefixes_current_time() -> None:
     ["今天几号", "现在几点", "当前", "日期", "星期几", "周几", "几点了"],
 )
 def test_time_intent_words_fail_open_full_graph(msg: str) -> None:
-    """Time-intent words must never be short-circuited by the trivial one-liner gate."""
-    from gacore.frontends.qq import trivial_detect
+    """Time-intent words must never be short-circuited into the fast turn."""
+    from gacore.frontends.qq import fast_reply_detect
 
-    assert trivial_detect(msg) is False
+    assert fast_reply_detect(msg) is False
 
 
 @pytest.mark.asyncio
@@ -453,7 +455,7 @@ async def test_message_during_turn_restarts_with_merged_text(monkeypatch) -> Non
     app._turn_input_in_checkpoint = AsyncMock(return_value=True)
     calls: list[str] = []
 
-    async def fake_run(chat_id, text, user_id, *, msg_id=None, is_group=False):
+    async def fake_run(chat_id, text, user_id, *, msg_id=None, is_group=False, fast=False):
         calls.append(text)
         if len(calls) == 1:
             await asyncio.sleep(30)
@@ -561,3 +563,160 @@ async def test_run_agent_omits_companion_context_for_non_owner(monkeypatch) -> N
     state = await _run_agent_state(monkeypatch, is_group=False, actor=None)
 
     assert state["companion_context"] is None
+
+# --------------------------------------------------------------- fast reply turn
+
+def _c2c(content: str, msg_id: str):
+    msg = MagicMock()
+    msg.id = msg_id
+    msg.content = content
+    msg.author = MagicMock()
+    msg.author.user_openid = "user-1"
+    msg.author.id = "user-1"
+    return msg
+
+
+@pytest.mark.parametrize("text", ["在吗", "在干嘛", "嗯嗯", "晚安", "吃饭"])
+def test_fast_reply_detect_accepts_filler(text: str) -> None:
+    assert qq.fast_reply_detect(text) is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["你有自己的记忆了", "今天想聊聊最近的计划", "帮我看看最近的提交记录", "今天几号"],
+)
+def test_fast_reply_detect_rejects_short_but_meaningful(text: str) -> None:
+    """A short message that carries real content must not take the cheap turn."""
+    assert qq.fast_reply_detect(text) is False
+
+
+async def test_filler_message_uses_the_same_agent_path_with_fast_flag(monkeypatch) -> None:
+    """A casual one-liner is a normal turn with fast=True — not a second reply path."""
+    _processed_ids.clear()
+    app = QQApp(MagicMock())
+    enqueued = MagicMock()
+    monkeypatch.setattr(app, "_enqueue_agent_turn", enqueued)
+    monkeypatch.setattr(qq, "is_mute_request", lambda text: False)
+    monkeypatch.setattr(qq, "feedback_route", lambda text: None)
+    monkeypatch.setattr(qq, "try_weekly_interaction", lambda cfg, text: None)
+    monkeypatch.setattr(qq, "try_answer", lambda cfg, text, allow_bare=True: None)
+
+    with patch.object(qq, "_ALLOWED", frozenset({"user-1"})):
+        await app.on_message(_c2c("在干嘛", "m-fast"), is_group=False)
+
+    assert enqueued.call_args.kwargs["fast"] is True
+
+
+async def test_real_question_uses_the_full_turn(monkeypatch) -> None:
+    _processed_ids.clear()
+    app = QQApp(MagicMock())
+    enqueued = MagicMock()
+    monkeypatch.setattr(app, "_enqueue_agent_turn", enqueued)
+    monkeypatch.setattr(qq, "is_mute_request", lambda text: False)
+    monkeypatch.setattr(qq, "feedback_route", lambda text: None)
+    monkeypatch.setattr(qq, "try_weekly_interaction", lambda cfg, text: None)
+    monkeypatch.setattr(qq, "try_answer", lambda cfg, text, allow_bare=True: None)
+
+    with patch.object(qq, "_ALLOWED", frozenset({"user-1"})):
+        await app.on_message(_c2c("你有自己的记忆了", "m-full"), is_group=False)
+
+    assert enqueued.call_args.kwargs["fast"] is False
+
+
+@pytest.mark.asyncio
+async def test_run_agent_fast_flag_selects_the_fast_graph(monkeypatch) -> None:
+    app = QQApp(MagicMock())
+    app._stream_agent = AsyncMock()
+    fast_graph = MagicMock(name="fast_graph")
+    app._fast_graph = MagicMock(return_value=fast_graph)
+    monkeypatch.setattr(qq, "actor_id_for", lambda openid, companion, card: None)
+
+    await app._run_agent("chat", "在干嘛", "user-1", msg_id=None, is_group=False, fast=True)
+
+    state = app._stream_agent.await_args.args[1]
+    assert state["fast_reply"] is True
+    assert app._stream_agent.await_args.kwargs["graph"] is fast_graph
+
+
+@pytest.mark.asyncio
+async def test_run_agent_full_flag_keeps_the_main_graph(monkeypatch) -> None:
+    app = QQApp(MagicMock())
+    app._stream_agent = AsyncMock()
+    app._fast_graph = MagicMock()
+    monkeypatch.setattr(qq, "actor_id_for", lambda openid, companion, card: None)
+
+    await app._run_agent("chat", "帮我看看日报", "user-1", msg_id=None, is_group=False)
+
+    state = app._stream_agent.await_args.args[1]
+    assert state["fast_reply"] is False
+    assert app._stream_agent.await_args.kwargs["graph"] is None
+    app._fast_graph.assert_not_called()
+
+
+def test_fast_graph_binds_no_tools_and_is_cached(monkeypatch) -> None:
+    app = QQApp(MagicMock())
+    captured: list[dict] = []
+    monkeypatch.setattr(qq, "build_graph", lambda **kwargs: captured.append(kwargs) or MagicMock())
+
+    first = app._fast_graph()
+    second = app._fast_graph()
+
+    assert first is second
+    assert len(captured) == 1
+    assert captured[0]["tool_list"] == []
+
+
+# --------------------------------------------------------------- tool traces
+
+@pytest.mark.asyncio
+async def test_tool_trace_is_log_only_by_default(monkeypatch) -> None:
+    """Tool calls/results stay in the JSONL log; the chat gets nothing by default."""
+    app = QQApp(MagicMock())
+    app.send_text = AsyncMock()
+    logged: list[dict] = []
+
+    class _Rec:
+        def info(self, message, **fields):
+            logged.append({"message": message, **fields})
+
+    monkeypatch.setattr(qq, "logger", _Rec())
+    monkeypatch.setattr(qq, "_TOOL_TRACE_ENABLED", False)
+
+    await app._trace_tool_event("chat", "[tools] <- ok", is_group=False, tool="code_run")
+
+    app.send_text.assert_not_awaited()
+    assert logged and logged[0]["line"] == "[tools] <- ok"
+
+
+@pytest.mark.asyncio
+async def test_tool_trace_echoes_when_explicitly_enabled(monkeypatch) -> None:
+    app = QQApp(MagicMock())
+    app.send_text = AsyncMock()
+    monkeypatch.setattr(qq, "_TOOL_TRACE_ENABLED", True)
+
+    await app._trace_tool_event("chat", "[agent] -> code_run(x=1)", is_group=False, tool="code_run")
+
+    app.send_text.assert_awaited_once()
+    assert app.send_text.await_args.args[1] == "[agent] -> code_run(x=1)"
+
+@pytest.mark.asyncio
+async def test_fast_turn_runs_end_to_end_without_tools_or_placeholder(
+    tmp_cfg, message_llm, monkeypatch
+) -> None:
+    """The tool-less graph really runs a turn: one reply, no 思考中 placeholder, no trace."""
+    qq._rendered_msg_ids.clear()
+    llm = message_llm([AIMessage(content="在。")])
+    graph = build_graph(llm=llm, cfg=tmp_cfg, tool_list=[])
+    app = QQApp(graph)
+    app.send_text = AsyncMock()
+
+    config = {"configurable": {"thread_id": "qq-fast-e2e"}}
+    state = new_state("在干嘛", tmp_cfg, fast_reply=True)
+    await app._stream_agent(
+        "chat-fast", state, config, msg_id=None, is_group=False, user_id="user-fast"
+    )
+
+    texts = [call.args[1] for call in app.send_text.call_args_list if len(call.args) > 1]
+    assert "思考中..." not in texts
+    assert not any(t.startswith("[agent] ->") or t.startswith("[tools] <-") for t in texts)
+    assert any("在。" in t for t in texts)

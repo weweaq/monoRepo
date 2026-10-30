@@ -503,3 +503,30 @@ def test_reply_style_skipped_without_companion_context(cfg_with_assets: Config) 
     prompt = build_system_prompt(_state([HumanMessage(content="hi")]), cfg_with_assets)
 
     assert "[即时聊天表达规则]" not in prompt
+def test_fast_reply_skips_vector_recall(cfg_with_assets: Config, monkeypatch) -> None:
+    """Fast-reply turns must not pay the embedding/RAG cost — everything else stays."""
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "gacore.vector_store.recall_context",
+        lambda *a, **kw: calls.append("recall") or "",
+    )
+
+    state = _state([HumanMessage(content="在干嘛")])
+    state["fast_reply"] = True
+    prompt = build_system_prompt(state, cfg_with_assets)
+
+    assert calls == []
+    # The rest of the prompt is unchanged (time anchor still pinned at the end).
+    assert "【当前真实时间】" in prompt
+
+
+def test_normal_turn_still_calls_vector_recall(cfg_with_assets: Config, monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "gacore.vector_store.recall_context",
+        lambda *a, **kw: calls.append("recall") or "",
+    )
+
+    build_system_prompt(_state([HumanMessage(content="帮我看看上周的行程")]), cfg_with_assets)
+
+    assert calls == ["recall"]

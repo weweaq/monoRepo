@@ -148,7 +148,14 @@ def _last_user_text(state: GAState) -> str:
     return ""
 
 def _rag_recall_block(state: GAState) -> str:
-    """Best-effort parallel recall of long-term + day-tagged memory for the current turn."""
+    """Best-effort parallel recall of long-term + day-tagged memory for the current turn.
+
+    Fast-reply turns (casual one-liners) skip recall entirely: loading the embedding
+    model is the single most expensive step of a turn, and a "在干嘛" answer never needs
+    long-term recall. Everything else in the prompt stays identical.
+    """
+    if state.get("fast_reply"):
+        return ""
     query = _last_user_text(state)
     if not query or len(query) > 200:
         return ""
@@ -237,6 +244,7 @@ def _self_memory_block(cfg: Config, companion_context: dict) -> str:
 
 def build_system_prompt(state: GAState, cfg: Config) -> str:
     """Build the per-turn system prompt: L0 rules, daily recap, working checkpoint, and periodic hints."""
+    fast_reply = bool(state.get("fast_reply"))
     path = cfg.asset_dir / "sys_prompt.txt"
     if path.is_file():
         prompt = path.read_text(encoding="utf-8")
@@ -367,6 +375,14 @@ def build_system_prompt(state: GAState, cfg: Config) -> str:
         "核实一次——两者同源，以 get_time 实际返回为准；未经核实直接断言且与实际时钟明显偏离时，"
         "输出侧【时间守卫】会拦截并要求你重新调用 get_time。"
     )
+    if fast_reply:
+        with contextlib.suppress(Exception):
+            _context_logger.info(
+                "fast reply turn",
+                fast_reply=True,
+                rag_recall=False,
+                actor_id=str((companion_context or {}).get("actor_id") or ""),
+            )
     return prompt
 
 

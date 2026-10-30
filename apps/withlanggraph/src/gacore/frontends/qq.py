@@ -101,7 +101,7 @@ from langgraph.types import Command
 
 
 
-from gacore.character import card_name, card_prompt, list_cards
+from gacore.character import card_name, list_cards
 from gacore.companion.config import load_companion_config
 from gacore.companion.coordinator import schedule_reflection_check, shutdown_reflection_coordinator
 from gacore.companion.identity import ActiveCardError, ActiveCardRepository, actor_id_for
@@ -123,7 +123,6 @@ from gacore.qa_store import match_and_record, try_answer
 from gacore.weekly_eval import try_weekly_interaction
 
 from gacore.state import new_state
-from gacore.tools.daily_notes import load_recent_daily_summaries
 from gacore.tools.ocr_tools import ocr_image
 
 from gacore.feedback import (
@@ -195,15 +194,26 @@ _SPLIT_LIMIT: Final = 4500  # QQ markdown message length safety margin
 # separate instant messages, capped to keep the turn responsive.
 _SEGMENT_INTERVAL_SECONDS: Final = 0.3
 
+# Tool traces (``[agent] -> …`` / ``[tools] <- …``) are debugging output, not chat.
+# Off by default: they are written to the JSONL log instead of the QQ chat. Set
+# QQ_TOOL_TRACE=1 to echo them to the chat again (dev only).
+_TOOL_TRACE_ENABLED: Final = (os.environ.get("QQ_TOOL_TRACE", "") or "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+
 # Burst messages from one user inside this window are merged into a single agent turn.
 _MERGE_WINDOW_SECONDS: Final = 1.2
 
-# --------------------------------------------------------------------------- Phase 1: trivial-input gate
-# Ultra-short / casual words get a light (non-agent) one-liner reply; real questions
-# and tasks flow into the full graph. Conservative by design: anything borderline is
-# let through ("fail open") so no legitimate question is ever short-circuited.
-_TRIVIAL_MAX_LEN: Final = 8  # messages at or below this length are candidate one-liner replies
-_TRIVIAL_WHITELIST: Final = frozenset({
+# --------------------------------------------------------------------------- fast-reply gate
+# Casual one-liners get a *fast* turn, not a second reply implementation: the same
+# graph / prompt / delivery / accounting path runs with no tools bound and with the
+# vector-recall step skipped (see state.fast_reply). Anything borderline is let
+# through ("fail open") so no legitimate question is ever short-circuited.
+_FAST_REPLY_MAX_LEN: Final = 5  # only genuinely filler-length messages use the fast turn
+_FAST_REPLY_WHITELIST: Final = frozenset({
     "吃饭", "干饭", "饿了", "吃了吗", "吃了么", "早饭", "午饭", "晚饭", "夜宵", "宵夜",
     "睡觉", "睡了", "困了", "午休", "早安", "晚安", "早上好", "下午好", "晚上好",
     "你好", "你好呀", "嗨", "哈喽", "在吗", "在么", "骑车", "出门", "溜达", "散心",
@@ -217,9 +227,12 @@ _INTENT_WORDS: Final = frozenset({
     "多少", "几点", "多少钱", "有没有", "是否有", "分析", "总结", "解释", "评价",
     "点评", "处理", "搞定", "安排", "决定", "选择", "给个", "帮个忙",
     # 时间意图词扩充：凡问“几号/几月/星期几/周几/当前/日期/时间”都算真实问题，
-    # 强制进完整图走 get_time，避免被 trivial 短消息门槛一句带过。
+    # 强制进完整图走 get_time，避免被短消息门槛一句带过。
     "几号", "几月", "几号了", "星期", "周几", "礼拜", "当前", "日期", "时间",
     "现在几点", "今天几号", "哪一天", "几点了",
+    # 内容词否决（2026-10-30）：像「你有自己的记忆了」这种短但有实指内容的话不该走快道。
+    "记忆", "特性", "功能", "提交", "代码", "报错", "日志", "数据", "文件", "项目",
+    "部署", "重启", "测试", "配置", "实现", "重构", "优化", "修复",
 })
 
 # --------------------------------------------------------------------------- Phase 2: multi-option output
@@ -784,15 +797,6 @@ def _sent_source_id(segments: Sequence[SegmentReceipt]) -> str:
 
 _TZ_SH = timezone(timedelta(hours=8))
 _WEEK_CN = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
-_MEM_TIMESTAMP_RE = re.compile(r"\d{1,2}[点时]|\d{4}[-/年]\d{1,2}[-/月]\d{1,2}|\d{1,2}月\d{1,2}日")
-
-
-def _stamp_memory_history(seg: str) -> str:
-    """Prefix timestamp-bearing lines with [历史@时间戳] so memory never reads as now."""
-    return "\n".join(
-        f"[历史@时间戳] {line}" if _MEM_TIMESTAMP_RE.search(line) else line
-        for line in seg.splitlines()
-    )
 
 
 def _with_message_timestamp(text: str) -> str:
@@ -809,12 +813,13 @@ def _with_message_timestamp(text: str) -> str:
     return f"[本条消息真实时间 {ts} {wk} (UTC+8)]\n{text}"
 
 
-def trivial_detect(text: str) -> bool:
-    """Gate for casual one-liner replies (Phase 1, route A).
+def fast_reply_detect(text: str) -> bool:
+    """Gate for the fast (tool-less, RAG-less) turn used by casual one-liners.
 
-    Returns True when the message looks like an ultra-short filler, a greeting, a
-    meal/sleep/commute mention or a casual word — AND carries no intent word
-    (如何/怎么/帮我/推荐/...) that would mark it as a real question or task.
+    Returns True when the message is genuinely filler — a greeting, a meal/sleep/
+    commute mention or a casual word — AND carries neither an intent word
+    (如何/怎么/帮我/推荐/...) nor a content word (记忆/提交/代码/...). Both lists veto
+    the fast turn, so a short-but-real topic still gets the full agent loop.
 
     Conservative by design: borderline messages return False and flow into the full
     agent loop ("fail open") — a legitimate question is never short-circuited.
@@ -824,9 +829,9 @@ def trivial_detect(text: str) -> bool:
         return False
     if any(w in t for w in _INTENT_WORDS):
         return False
-    if len(t) <= _TRIVIAL_MAX_LEN:
+    if len(t) <= _FAST_REPLY_MAX_LEN:
         return True
-    return any(w in t for w in _TRIVIAL_WHITELIST)
+    return any(w in t for w in _FAST_REPLY_WHITELIST)
 
 
 def proposal_detect(text: str) -> bool:
@@ -1030,6 +1035,13 @@ class QQApp:
         # chat_id -> token of the batch currently delivering; set() drops unsent segments.
         self._delivery_tokens: dict[str, asyncio.Event] = {}
 
+        # user_id -> whether the whole buffered burst qualifies for the fast turn
+        # (AND across the burst: one real question upgrades it to the full turn).
+        self._fast_pending: dict[str, bool] = {}
+        # Lazily built tool-less graph sharing the main checkpointer. Same code path as
+        # the full graph, only without tools and without vector recall.
+        self._fast_graph_cache: CompiledStateGraph | None = None
+
         # user_id -> one-shot rollover injection text, consumed by the first _run_agent
         # turn after a cross-day _maybe_rollover (kept in RAM only; never persisted).
         self._pending_rollover: dict[str, str] = {}
@@ -1138,6 +1150,20 @@ class QQApp:
         token = self._delivery_tokens.get(chat_id)
         if token is not None:
             token.set()
+
+    async def _trace_tool_event(self, chat_id: str, text: str, *, is_group: bool, tool: str = "") -> None:
+        """Tool traces (``[agent] -> …`` / ``[tools] <- …``) are debugging data, not chat.
+
+        They always go to the JSONL log; the chat bubble only appears when
+        ``QQ_TOOL_TRACE=1`` is set for a debugging session. Rationale: a single
+        tool-using turn used to emit ~20 such bubbles (with SQL, absolute paths and
+        command text) into the private chat, drowning the 1–3 messages the character
+        actually says — and they are not something the character "said", so they must
+        never be treated as a companion utterance either.
+        """
+        logger.info("tool trace", tool=tool or "", is_group=is_group, line=text[:300])
+        if _TOOL_TRACE_ENABLED:
+            await self.send_text(chat_id, text, is_group=is_group)
 
     def _plan_final_reply(self, state: dict, final_text: str) -> ReplyBatch:
         """Plan the final answer into a reply batch.
@@ -1520,17 +1546,14 @@ class QQApp:
                 )
                 return
 
-            # Phase 1 gate: ultra-short / casual words get a light one-liner reply
-            # without building an agent task or touching the graph. Fail-open.
-            if trivial_detect(content):
-                asyncio.create_task(
-                    self._trivial_reply(chat_id, content, user_id, msg_id=msg_id, is_group=is_group)
-                )
-                return
+            # Fast-reply gate: filler-length casual words take the same agent path with
+            # no tools bound and no vector recall (state.fast_reply), so their reply is
+            # still planned, delivered and recorded exactly like any other. Fail-open.
+            fast = fast_reply_detect(content)
 
             # 4) Normal agent turn — buffered so a burst merges into one run.
 
-            self._enqueue_agent_turn(chat_id, content, user_id, msg_id=msg_id, is_group=is_group)
+            self._enqueue_agent_turn(chat_id, content, user_id, msg_id=msg_id, is_group=is_group, fast=fast)
 
 
 
@@ -2234,13 +2257,36 @@ class QQApp:
 
 
 
+    def _fast_graph(self) -> CompiledStateGraph:
+        """Return the cached tool-less graph used by fast-reply turns.
+
+        Same builder, same middleware, same checkpointer as the main graph — only the
+        tool list is empty. Built once per process (on the first fast turn) so a casual
+        "在干嘛" does not pay the full tool-binding + RAG cost, while still producing a
+        normal turn: one prompt, one planner, one delivery, one sent event.
+        """
+        if self._fast_graph_cache is None:
+            self._fast_graph_cache = build_graph(
+                cfg=Config.default(),
+                checkpointer=self.graph.checkpointer,
+                tool_list=[],
+            )
+            logger.info("fast reply graph built", tools=0)
+        return self._fast_graph_cache
+
     async def _run_agent(
 
-        self, chat_id: str, text: str, user_id: str, *, msg_id: str | None, is_group: bool
+        self, chat_id: str, text: str, user_id: str, *, msg_id: str | None, is_group: bool, fast: bool = False
 
     ) -> None:
 
-        """Run one agent turn from scratch (new HumanMessage appended to the user's thread)."""
+        """Run one agent turn from scratch (new HumanMessage appended to the user's thread).
+
+        ``fast`` only changes two cost knobs — no tools bound and no vector recall — the
+        turn itself still goes through the same graph, prompt, planner, delivery and
+        ``agent.message.sent`` accounting as every other turn (one path, no second
+        reply implementation).
+        """
 
         thread_id = self._thread_for(user_id)
 
@@ -2260,6 +2306,7 @@ class QQApp:
             Config.default(),
             active_card=current_card,
             companion_context=companion_context,
+            fast_reply=fast,
         )  # 进入图前贴上当前真实时间
 
         # Consume the staged cross-day rollover injection on this first turn.
@@ -2273,7 +2320,15 @@ class QQApp:
 
             state["output_mode"] = "proposal"
 
-        await self._stream_agent(chat_id, state, config, msg_id=msg_id, is_group=is_group, user_id=user_id)
+        await self._stream_agent(
+            chat_id,
+            state,
+            config,
+            msg_id=msg_id,
+            is_group=is_group,
+            user_id=user_id,
+            graph=self._fast_graph() if fast else None,
+        )
 
     # ------------------------------------------------------- burst merge
 
@@ -2285,15 +2340,21 @@ class QQApp:
         *,
         msg_id: str | None,
         is_group: bool,
+        fast: bool = False,
     ) -> None:
-        """Buffer a text turn; a burst from one user is merged into a single run."""
+        """Buffer a text turn; a burst from one user is merged into a single run.
+
+        ``fast`` rides along with the buffered text: a merged burst only stays fast
+        when every message in it qualifies (one real question upgrades the whole turn).
+        """
         if user_id is None:
             asyncio.create_task(
-                self._run_agent(chat_id, content, user_id, msg_id=msg_id, is_group=is_group)
+                self._run_agent(chat_id, content, user_id, msg_id=msg_id, is_group=is_group, fast=fast)
             )
             return
 
         self._pending_texts.setdefault(user_id, []).append(content)
+        self._fast_pending[user_id] = self._fast_pending.get(user_id, True) and fast
         self._merge_last[user_id] = time.monotonic()
 
         loop = self._merge_task.get(user_id)
@@ -2329,11 +2390,13 @@ class QQApp:
                 texts = self._pending_texts.pop(user_id, [])
                 if not texts:
                     return
+                fast = self._fast_pending.pop(user_id, False)
                 merged = "\n".join(texts)
 
                 replay = self._merge_replay.pop(user_id, None)
                 if replay and not await self._turn_input_in_checkpoint(user_id, replay):
                     merged = f"{replay}\n{merged}"
+                    fast = False  # a replayed turn may have been a full one
 
                 running = self._running_tasks.get(user_id)
                 if running is not None and not running.done():
@@ -2346,6 +2409,7 @@ class QQApp:
                         inflight = self._inflight_text.pop(user_id, None)
                         if inflight and not await self._turn_input_in_checkpoint(user_id, inflight):
                             merged = f"{inflight}\n{merged}"
+                            fast = False  # the cancelled turn may have been a full one
                     else:
                         # ask_user resume / image turn: not replayable as plain text,
                         # so let it finish instead of cancelling it.
@@ -2358,7 +2422,7 @@ class QQApp:
 
                 self._inflight_text[user_id] = merged
                 turn = asyncio.create_task(
-                    self._run_agent(chat_id, merged, user_id, msg_id=msg_id, is_group=is_group)
+                    self._run_agent(chat_id, merged, user_id, msg_id=msg_id, is_group=is_group, fast=fast)
                 )
                 self._merge_turn[user_id] = turn
                 try:
@@ -2405,102 +2469,6 @@ class QQApp:
             chat_id, Command(resume=_with_message_timestamp(answer)), config, msg_id=msg_id, is_group=is_group, user_id=user_id
         )
 
-    # ------------------------------------------------------- trivial (light) replies
-
-    @staticmethod
-    def _meal_period(hour: int) -> str:
-        """Coarse time-of-day label used to ground a one-liner reply."""
-        if 5 <= hour < 9:
-            return "早餐时间"
-        if 9 <= hour < 11:
-            return "上午"
-        if 11 <= hour < 14:
-            return "午饭时间"
-        if 14 <= hour < 17:
-            return "下午"
-        if 17 <= hour < 21:
-            return "晚饭时间"
-        if 21 <= hour < 23:
-            return "晚上"
-        return "深夜"
-
-    async def _recent_user_voice(self, user_id: str) -> str:
-        """Best-effort: the user's last 1–3 human messages from the persisted thread.
-
-        Used to ground the light reply in the user's actual register. Never raises —
-        any failure degrades to an empty string.
-        """
-        try:
-            thread_id = _user_threads.get(user_id)
-            if not thread_id:
-                return ""
-            config = {"configurable": {"thread_id": thread_id}}
-            state = await self.graph.aget_state(config)
-            messages = (state.values or {}).get("messages") or []
-            voices: list[str] = []
-            for msg in reversed(messages):
-                if isinstance(msg, HumanMessage) and isinstance(msg.content, str):
-                    c = msg.content.strip()
-                    if c:
-                        voices.append(c[:60])
-                    if len(voices) >= 3:
-                        break
-            return " / ".join(reversed(voices))
-        except Exception:  # noqa: BLE001 — never let the gate fail on memory reads
-            return ""
-
-    async def _trivial_reply(
-        self, chat_id: str, text: str, user_id: str, *, msg_id: str | None, is_group: bool
-    ) -> None:
-        """Phase 1 light branch: one ultra-short in-character reply, no agent graph.
-
-        Uses a standalone (unbound) LLM call with high temperature + tiny max_tokens,
-        grounded in the current time / meal period / today's memory / the user's recent
-        register and the user's active character card. No tools, no thread write, no
-        multi-turn. Any failure degrades to a plain acknowledge.
-        """
-        try:
-            llm = get_llm([], bind_tools=False).bind(temperature=1.0, max_tokens=60)
-            cfg = Config.default()
-            now = datetime.now(_TZ_SH)
-            persona = ""
-            card_id = _user_card.get(user_id)
-            if card_id:
-                persona = card_prompt(cfg, card_id) or ""
-            daily = load_recent_daily_summaries(cfg)
-            voice = await self._recent_user_voice(user_id)
-            ctx = (
-                f"当前真实时间 {now.strftime('%Y-%m-%d %H:%M:%S')} {_WEEK_CN[now.weekday()]}"
-                f"（Asia/Shanghai, UTC+8），{self._meal_period(now.hour)}。"
-                "[历史时间禁令] 对方消息或记忆里的任何时间/日期都是旧记录，禁止当作当下；"
-                "凡涉及现在几点/几号/星期几/还剩多久/班次判断等时间问题，一律直接按上面这行真实时间作答，"
-                "报时间必须以上面这行真实时间为准。"
-                + (f"\n今日记忆（以下为历史记录，仅供了解过往，绝不代表当前）：\n{_stamp_memory_history(daily[:400])}" if daily else "")
-                + (f"\n对方最近的口吻：{voice}" if voice else "")
-            )
-            if persona:
-                ctx = f"你是“{card_id}”，以人物的性格与说话风格随口回应。\n{persona}\n\n" + ctx
-            prompt = (
-                "你是一位性格鲜明的聊天搭子。对方刚丢来一句随口话，请你以最像熟人的方式，"
-                "用 1~2 句口语化即兴回应。\n"
-                "铁律：极短（尽量一句话）、口语、贴合情境；绝不用固定模板/套话；"
-                "不复述对方原话；不用 emoji 堆砌。\n\n"
-                f"[情境]\n{ctx}\n\n[对方刚说]\n{text}"
-            )
-            resp = await llm.ainvoke([HumanMessage(content=prompt)])
-            reply = str(getattr(resp, "content", "") or "").strip()
-            if not reply:
-                reply = "嗯，我在。"
-            await self.send_text(chat_id, reply[:200], msg_id=msg_id, is_group=is_group)
-        except Exception:  # noqa: BLE001 — degrade, never crash the message loop
-            logger.error("QQ trivial reply failed", stack_trace=traceback.format_exc())
-            try:
-                await self.send_text(chat_id, "嗯，我在。", msg_id=msg_id, is_group=is_group)
-            except Exception:  # noqa: BLE001
-                pass
-
-
-
     async def _stream_agent(
 
         self,
@@ -2519,6 +2487,8 @@ class QQApp:
 
         user_id: str | None,
 
+        graph: CompiledStateGraph | None = None,
+
     ) -> None:
 
         """Stream graph updates: render tool calls, tool results, final answer; handle interrupts.
@@ -2535,7 +2505,15 @@ class QQApp:
 
         message sent exactly once.
 
+        ``graph`` defaults to the main graph; fast-reply turns pass the cached tool-less
+
+        graph. Tool traces are log-only unless ``QQ_TOOL_TRACE=1``.
+
         """
+
+        graph = graph or self.graph
+
+        fast_reply = bool(isinstance(input_data, dict) and input_data.get("fast_reply"))
 
         reply_parts: list[str] = []
 
@@ -2549,7 +2527,7 @@ class QQApp:
         # leaves the set empty (history replay guard degraded, same as before).
         if user_id is not None:
             try:
-                prior = await self.graph.aget_state(config)
+                prior = await graph.aget_state(config)
                 for msg in (prior.values or {}).get("messages") or []:
                     mid = getattr(msg, "id", None)
                     if mid:
@@ -2575,9 +2553,13 @@ class QQApp:
 
             try:
 
-                await self.send_text(chat_id, "思考中...", msg_id=msg_id, is_group=is_group)
+                # A fast turn answers in a few seconds; the placeholder bubble is pure
+                # noise there (and it is not the character talking).
+                if not fast_reply:
 
-                async for chunk in self.graph.astream(input_data, config, stream_mode="updates"):
+                    await self.send_text(chat_id, "思考中...", msg_id=msg_id, is_group=is_group)
+
+                async for chunk in graph.astream(input_data, config, stream_mode="updates"):
 
                     # ask_user interrupt: store config, send question, wait for next message.
 
@@ -2659,17 +2641,22 @@ class QQApp:
 
                                         if name == "ask_user":
 
-                                            await self.send_text(chat_id, "[agent] -> ask_user", is_group=is_group)
+                                            await self._trace_tool_event(
+                                                chat_id, "[agent] -> ask_user", is_group=is_group
+                                            )
 
                                         else:
 
                                             args = call.get("args") or {}
 
-                                            await self.send_text(
+                                            await self._trace_tool_event(
 
-                                                chat_id, f"[agent] -> {name}({', '.join(f'{k}={v}' for k, v in args.items())})",
+                                                chat_id,
+                                                f"[agent] -> {name}({', '.join(f'{k}={v}' for k, v in args.items())})",
 
                                                 is_group=is_group,
+
+                                                tool=name,
 
                                             )
 
@@ -2685,7 +2672,9 @@ class QQApp:
 
                                     content = content[:197] + "..."
 
-                                await self.send_text(chat_id, f"[tools] <- {content}", is_group=is_group)
+                                await self._trace_tool_event(
+                                    chat_id, f"[tools] <- {content}", is_group=is_group
+                                )
 
                             if mid is not None:
 

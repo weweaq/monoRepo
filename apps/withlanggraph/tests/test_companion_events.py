@@ -169,12 +169,11 @@ class TestIngress:
         app = _app()
         # Neutralize the downstream branches so the test only observes the ingress write.
         monkeypatch.setattr(qq, "is_mute_request", lambda text: text.startswith("别问了"))
-        monkeypatch.setattr(qq, "trivial_detect", lambda text: text == "在吗")
+        monkeypatch.setattr(qq, "fast_reply_detect", lambda text: text == "在吗")
         monkeypatch.setattr(qq, "feedback_route", lambda text: None)
         monkeypatch.setattr(qq, "try_weekly_interaction", lambda cfg, text: None)
         monkeypatch.setattr(qq, "try_answer", lambda cfg, text, allow_bare=True: None)
         monkeypatch.setattr(app, "_mute_and_reply", AsyncMock())
-        monkeypatch.setattr(app, "_trivial_reply", AsyncMock())
         monkeypatch.setattr(app, "_enqueue_agent_turn", MagicMock())
 
         with patch.object(qq, "_ALLOWED", frozenset({OWNER})):
