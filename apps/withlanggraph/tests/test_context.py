@@ -387,7 +387,7 @@ def test_self_memory_injected_after_role_card_before_daily(
 ) -> None:
     """The Self memory block must sit after the role card and before daily background."""
     monkeypatch.setattr(ctx, "card_prompt", lambda cfg_, card_id: "ROLE-SENTINEL")
-    monkeypatch.setattr(ctx, "_self_memory_block", lambda cfg_, cc: "SELF-MEMORY-SENTINEL")
+    monkeypatch.setattr(ctx, "_companion_blocks", lambda cfg_, cc: ("SELF-MEMORY-SENTINEL", ""))
     monkeypatch.setattr(
         ctx, "load_recent_daily_summaries", lambda cfg_, as_of=None: "DAILY-SENTINEL"
     )
@@ -407,7 +407,7 @@ def test_self_memory_skipped_without_companion_context(
     """Group chats and non-owners carry no companion_context, so the block is never built."""
     calls: list[dict] = []
     monkeypatch.setattr(
-        ctx, "_self_memory_block", lambda cfg_, cc: calls.append(cc) or "SELF-MEMORY-SENTINEL"
+        ctx, "_companion_blocks", lambda cfg_, cc: (calls.append(cc) or "SELF-MEMORY-SENTINEL", "")
     )
 
     prompt = build_system_prompt(_state([HumanMessage(content="hi")]), cfg_with_assets)
@@ -420,7 +420,7 @@ def test_self_memory_empty_block_is_not_injected(
     monkeypatch: pytest.MonkeyPatch, cfg_with_assets: Config
 ) -> None:
     """An empty block (no reflections) must leave no header behind."""
-    monkeypatch.setattr(ctx, "_self_memory_block", lambda cfg_, cc: "")
+    monkeypatch.setattr(ctx, "_companion_blocks", lambda cfg_, cc: ("", ""))
 
     prompt = build_system_prompt(_companion_state(), cfg_with_assets)
 

@@ -26,7 +26,7 @@ from typing import Final
 
 from gacore.config import Config
 
-SCHEMA_VERSION: Final = 3
+SCHEMA_VERSION: Final = 4
 DEFAULT_BUSY_TIMEOUT_MS: Final = 5000
 
 # Versioned registry: V1/V2 allow the three message events only. Journal data is a
@@ -35,13 +35,24 @@ DEFAULT_BUSY_TIMEOUT_MS: Final = 5000
 _EVENT_KINDS_V1: Final = frozenset(
     {"user.message.received", "agent.message.sent", "proactive.message.sent"}
 )
-EVENT_KINDS: Final[dict[int, frozenset[str]]] = {1: _EVENT_KINDS_V1, 2: _EVENT_KINDS_V1, 3: _EVENT_KINDS_V1}
+EVENT_KINDS: Final[dict[int, frozenset[str]]] = {
+    1: _EVENT_KINDS_V1,
+    2: _EVENT_KINDS_V1,
+    3: _EVENT_KINDS_V1,
+    4: _EVENT_KINDS_V1,
+}
 SUPPORTED_EVENT_KINDS: Final = EVENT_KINDS[SCHEMA_VERSION]
 
 # Relationship vocabulary (V2-Step 2). The projector is the only writer, and stage is
 # derived by rules — a model may never set it directly.
 RELATIONSHIP_STAGES: Final = frozenset({"new", "familiar", "established"})
 RELATIONSHIP_STATUSES: Final = frozenset({"stable", "strained", "repairing"})
+
+# Mood vocabulary (V2-Step 3). ``neutral`` is the absence of a live mood, so the
+# prompt block is simply omitted; the other labels always carry a source event.
+MOOD_LABELS: Final = frozenset(
+    {"neutral", "curious", "happy", "tired", "concerned", "frustrated"}
+)
 
 JOURNAL_VISIBILITIES: Final = frozenset({"to_owner", "private"})
 JOURNAL_STATUSES: Final = frozenset({"draft", "final", "stale"})
@@ -192,6 +203,21 @@ class OpenThread:
     topic: str
     source_event_id: str
     status: str
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class Mood:
+    """One short-lived emotional state, always traceable to a real event."""
+
+    actor_id: str
+    principal_id: str
+    label: str
+    valence: float
+    arousal: float
+    source_event_id: str
+    expires_at_ms: int
     created_at: str
     updated_at: str
 
@@ -395,7 +421,36 @@ MIGRATION_V3: Final[tuple[str, ...]] = (
     """,
 )
 
-MIGRATIONS: Final[dict[int, tuple[str, ...]]] = {1: MIGRATION_V1, 2: MIGRATION_V2, 3: MIGRATION_V3}
+MIGRATION_V4: Final[tuple[str, ...]] = (
+    f"""
+    CREATE TABLE IF NOT EXISTS companion_mood (
+        actor_id         TEXT NOT NULL,
+        principal_id     TEXT NOT NULL,
+        label            TEXT NOT NULL CHECK (label IN (
+                           'neutral', 'curious', 'happy',
+                           'tired', 'concerned', 'frustrated'
+                         )),
+        valence          REAL NOT NULL CHECK (valence >= -1 AND valence <= 1),
+        arousal          REAL NOT NULL CHECK (arousal >= 0 AND arousal <= 1),
+        source_event_id  TEXT NOT NULL REFERENCES companion_event(event_id),
+        expires_at_ms    INTEGER NOT NULL,
+        created_at       TEXT NOT NULL DEFAULT ({_TIMESTAMP_DEFAULT}),
+        updated_at       TEXT NOT NULL DEFAULT ({_TIMESTAMP_DEFAULT}),
+        PRIMARY KEY (actor_id, principal_id)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_companion_mood_expiry
+    ON companion_mood(expires_at_ms)
+    """,
+)
+
+MIGRATIONS: Final[dict[int, tuple[str, ...]]] = {
+    1: MIGRATION_V1,
+    2: MIGRATION_V2,
+    3: MIGRATION_V3,
+    4: MIGRATION_V4,
+}
 
 
 def companion_db_path(cfg: Config) -> Path:
@@ -1286,6 +1341,86 @@ class CompanionStore:
             )
 
 
+    # --------------------------------------------------------------------- mood
+
+    def mood(self, actor_id: str, principal_id: str) -> Mood | None:
+        """The stored mood row, expired or not; callers decide whether it is still live."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM companion_mood WHERE actor_id = ? AND principal_id = ?",
+                (actor_id, principal_id),
+            ).fetchone()
+        return _row_to_mood(row) if row is not None else None
+
+    def save_mood(
+        self,
+        *,
+        actor_id: str,
+        principal_id: str,
+        label: str,
+        valence: float,
+        arousal: float,
+        source_event_id: str,
+        expires_at_ms: int,
+    ) -> Mood:
+        """Insert or replace one actor's mood (the projector is the only writer)."""
+        _require_non_empty("actor_id", actor_id)
+        _require_non_empty("principal_id", principal_id)
+        _require_non_empty("source_event_id", source_event_id)
+        if label not in MOOD_LABELS:
+            raise ValueError(f"unknown mood label: {label!r}")
+        with self._transaction() as conn:
+            owned = conn.execute(
+                """
+                SELECT 1 FROM companion_event
+                WHERE event_id = ? AND actor_id = ? AND principal_id = ?
+                """,
+                (source_event_id, actor_id, principal_id),
+            ).fetchone()
+            if owned is None:
+                raise SourceOwnershipError(
+                    f"mood source {source_event_id!r} is not an event of "
+                    f"({actor_id!r}, {principal_id!r})"
+                )
+            conn.execute(
+                f"""
+                INSERT INTO companion_mood (
+                    actor_id, principal_id, label, valence, arousal,
+                    source_event_id, expires_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(actor_id, principal_id) DO UPDATE SET
+                    label = excluded.label,
+                    valence = excluded.valence,
+                    arousal = excluded.arousal,
+                    source_event_id = excluded.source_event_id,
+                    expires_at_ms = excluded.expires_at_ms,
+                    updated_at = {_TIMESTAMP_DEFAULT}
+                """,
+                (
+                    actor_id,
+                    principal_id,
+                    label,
+                    float(valence),
+                    float(arousal),
+                    source_event_id,
+                    int(expires_at_ms),
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM companion_mood WHERE actor_id = ? AND principal_id = ?",
+                (actor_id, principal_id),
+            ).fetchone()
+        assert row is not None  # pragma: no cover - the upsert above always leaves a row
+        return _row_to_mood(row)
+
+    def clear_mood(self, actor_id: str, principal_id: str) -> None:
+        """Drop the row entirely (used when a mood expires and nothing replaces it)."""
+        with self._transaction() as conn:
+            conn.execute(
+                "DELETE FROM companion_mood WHERE actor_id = ? AND principal_id = ?",
+                (actor_id, principal_id),
+            )
+
 def _assert_sources_owned(
     conn: sqlite3.Connection,
     actor_id: str,
@@ -1459,6 +1594,20 @@ def _row_to_open_thread(row: sqlite3.Row) -> OpenThread:
         topic=row["topic"],
         source_event_id=row["source_event_id"],
         status=row["status"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _row_to_mood(row: sqlite3.Row) -> Mood:
+    return Mood(
+        actor_id=row["actor_id"],
+        principal_id=row["principal_id"],
+        label=row["label"],
+        valence=float(row["valence"]),
+        arousal=float(row["arousal"]),
+        source_event_id=row["source_event_id"],
+        expires_at_ms=int(row["expires_at_ms"]),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )

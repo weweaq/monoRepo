@@ -227,19 +227,32 @@ def stamp_daily_history(daily: str) -> str:
     )
 
 
-def _self_memory_block(cfg: Config, companion_context: dict) -> str:
-    """Build the Self memory block for one companion actor; any failure returns ``""``."""
+def _companion_blocks(cfg: Config, companion_context: dict) -> tuple[str, str]:
+    """Return ``(self_memory_block, mood_line)`` from one store per turn; fail-open.
+
+    Both blocks share the same companion actor and the same store, so a turn no longer
+    opens the database twice just to read its own memory and mood.
+    """
     try:
         from gacore.companion.context import build_self_memory_block
+        from gacore.companion.mood import active_mood, build_mood_line
         from gacore.companion.store import CompanionStore
 
-        return build_self_memory_block(
-            CompanionStore.from_config(cfg),
-            actor_id=str(companion_context.get("actor_id") or ""),
-            principal_id=str(companion_context.get("principal_id") or ""),
+        store = CompanionStore.from_config(cfg)
+        actor_id = str(companion_context.get("actor_id") or "")
+        principal_id = str(companion_context.get("principal_id") or "")
+        memory = build_self_memory_block(
+            store, actor_id=actor_id, principal_id=principal_id
         )
-    except Exception:  # noqa: BLE001 - self memory is optional background
-        return ""
+        mood_line = build_mood_line(active_mood(store, actor_id, principal_id))
+        return memory, mood_line
+    except Exception:  # noqa: BLE001 - companion background is optional
+        return "", ""
+
+
+def _self_memory_block(cfg: Config, companion_context: dict) -> str:
+    """Build the Self memory block for one companion actor; any failure returns ``""``."""
+    return _companion_blocks(cfg, companion_context)[0]
 
 
 def build_system_prompt(state: GAState, cfg: Config) -> str:
@@ -268,7 +281,7 @@ def build_system_prompt(state: GAState, cfg: Config) -> str:
     # lookups omit the block entirely.
     companion_context = state.get("companion_context")
     if companion_context:
-        self_memory = _self_memory_block(cfg, companion_context)
+        self_memory, mood_line = _companion_blocks(cfg, companion_context)
         if self_memory:
             prompt += f"\n\n{self_memory}"
             injected_bg = True
@@ -278,6 +291,18 @@ def build_system_prompt(state: GAState, cfg: Config) -> str:
                 _context_logger.info(
                     "self memory block injected",
                     version=SELF_MEMORY_BLOCK_VERSION,
+                    actor_id=str(companion_context.get("actor_id") or ""),
+                )
+        # Mood (V2-Step 3): one bounded line, only when the state is still live. An
+        # expired mood is neutral, so nothing is injected at all.
+        if mood_line:
+            prompt += f"\n\n{mood_line}"
+            with contextlib.suppress(Exception):
+                from gacore.companion.mood import MOOD_BLOCK_VERSION
+
+                _context_logger.info(
+                    "mood line injected",
+                    version=MOOD_BLOCK_VERSION,
                     actor_id=str(companion_context.get("actor_id") or ""),
                 )
     daily = load_recent_daily_summaries(cfg, as_of=as_of_day())

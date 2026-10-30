@@ -22,6 +22,7 @@ from gacore.companion.relationship import (
     refresh_relationship,
 )
 from gacore.companion.store import (
+    SCHEMA_VERSION,
     MIGRATION_V1,
     MIGRATION_V2,
     CompanionStore,
@@ -99,7 +100,7 @@ class TestMigration:
         assert [event.event_id for event in store.events_for_actor("linwan", "owner")] == ["evt_old"]
         conn = sqlite3.connect(str(path))
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
             assert {"companion_relationship", "companion_open_thread"} <= tables
         finally:

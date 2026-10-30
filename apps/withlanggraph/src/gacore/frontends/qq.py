@@ -111,6 +111,7 @@ from gacore.companion.identity import (
     legacy_memory_allowed,
 )
 from gacore.companion.reply_batch import ReplyBatch, plan_final_reply
+from gacore.companion.mood import refresh_mood
 from gacore.companion.relationship import refresh_relationship
 from gacore.companion.store import CompanionStore, companion_db_path
 from gacore.companion.summary import minimize_user_message
@@ -995,7 +996,7 @@ async def _heartbeat_loop(heartbeat: Heartbeat, detail: dict[str, object]) -> No
 
 
 
-async def _refresh_relationship_quietly(store: CompanionStore, actor_id: str) -> None:
+async def _refresh_companion_state_quietly(store: CompanionStore, actor_id: str) -> None:
     """Recompute the relationship projection off-loop; failures never touch the chat.
 
     Called right after a confirmed event lands (owner ingress and character send), so a
@@ -1004,13 +1005,22 @@ async def _refresh_relationship_quietly(store: CompanionStore, actor_id: str) ->
     upsert, hence safe to run per event.
     """
     try:
-        await asyncio.to_thread(refresh_relationship, store, actor_id, "owner")
+        await asyncio.to_thread(_refresh_state_sync, store, actor_id)
     except Exception:  # noqa: BLE001 — projection must never break a turn
         logger.warning(
-            "companion relationship refresh failed",
+            "companion state refresh failed",
             actor_id=actor_id,
             stack_trace=traceback.format_exc(),
         )
+
+
+def _refresh_state_sync(store: CompanionStore, actor_id: str) -> None:
+    """Worker-thread side: relationship first, then mood (both derived from the same rows)."""
+    try:
+        refresh_relationship(store, actor_id, "owner")
+    finally:
+        # Mood is independent of the relationship; a relationship failure must not stop it.
+        refresh_mood(store, actor_id, "owner")
 
 
 class QQApp:
@@ -1291,7 +1301,7 @@ class QQApp:
             # of the same message must not spend a second model call.
             if result.inserted:
 
-                await _refresh_relationship_quietly(store, actor_id)
+                await _refresh_companion_state_quietly(store, actor_id)
 
                 schedule_reflection_check(actor_id, "owner")
 
@@ -1390,7 +1400,7 @@ class QQApp:
 
             if result.inserted:
 
-                await _refresh_relationship_quietly(store, actor_id)
+                await _refresh_companion_state_quietly(store, actor_id)
 
                 schedule_reflection_check(actor_id, "owner")
 
