@@ -231,7 +231,7 @@ def _log_outreach_shadow(cfg: Config, job: Job) -> None:
         from gacore.companion.outreach import log_shadow_decision
         from gacore.companion.store import CompanionStore
 
-        companion = load_companion_config(cfg)
+        companion = load_companion_config()
         if not companion.active:
             return
         actor_id = ActiveCardRepository().get(companion.owner_openid) or DEFAULT_ACTOR_ID
@@ -247,6 +247,7 @@ def _log_outreach_shadow(cfg: Config, job: Job) -> None:
         logger.warning(
             "outreach shadow setup failed", job=job.name, stack_trace=traceback.format_exc()
         )
+
 
 def _log_proactive_failure(fut: object) -> None:
     """Log a top-level exception from a proactive worker (L1: never swallow)."""

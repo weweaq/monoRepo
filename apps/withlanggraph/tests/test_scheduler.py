@@ -1214,3 +1214,24 @@ class TestOutreachShadow:
         scheduler._log_outreach_shadow(
             type("Cfg", (), {})(), type("Job", (), {"name": "daily-questions"})()
         )
+
+    def test_companion_switch_is_read_from_env_not_config(self, monkeypatch) -> None:
+        """Regression: load_companion_config() takes an env mapping, never a Config."""
+        from gacore import scheduler
+
+        monkeypatch.delenv("COMPANION_SHADOW_OUTREACH", raising=False)
+        calls: list[object] = []
+
+        def loader(*args, **kwargs):
+            calls.append((args, kwargs))
+            if args or kwargs:
+                raise AssertionError("load_companion_config() must read os.environ")
+            return type("Companion", (), {"active": False, "owner_openid": None})()
+
+        monkeypatch.setattr("gacore.companion.config.load_companion_config", loader)
+
+        scheduler._log_outreach_shadow(
+            type("Cfg", (), {})(), type("Job", (), {"name": "daily-questions"})()
+        )
+
+        assert calls == [((), {})]
