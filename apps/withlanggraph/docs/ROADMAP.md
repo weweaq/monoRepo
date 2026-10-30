@@ -5859,3 +5859,47 @@ V1 稳定性缺口里，1/2/3/4/5/6/7 也在同一批未提交改动里。
 
 - [x] schedule.json 缺 prompt 修复 + 自带配置可解析性守卫
 - [ ] 今晚 00:10 观察首篇真实日记（预计 `code=written`，`journals=2`）
+## 2026-10-30 · 日记/反思 prompt 缺 schema 排查（副本 dry-run 抓到的致命契约错误）
+
+**背景**：等到 00:10 才算"日记写出来"太被动，于是把生产库复制一份，用副本对**今天（10-30）
+的真实事件**跑一次真实模型，验证两本日记与反思能否落地。结果两条链路全挂：
+
+| 链路 | 模型实际返回 | 校验器报错 |
+|---|---|---|
+| 反思 | `{"reflections":[{"content":…,"source_event_ids":[…]}]}`（无 `statement`/`confidence`） | `statement is not a string` |
+| 两本日记 | `{"date","letter_to_master","write_to_self",…}` | `unknown journal keys: ['date','letter_to_master',…]` |
+
+根因同一个：两个 system prompt 只写"只输出符合 schema 的 JSON"，**却没把 schema 写出来**，
+模型只能自创键名。后果是：日记永远 `code=invalid`、反思永远 0 条（今天 14:26 那次"空结果"
+其实是运气好——模型恰好返回了合法空数组）。
+
+**已完成**：两处 prompt 追加"输出格式（键名一字不差，不要自创字段）"块，严格照校验器接受
+的 shape（`to_owner`/`private`/`body`/`source_event_ids`/`source_reflection_ids`/`reflection`；
+`reflections[].statement/source_event_ids/confidence`）。新增 2 条守卫测试：prompt 必须包含
+校验器要求的全部键名。
+
+**实测验证**（副本，真实模型 + 当日 18 条真实事件）：
+
+- `generate_day_journals(..., day="2026-10-30")` → `ok=True code=written journals=2`
+  - `private` 472 字（观察/理解/不确定三段），8 个 event source
+  - `to_owner` 297 字（给主人的信），10 个 event source
+  - 另产出 1 条 private reflection proposal（`refl_131c6665…`）
+- `run_reflection(batch=#4–#6)` → `ok=True drafts=1`
+  - statement：「我倾向于先听全对方的话再表态，并且要求记录或反思必须对得上原始证据，
+    不写没有依据的内容。」conf=0.75，2 个 source event
+  - 这是**第一次产出带来源的真实反思**（此前 0 条）
+- 全仓 `uv run pytest` → **2086 passed, 4 skipped**；ruff 全绿。
+
+**偏差说明**：
+
+- prompt 内容改了但 `REFLECTION_PROMPT_VERSION` / `JOURNAL_PROMPT_VERSION` 仍是 `@v1`：
+  与 v1/v2 计划里钉的常量保持一致；生产库里当前没有任何日记/反思行，不存在版本混用。
+  若之后要区分"修 schema 前/后"，再升 `@v2` 并做一次数据回填更合适。
+- 副本 dry-run 会真实调用模型（2 次），但没有触碰生产库：`companion.db` 仍是
+  `user_version=2`、18 条事件、0 日记、0 反思。
+
+**待办更新**：
+
+- [x] 日记/反思 prompt schema 修复 + 守卫测试
+- [ ] 今晚 00:10 观察首篇真实日记（现在预期 `code=written, journals=2`）
+- [ ] 明天跨日后观察首条真实反思（预期 `drafts≥1`，随后 Self memory 首次非空注入）
