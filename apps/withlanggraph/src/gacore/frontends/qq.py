@@ -2513,8 +2513,6 @@ class QQApp:
 
         graph = graph or self.graph
 
-        fast_reply = bool(isinstance(input_data, dict) and input_data.get("fast_reply"))
-
         reply_parts: list[str] = []
 
         rendered: set[str] = _rendered_msg_ids.setdefault(user_id, set()) if user_id is not None else set()
@@ -2553,12 +2551,9 @@ class QQApp:
 
             try:
 
-                # A fast turn answers in a few seconds; the placeholder bubble is pure
-                # noise there (and it is not the character talking).
-                if not fast_reply:
-
-                    await self.send_text(chat_id, "思考中...", msg_id=msg_id, is_group=is_group)
-
+                # No "思考中..." placeholder at all (2026-10-30): the user only wants
+                # the character's own words in the chat. A long turn therefore stays
+                # silent until its first real reply segment is ready.
                 async for chunk in graph.astream(input_data, config, stream_mode="updates"):
 
                     # ask_user interrupt: store config, send question, wait for next message.

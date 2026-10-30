@@ -720,3 +720,21 @@ async def test_fast_turn_runs_end_to_end_without_tools_or_placeholder(
     assert "思考中..." not in texts
     assert not any(t.startswith("[agent] ->") or t.startswith("[tools] <-") for t in texts)
     assert any("在。" in t for t in texts)
+
+@pytest.mark.asyncio
+async def test_normal_turn_sends_no_placeholder_bubble(tmp_cfg, message_llm, monkeypatch) -> None:
+    """No 思考中 bubble on a full turn either: the chat only carries the character's words."""
+    qq._rendered_msg_ids.clear()
+    llm = message_llm([AIMessage(content="好。")])
+    graph = build_graph(llm=llm, cfg=tmp_cfg)
+    app = QQApp(graph)
+    app.send_text = AsyncMock()
+
+    config = {"configurable": {"thread_id": "qq-no-placeholder"}}
+    await app._stream_agent(
+        "chat-p", new_state("帮我看看", tmp_cfg), config, msg_id=None, is_group=False, user_id="user-p"
+    )
+
+    texts = [call.args[1] for call in app.send_text.call_args_list if len(call.args) > 1]
+    assert "思考中..." not in texts
+    assert any("好。" in t for t in texts)
