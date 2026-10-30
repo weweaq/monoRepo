@@ -1361,6 +1361,37 @@ owner 轮注入 / 非 owner 不注入、信任包装与 system prompt 洁净、1
 空消息不发、ACT_SILENTLY 只做不说、ACT_AND_TELL 成功才说、动作失败不说、
 无 invoker 保持沉默、静默时段 0 次调用、dry-run 只报告不发送。
 
+### 9.2.18 Companion 自主生活素材（P2，2026-10-31）
+
+> 目标：让心跳不只是"看一眼时间"，而是**真的过日子**——看自己的 B 站/浏览/日记，
+> 留下自我经历，并在值得时告诉主人。不新增表、不新增事件类型。
+
+**工具轮换（`loop._ROTATION`）**：当候选没有指定工具时，按 `now // 6h` 轮换：
+
+| 工具 | 参数 | 为什么 |
+|---|---|---|
+| `bili_history` | `{limit: 5}` | 看到主人最近在追什么，才有"你今天看的那个"这种话 |
+| `read_daily` | `{date: "yesterday"}` | 回看昨天的记录，接得上生活 |
+| `browser_history` | `{limit: 20, days: 1}` | 白天的兴趣脉络 |
+
+候选指定工具时（`open_thread` → `search_daily`、`commitment_due`/`owner_concern` →
+`read_daily(date=today)`）优先用它；`recent_activity`/`goal_permission` 不钉工具，交给轮换。
+`invoker` 统一改成 `invoker(tool, args)`，调度器侧只传白名单工具。
+
+**自我经历从哪来**：`ACT_*` 执行完由 `finish_goal()` 写 `read_action.succeeded`，
+`detail` 就是结果片段（≤200 字）。**不新增事件类型**——这条事件本身就是"我今天看到了什么"。
+
+**新的主动由头（`recent_activity`）**：`collect_candidates()` 会取**最近一条
+`read_action.succeeded`**，前提是它晚于最后一次 `proactive.message.sent` 且在 12 小时内。
+于是"自己发现的事"成了最高优先级候选（4 > 话题 3 > 承诺 2 > 情绪 1 > 目标 0），
+而**一旦说出去就不再重复**（`proactive.message.sent` 之后它自动失效）。
+
+**表达兜底**：`ACT_AND_TELL` 若模型没给话术，用刚看到的结果片段兜底
+（`我刚看了一眼：<片段>`），不会出现"我查了一下"这种空话。
+
+**测试**：`test_companion_loop.py::TestOwnLifeMaterial`（4 例）：新观察成为最高优先级候选、
+说过的观察不再候选、`ACT_SILENTLY` 走轮换工具且参数正确、`ACT_AND_TELL` 用结果片段兜底。
+
 ### 9.3 测试
 
 `tests/test_character.py`(7)、`tests/test_character_system_prompt.py`(4)、`tests/test_qq.py` `/角色` 相关 3 条、

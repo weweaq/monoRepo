@@ -185,11 +185,11 @@ class TestActing:
             now_ms=_ms(_DAY, 15),
             runner=lambda _c: {"action": "ACT_SILENTLY"},
             sender=sent.append,
-            invoker=lambda tool: calls.append(tool) or f"{tool} ok",
+            invoker=lambda tool, args: calls.append(tool) or f"{tool} ok",
         )
 
         assert result.action == "ACT_SILENTLY"
-        assert calls and calls[0] in {"read_daily", "search_daily", "get_time"}
+        assert calls and calls[0] in {"read_daily", "search_daily", "bili_history", "get_time"}
         assert sent == [], "ACT_SILENTLY must not talk"
         kinds = _kinds(store)
         assert "read_action.succeeded" in kinds
@@ -208,7 +208,7 @@ class TestActing:
             now_ms=_ms(_DAY, 15),
             runner=lambda _c: {"action": "ACT_AND_TELL", "message": "我回看了一下，上次说的是换工作"},
             sender=sent.append,
-            invoker=lambda tool: "ok",
+            invoker=lambda tool, args: "ok",
         )
 
         assert result.action == "ACT_AND_TELL"
@@ -221,7 +221,7 @@ class TestActing:
         _open_thread(store)
         sent: list[str] = []
 
-        def boom(_tool: str) -> str:
+        def boom(_tool: str, _args: dict) -> str:
             raise RuntimeError("tool down")
 
         run_life_tick(
@@ -350,3 +350,92 @@ class TestNeverAtNight:
 
         assert result.action == "STAY_SILENT" and result.reason == "QUIET_HOURS"
         assert sent == []
+
+class TestOwnLifeMaterial:
+    """P2: 自己的只读活动既是经历，也是"有事找你"的由头。"""
+
+    def _observation(self, store: CompanionStore, at_ms: int, summary: str = "B站：看了《凡人修仙传》第 120 集"):
+        return store.append_event(
+            kind="read_action.succeeded",
+            actor_id="linwan",
+            principal_id="owner",
+            source_id=f"obs-{at_ms}",
+            summary=summary,
+            idempotency_key=f"obs-{at_ms}",
+            occurred_at_ms=at_ms,
+        ).event_id
+
+    def test_fresh_observation_becomes_the_top_candidate(self, tmp_path: Path) -> None:
+        from gacore.companion.outreach import collect_candidates
+
+        store = _store(tmp_path)
+        _open_thread(store)
+        self._observation(store, _ms(_DAY, 14))
+
+        candidates = collect_candidates(store, "linwan", "owner", now_ms=_ms(_DAY, 15))
+
+        assert candidates[0].kind == "recent_activity"
+        assert "凡人修仙传" in candidates[0].text
+
+    def test_told_observation_stops_being_a_candidate(self, tmp_path: Path) -> None:
+        from gacore.companion.outreach import collect_candidates
+
+        store = _store(tmp_path)
+        observation = self._observation(store, _ms(_DAY, 14))
+        store.append_event(
+            kind="proactive.message.sent",
+            actor_id="linwan",
+            principal_id="owner",
+            source_id="told",
+            summary="我看了凡人修仙传",
+            idempotency_key="told",
+            occurred_at_ms=_ms(_DAY, 14, 30),
+        )
+
+        candidates = collect_candidates(store, "linwan", "owner", now_ms=_ms(_DAY, 15))
+
+        assert observation not in [sid for c in candidates for sid in c.source_ids]
+
+    def test_activity_uses_a_rotating_readonly_tool_with_args(self, tmp_path: Path) -> None:
+        store = _store(tmp_path)
+        self._observation(store, _ms(_DAY, 14))
+        observed: list[tuple[str, dict]] = []
+
+        def invoker(tool: str, args: dict) -> str:
+            observed.append((tool, args))
+            return "ok"
+
+        result = run_life_tick(
+            store,
+            "linwan",
+            "owner",
+            now_ms=_ms(_DAY, 15),
+            runner=lambda _c: {"action": "ACT_SILENTLY"},
+            invoker=invoker,
+        )
+
+        assert result.action == "ACT_SILENTLY"
+        tool, args = observed[0]
+        assert tool in {"bili_history", "read_daily", "browser_history", "get_time"}
+        if tool == "bili_history":
+            assert args == {"limit": 5}
+        elif tool == "read_daily":
+            assert args == {"date": "yesterday"} or args == {"date": "today"}
+
+    def test_act_and_tell_falls_back_to_the_observed_snippet(self, tmp_path: Path) -> None:
+        store = _store(tmp_path)
+        self._observation(store, _ms(_DAY, 14))
+        sent: list[str] = []
+
+        result = run_life_tick(
+            store,
+            "linwan",
+            "owner",
+            now_ms=_ms(_DAY, 15),
+            runner=lambda _c: {"action": "ACT_AND_TELL", "message": ""},
+            sender=sent.append,
+            invoker=lambda tool, args: "看到你在追凡人修仙传",
+        )
+
+        assert result.action == "ACT_AND_TELL"
+        assert sent and "凡人修仙传" in sent[0]

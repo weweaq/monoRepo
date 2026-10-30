@@ -355,11 +355,11 @@ def run_life_tick_job(job: Job, cfg: Config) -> object | None:
         def sender(text: str) -> None:
             tools["qq_push"].invoke({"message": text, "to": companion.owner_openid})
 
-        def invoker(tool_name: str) -> str:
+        def invoker(tool_name: str, args: dict[str, object] | None = None) -> str:
             tool = tools.get(tool_name)
             if tool is None:
                 raise RuntimeError(f"unknown tool: {tool_name}")
-            return str(tool.invoke({}))[:2000]
+            return str(tool.invoke(dict(args or {})))[:2000]
 
         result = run_life_tick(
             store,

@@ -6271,3 +6271,39 @@ tick、每天最多 3 条主动消息、五种动作全开）**补齐。
 
 - 逐小时探针：00:00/03:00/06:59/07:30 → `QUIET_HOURS`；08:00 起放行；23:00 起重新静默
 - 全仓 → **2251 passed, 4 skipped**；ruff 全绿
+
+### 2026-10-31 · Companion P2：自主生活素材（看自己的 B 站/浏览/日记）
+
+**背景**：心跳只会 `read_daily`/`get_time`，"活着"但没生活。P2 让 ACT_* 真的看自己的数据，
+并把"自己发现的事"变成主动找主人的由头。
+
+**已完成**：
+
+- `loop.py`：`_ROTATION`（bili_history / read_daily yesterday / browser_history，按 6h 轮换）；
+  候选指定工具时优先（open_thread→search_daily 等）；`invoker(tool, args)` 支持参数；
+  `ACT_AND_TELL` 无话术时用结果片段兜底（`我刚看了一眼：…`）。
+- `outreach.collect_candidates()`：新增 `recent_activity`（最高优先级 4）——最近一条
+  `read_action.succeeded` 且晚于最后一次主动发送、12h 内；说出去后自动失效，不重复。
+- `scheduler.run_life_tick_job()`：invoker 接收并透传参数。
+- 测试：`TestOwnLifeMaterial` 4 例。
+- R5 三处同步：本文件 + tech §9.2.18（架构图沿用 `LIFE` 节点，无新增模块）。
+
+**实测验证**：
+
+- `uv run pytest apps/withlanggraph/tests/test_companion_loop.py -q` → **19 passed**
+- 全仓 → **2255 passed, 4 skipped**；ruff 全绿
+- 真机下一次 tick（02:26）仍应静默；08:00 后的 tick 若轮换到 bili/浏览/日记，
+  会写一条 `read_action.succeeded`，并在随后 tick 里成为可说的由头
+
+**偏差说明**：
+
+- 没有新增"episode 表"：`read_action.succeeded` 事件即自我经历，避免额外 schema 与双写。
+- `browser_history` 只在白天轮换；夜间被静默时段挡住，不会联网。
+- `web_scan`（公开网络）仍未纳入 `ACT_*`：先观察本地数据的价值，再决定是否开放外网读取。
+- 没有做"看完了要记住"的持久摘要：结果只在 12h 内作为候选，超出即过期，靠日记/反思承载长期记忆。
+
+**待办更新**：
+
+- [x] P2：自主生活素材（轮换工具 + recent_activity + 结果兜底）
+- [ ] 观察 P2 效果：轮换是否真的产生"看得出生活"的话术
+- [ ] 视效果决定是否把 `web_scan` 纳入 ACT_*

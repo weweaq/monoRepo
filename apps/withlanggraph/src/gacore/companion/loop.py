@@ -58,12 +58,21 @@ _TZ: Final = timezone(timedelta(hours=8))
 _DAY_MS: Final = 24 * 60 * 60 * 1000
 
 # Deterministic tool choice per candidate kind: the character may only touch read-only data.
-_CANDIDATE_TOOLS: Final = {
-    "open_thread": "read_daily",
-    "commitment_due": "read_daily",
-    "owner_concern": "read_daily",
-    "goal_permission": "read_daily",
+_CANDIDATE_ACTIVITY: Final = {
+    "recent_activity": ("get_time", {}),
+    "open_thread": ("search_daily", {"query": "还没聊完"}),
+    "commitment_due": ("read_daily", {"date": "today"}),
+    "owner_concern": ("read_daily", {"date": "today"}),
+    "goal_permission": ("get_time", {}),
 }
+
+# When no candidate points at a specific tool, the character rotates through cheap read-only
+# views of its own life so consecutive ticks do not all look at the same thing.
+_ROTATION: Final = (
+    ("bili_history", {"limit": 5}),
+    ("read_daily", {"date": "yesterday"}),
+    ("browser_history", {"limit": 20, "days": 1}),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,7 +263,7 @@ def _act(
             return TickResult(
                 action="STAY_SILENT", reason="POLICY_BLOCKED", llm_calls=decision.llm_calls
             )
-    tool = _pick_tool(goal)
+    tool, args = _pick_tool(goal, decision, now)
     if tool is None or invoker is None:
         return TickResult(
             action="STAY_SILENT",
@@ -285,7 +294,9 @@ def _act(
         now_ms=now,
     )
     try:
-        finished = _execute(store, actor_id, principal_id, goal, tool, invoker, now)
+        finished, detail = _execute(
+            store, actor_id, principal_id, goal, tool, args, invoker, now
+        )
     finally:
         if store.get_activity(activity.activity_id).status in {"active", "paused"}:
             complete_activity(
@@ -311,7 +322,7 @@ def _act(
             events=("goal.started", "read_action.succeeded", "activity.completed"),
         )
 
-    text = _expression(decision) or f"我自己查了一下：{finished.text}"
+    text = _expression(decision) or _fallback_expression(decision, detail)
     if sender is None:
         return TickResult(
             action=decision.action,
@@ -347,9 +358,11 @@ def _execute(
     principal_id: str,
     goal: Goal,
     tool: str,
+    args: dict[str, object],
     invoker: object,
     now: int,
-) -> Goal:
+) -> tuple[Goal, str]:
+    """Run the goal's single read-only tool and close it with real events."""
     """Run the goal's single read-only tool and close it with real events."""
     if goal.status == "proposed":
         store.set_goal_status(goal.goal_id, status="approved")
@@ -358,9 +371,9 @@ def _execute(
     if store.get_goal(goal.goal_id).status == "approved":
         store.set_goal_status(goal.goal_id, status="in_progress")
     try:
-        detail = invoker(tool)  # type: ignore[operator]
+        detail = invoker(tool, args)  # type: ignore[operator]
     except Exception as exc:  # noqa: BLE001 — a failed read is a real, recorded failure
-        return finish_goal(
+        failed = finish_goal(
             store,
             actor_id,
             principal_id,
@@ -369,15 +382,60 @@ def _execute(
             detail=f"只读执行失败：{type(exc).__name__}",
             occurred_at_ms=now,
         )
-    return finish_goal(
+        return failed, ""
+    snippet = redact_text(str(detail) or "ok")[:200]
+    succeeded = finish_goal(
         store,
         actor_id,
         principal_id,
         goal.goal_id,
         succeeded=True,
-        detail=redact_text(str(detail) or "ok"),
+        detail=snippet,
         occurred_at_ms=now,
     )
+    return succeeded, snippet
+
+
+def _pick_tool(
+    goal: Goal, decision: Decision, now: int
+) -> tuple[str | None, dict[str, object]]:
+    """Pick one read-only tool: the goal's own tool if set, else rotate through the day.
+
+    A goal with no pinned tool is how the character "lives": each tick looks at a different
+    part of its own data (B站 / 日记 / 浏览历史) so the material is not always the same.
+    """
+    for tool in goal.allowed_tools:
+        if tool in ALLOWED_TOOLS:
+            return tool, _args_for(tool, decision, now)
+    rotation = _ROTATION[int(now // (6 * 60 * 60 * 1000)) % len(_ROTATION)]
+    return rotation
+
+
+def _args_for(tool: str, decision: Decision, now: int) -> dict[str, object]:
+    candidate = decision.candidates[0] if decision.candidates else None
+    kind = candidate.kind if candidate else ""
+    mapped = _CANDIDATE_ACTIVITY.get(kind)
+    if mapped is not None and mapped[0] == tool:
+        return dict(mapped[1])
+    if tool == "read_daily":
+        return {"date": "today"}
+    if tool == "bili_history":
+        return {"limit": 5}
+    if tool == "browser_history":
+        return {"limit": 20, "days": 1}
+    if tool == "search_daily":
+        return {"query": (candidate.text if candidate else "最近")[:40]}
+    return {}
+
+
+def _fallback_expression(decision: Decision, detail: str) -> str:
+    candidate = decision.candidates[0] if decision.candidates else None
+    if candidate is not None and candidate.kind == "recent_activity":
+        return redact_text(candidate.text)[:MAX_EXPRESSION_CHARS]
+    snippet = redact_text(detail or "").strip()
+    if not snippet:
+        return ""
+    return f"我刚看了一眼：{snippet[:80]}"
 
 
 def _propose_small_goal(
@@ -389,13 +447,18 @@ def _propose_small_goal(
 ) -> Goal | None:
     """Turn a candidate into one tiny, whitelisted read-only goal (no model call)."""
     candidate = decision.candidates[0] if decision.candidates else None
-    tool = _CANDIDATE_TOOLS.get(candidate.kind if candidate else "", "get_time")
-    if tool not in ALLOWED_TOOLS:
-        return None
+    kind = candidate.kind if candidate else ""
+    # Specific candidates pin a tool; generic ones leave it open so the rotation decides.
+    mapped = _CANDIDATE_ACTIVITY.get(kind)
+    tools: tuple[str, ...] = ()
+    if mapped is not None and kind not in {"recent_activity", "goal_permission"}:
+        if mapped[0] not in ALLOWED_TOOLS:
+            return None
+        tools = (mapped[0],)
     text = _goal_text(candidate)
     proposal = GoalProposal(
         text=text[:120],
-        allowed_tools=(tool,),
+        allowed_tools=tools,
         deadline_ms=min(
             now + ACTIVITY_DEADLINE_MINUTES * 60 * 1000,
             now + MAX_DEADLINE_DAYS * _DAY_MS,
@@ -405,13 +468,6 @@ def _propose_small_goal(
     goal = create_goal(store, actor_id, principal_id, proposal)
     store.set_goal_status(goal.goal_id, status="approved")
     return store.get_goal(goal.goal_id)
-
-
-def _pick_tool(goal: Goal) -> str | None:
-    for tool in goal.allowed_tools:
-        if tool in ALLOWED_TOOLS:
-            return tool
-    return None
 
 
 def _goal_text(candidate: OutreachCandidate | None) -> str:

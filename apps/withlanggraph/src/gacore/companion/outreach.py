@@ -148,8 +148,34 @@ class Decision:
 def collect_candidates(
     store: CompanionStore, actor_id: str, principal_id: str, *, now_ms: int
 ) -> list[OutreachCandidate]:
-    """Deterministic candidate list: open threads, due promises, concern, pending goal."""
+    """Deterministic candidate list: own fresh activity, threads, promises, concern, goal."""
     candidates: list[OutreachCandidate] = []
+    events = store.events_for_actor(actor_id, principal_id)
+
+    # What the character itself just looked at (ACT_SILENTLY). A result newer than the last
+    # outbound message is a genuine "I did something, want to tell you" hook; once told it
+    # stops being a candidate, so the same finding is never repeated.
+    last_sent = max(
+        (event.occurred_at_ms for event in events if event.kind == "proactive.message.sent"),
+        default=0,
+    )
+    fresh = [
+        event
+        for event in events
+        if event.kind == "read_action.succeeded"
+        and event.occurred_at_ms >= last_sent
+        and now_ms - event.occurred_at_ms <= 12 * 60 * 60 * 1000
+    ]
+    if fresh:
+        latest = fresh[-1]
+        candidates.append(
+            OutreachCandidate(
+                kind="recent_activity",
+                text=f"我刚看到：{latest.summary}",
+                priority=4,
+                source_ids=(latest.event_id,),
+            )
+        )
 
     for thread in store.open_threads(actor_id, principal_id):
         candidates.append(
