@@ -111,6 +111,7 @@ from gacore.companion.identity import (
     legacy_memory_allowed,
 )
 from gacore.companion.reply_batch import ReplyBatch, plan_final_reply
+from gacore.companion.commitment import schedule_commitment_extraction
 from gacore.companion.mood import refresh_mood
 from gacore.companion.relationship import refresh_relationship
 from gacore.companion.store import CompanionStore, companion_db_path
@@ -1401,6 +1402,18 @@ class QQApp:
             if result.inserted:
 
                 await _refresh_companion_state_quietly(store, actor_id)
+
+                # A promise scan runs off-loop and only for sends that mention a future
+                # action; the reply path never waits for that model call.
+                schedule_commitment_extraction(
+                    store,
+                    actor_id,
+                    "owner",
+                    event_id=result.event_id,
+                    kind="agent.message.sent",
+                    summary=summary,
+                    occurred_at_ms=int(time.time() * 1000),
+                )
 
                 schedule_reflection_check(actor_id, "owner")
 

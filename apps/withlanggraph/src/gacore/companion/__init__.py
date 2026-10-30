@@ -57,6 +57,22 @@ from gacore.companion.reflection import (
     run_reflection,
     validate_reflections,
 )
+from gacore.companion.commitment import (
+    AUTO_ACTIVE_CONFIDENCE,
+    COMMITMENT_PROMPT_VERSION,
+    MIN_CONFIDENCE,
+    OVERDUE_GRACE_MS,
+    CommitmentOutcome,
+    cancel_commitment,
+    commitment_view,
+    complete_commitment,
+    extract_commitment,
+    looks_like_promise,
+    parse_due_ms,
+    record_commitment,
+    schedule_commitment_extraction,
+    sweep_overdue,
+)
 from gacore.companion.mood import (
     MAX_MOOD_LINE_CHARS,
     MOOD_BLOCK_VERSION,
@@ -83,6 +99,11 @@ from gacore.companion.reply_batch import (
 from gacore.companion.summary import minimize_user_message
 
 __all__ = [
+    "AUTO_ACTIVE_CONFIDENCE",
+    "COMMITMENT_PROMPT_VERSION",
+    "MIN_CONFIDENCE",
+    "OVERDUE_GRACE_MS",
+    "CommitmentOutcome",
     "ActiveCardCorruptError",
     "ActiveCardError",
     "ActiveCardRepository",
@@ -111,6 +132,15 @@ __all__ = [
     "active_cards_path",
     "active_mood",
     "build_mood_line",
+    "cancel_commitment",
+    "commitment_view",
+    "complete_commitment",
+    "extract_commitment",
+    "looks_like_promise",
+    "parse_due_ms",
+    "record_commitment",
+    "schedule_commitment_extraction",
+    "sweep_overdue",
     "detect_signal",
     "actor_id_for",
     "build_self_memory_block",

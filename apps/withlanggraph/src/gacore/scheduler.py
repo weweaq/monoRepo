@@ -253,6 +253,10 @@ def run_journal_job(job: Job, cfg: Config) -> object | None:
         actor_id = ActiveCardRepository().get(companion.owner_openid) or DEFAULT_ACTOR_ID
         store = CompanionStore.from_config(cfg)
         outcome = generate_due_journals(store, actor_id, "owner")
+        # Same daily slot sweeps promises: active→overdue→failed, no model involved.
+        from gacore.companion.commitment import sweep_overdue
+
+        swept = sweep_overdue(store)
         logger.info(
             "companion journal finished",
             job=job.name,
@@ -260,6 +264,8 @@ def run_journal_job(job: Job, cfg: Config) -> object | None:
             code=getattr(outcome, "code", None),
             ok=getattr(outcome, "ok", None),
             journals=len(getattr(outcome, "journals", ()) or ()),
+            commitments_overdue=swept.get("overdue", 0),
+            commitments_failed=swept.get("failed", 0),
             duration_seconds=round(time.monotonic() - start, 2),
         )
         return outcome

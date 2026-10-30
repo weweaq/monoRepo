@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Final
 
 from gacore.character import card_name, card_prompt
 from gacore.companion.config import load_companion_config
+from gacore.companion.commitment import schedule_commitment_extraction
 from gacore.companion.coordinator import schedule_reflection_check
 from gacore.companion.identity import (
     ActiveCardRepository,
@@ -1706,6 +1707,16 @@ def _record_companion_sent(
             idempotency_key=f"proactive-sent:{job_name}:{uid}:{source_id}",
         )
         if result.inserted:
+            # Promise scan for this proactive send: same background path as a normal reply.
+            schedule_commitment_extraction(
+                store,
+                actor_id,
+                "owner",
+                event_id=result.event_id,
+                kind="proactive.message.sent",
+                summary=redact_text(actual_message),
+                occurred_at_ms=int(time.time() * 1000),
+            )
             schedule_reflection_check(actor_id, "owner")
     except Exception:  # noqa: BLE001 — memory write must never break delivery bookkeeping
         logger.warning("companion proactive sent write failed", stack_trace=traceback.format_exc())

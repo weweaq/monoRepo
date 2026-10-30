@@ -26,7 +26,7 @@ from typing import Final
 
 from gacore.config import Config
 
-SCHEMA_VERSION: Final = 4
+SCHEMA_VERSION: Final = 5
 DEFAULT_BUSY_TIMEOUT_MS: Final = 5000
 
 # Versioned registry: V1/V2 allow the three message events only. Journal data is a
@@ -40,6 +40,7 @@ EVENT_KINDS: Final[dict[int, frozenset[str]]] = {
     2: _EVENT_KINDS_V1,
     3: _EVENT_KINDS_V1,
     4: _EVENT_KINDS_V1,
+    5: _EVENT_KINDS_V1,
 }
 SUPPORTED_EVENT_KINDS: Final = EVENT_KINDS[SCHEMA_VERSION]
 
@@ -47,6 +48,13 @@ SUPPORTED_EVENT_KINDS: Final = EVENT_KINDS[SCHEMA_VERSION]
 # derived by rules — a model may never set it directly.
 RELATIONSHIP_STAGES: Final = frozenset({"new", "familiar", "established"})
 RELATIONSHIP_STATUSES: Final = frozenset({"stable", "strained", "repairing"})
+
+# Commitment lifecycle (V2-Step 4). A promise only moves forward:
+# proposed → active → overdue → failed/succeeded, and anything open may be cancelled.
+COMMITMENT_STATUSES: Final = frozenset(
+    {"proposed", "active", "overdue", "succeeded", "failed", "cancelled"}
+)
+COMMITMENT_OPEN_STATUSES: Final = frozenset({"proposed", "active", "overdue"})
 
 # Mood vocabulary (V2-Step 3). ``neutral`` is the absence of a live mood, so the
 # prompt block is simply omitted; the other labels always carry a source event.
@@ -203,6 +211,24 @@ class OpenThread:
     topic: str
     source_event_id: str
     status: str
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class Commitment:
+    """One promise the character actually made in a confirmed send."""
+
+    commitment_id: str
+    actor_id: str
+    principal_id: str
+    source_event_id: str
+    quote: str
+    action: str
+    due_at_ms: int | None
+    success_criteria: str
+    status: str
+    result_event_id: str | None
     created_at: str
     updated_at: str
 
@@ -445,11 +471,42 @@ MIGRATION_V4: Final[tuple[str, ...]] = (
     """,
 )
 
+MIGRATION_V5: Final[tuple[str, ...]] = (
+    f"""
+    CREATE TABLE IF NOT EXISTS companion_commitment (
+        commitment_id    TEXT PRIMARY KEY,
+        actor_id         TEXT NOT NULL,
+        principal_id     TEXT NOT NULL,
+        source_event_id  TEXT NOT NULL REFERENCES companion_event(event_id),
+        quote            TEXT NOT NULL,
+        action           TEXT NOT NULL,
+        due_at_ms        INTEGER,
+        success_criteria TEXT NOT NULL,
+        status           TEXT NOT NULL CHECK (status IN (
+                           'proposed', 'active', 'overdue',
+                           'succeeded', 'failed', 'cancelled'
+                         )),
+        result_event_id  TEXT REFERENCES companion_event(event_id),
+        created_at       TEXT NOT NULL DEFAULT ({_TIMESTAMP_DEFAULT}),
+        updated_at       TEXT NOT NULL DEFAULT ({_TIMESTAMP_DEFAULT})
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_companion_commitment_key
+    ON companion_commitment(actor_id, principal_id, source_event_id, quote)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_companion_commitment_status
+    ON companion_commitment(actor_id, principal_id, status)
+    """,
+)
+
 MIGRATIONS: Final[dict[int, tuple[str, ...]]] = {
     1: MIGRATION_V1,
     2: MIGRATION_V2,
     3: MIGRATION_V3,
     4: MIGRATION_V4,
+    5: MIGRATION_V5,
 }
 
 
@@ -1421,6 +1478,165 @@ class CompanionStore:
                 (actor_id, principal_id),
             )
 
+    # ---------------------------------------------------------------- commitment
+
+    def commitments(
+        self,
+        actor_id: str,
+        principal_id: str,
+        *,
+        status: str | None = None,
+        open_only: bool = False,
+    ) -> list[Commitment]:
+        """Commitments of one actor, oldest first; filter by status or "still open"."""
+        clauses = ["actor_id = ?", "principal_id = ?"]
+        params: list[object] = [actor_id, principal_id]
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        elif open_only:
+            clauses.append(
+                "status IN (%s)" % ",".join("?" for _ in COMMITMENT_OPEN_STATUSES)
+            )
+            params.extend(sorted(COMMITMENT_OPEN_STATUSES))
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM companion_commitment WHERE {' AND '.join(clauses)} "
+                "ORDER BY created_at ASC, rowid ASC",
+                tuple(params),
+            ).fetchall()
+        return [_row_to_commitment(row) for row in rows]
+
+    def add_commitment(
+        self,
+        *,
+        actor_id: str,
+        principal_id: str,
+        source_event_id: str,
+        quote: str,
+        action: str,
+        due_at_ms: int | None,
+        success_criteria: str,
+        status: str,
+    ) -> tuple[Commitment, bool]:
+        """Insert one commitment; the (source, quote) pair is the deterministic key.
+
+        Returns ``(row, created)``. A repeated extraction of the same send therefore
+        cannot duplicate the promise — it returns the row that is already there.
+        """
+        for field, value in (
+            ("actor_id", actor_id),
+            ("principal_id", principal_id),
+            ("source_event_id", source_event_id),
+            ("quote", quote),
+            ("action", action),
+            ("success_criteria", success_criteria),
+        ):
+            _require_non_empty(field, value)
+        if status not in COMMITMENT_STATUSES:
+            raise ValueError(f"unknown commitment status: {status!r}")
+        with self._transaction() as conn:
+            owned = conn.execute(
+                """
+                SELECT 1 FROM companion_event
+                WHERE event_id = ? AND actor_id = ? AND principal_id = ?
+                """,
+                (source_event_id, actor_id, principal_id),
+            ).fetchone()
+            if owned is None:
+                raise SourceOwnershipError(
+                    f"commitment source {source_event_id!r} is not an event of "
+                    f"({actor_id!r}, {principal_id!r})"
+                )
+            cur = conn.execute(
+                """
+                INSERT INTO companion_commitment (
+                    commitment_id, actor_id, principal_id, source_event_id,
+                    quote, action, due_at_ms, success_criteria, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT DO NOTHING
+                """,
+                (
+                    f"cmt_{uuid.uuid4().hex}",
+                    actor_id,
+                    principal_id,
+                    source_event_id,
+                    quote,
+                    action,
+                    None if due_at_ms is None else int(due_at_ms),
+                    success_criteria,
+                    status,
+                ),
+            )
+            created = cur.rowcount == 1
+            row = conn.execute(
+                """
+                SELECT * FROM companion_commitment
+                WHERE actor_id = ? AND principal_id = ?
+                  AND source_event_id = ? AND quote = ?
+                """,
+                (actor_id, principal_id, source_event_id, quote),
+            ).fetchone()
+        if row is None:  # pragma: no cover - the insert above always leaves a row
+            raise CompanionStoreError("commitment vanished after insert")
+        return _row_to_commitment(row), created
+
+    def set_commitment_status(
+        self,
+        commitment_id: str,
+        *,
+        status: str,
+        result_event_id: str | None = None,
+    ) -> Commitment:
+        """Move one commitment forward; terminal states are final."""
+        if status not in COMMITMENT_STATUSES:
+            raise ValueError(f"unknown commitment status: {status!r}")
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM companion_commitment WHERE commitment_id = ?",
+                (commitment_id,),
+            ).fetchone()
+            if row is None:
+                raise CompanionStoreError(f"unknown commitment: {commitment_id!r}")
+            if row["status"] in {"succeeded", "failed", "cancelled"}:
+                raise CompanionStoreError(
+                    f"commitment {commitment_id!r} is already {row['status']!r}"
+                )
+            conn.execute(
+                f"""
+                UPDATE companion_commitment
+                SET status = ?, result_event_id = COALESCE(?, result_event_id),
+                    updated_at = {_TIMESTAMP_DEFAULT}
+                WHERE commitment_id = ?
+                """,
+                (status, result_event_id, commitment_id),
+            )
+            updated = conn.execute(
+                "SELECT * FROM companion_commitment WHERE commitment_id = ?",
+                (commitment_id,),
+            ).fetchone()
+        assert updated is not None  # pragma: no cover
+        return _row_to_commitment(updated)
+
+    def commitments_for_sweep(self, *, now_ms: int) -> list[Commitment]:
+        """Open commitments whose due time already passed (sweeper input).
+
+        The grace window is applied by the sweeper, not here: an overdue promise stays
+        visible as ``overdue`` for a while before it is declared failed.
+        """
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM companion_commitment
+                WHERE status IN ('active', 'overdue')
+                  AND due_at_ms IS NOT NULL
+                  AND due_at_ms <= ?
+                ORDER BY due_at_ms ASC
+                """,
+                (int(now_ms),),
+            ).fetchall()
+        return [_row_to_commitment(row) for row in rows]
+
 def _assert_sources_owned(
     conn: sqlite3.Connection,
     actor_id: str,
@@ -1608,6 +1824,23 @@ def _row_to_mood(row: sqlite3.Row) -> Mood:
         arousal=float(row["arousal"]),
         source_event_id=row["source_event_id"],
         expires_at_ms=int(row["expires_at_ms"]),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _row_to_commitment(row: sqlite3.Row) -> Commitment:
+    return Commitment(
+        commitment_id=row["commitment_id"],
+        actor_id=row["actor_id"],
+        principal_id=row["principal_id"],
+        source_event_id=row["source_event_id"],
+        quote=row["quote"],
+        action=row["action"],
+        due_at_ms=None if row["due_at_ms"] is None else int(row["due_at_ms"]),
+        success_criteria=row["success_criteria"],
+        status=row["status"],
+        result_event_id=row["result_event_id"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
