@@ -58,6 +58,8 @@ if TYPE_CHECKING:
 
 logger = get_logger("proactive")
 
+PROACTIVE_PROMPT_VERSION: Final = "companion-proactive@v1"
+
 _TZ: Final = timezone(timedelta(hours=8))
 _STATE_FILE: Final = "proactive_state.json"
 _GUARD_FILE: Final = "proactive.json"
@@ -1472,6 +1474,7 @@ def _headless_run(
     from gacore.tools.qq_tools import qq_push
     from gacore.tools.single_use import SingleUseTool
 
+    logger.info("proactive prompt built", version=PROACTIVE_PROMPT_VERSION, max_turns=max_turns)
     graph = build_graph(cfg=cfg, tool_list=[SingleUseTool.wrap(qq_push, max_calls=1)])
     thread_id = f"proactive-{uuid.uuid4().hex[:8]}"
     state = run_once(

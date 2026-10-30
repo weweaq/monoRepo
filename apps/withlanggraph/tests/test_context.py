@@ -474,3 +474,32 @@ def test_self_memory_reads_the_actor_reflections_from_the_store(
 
     assert "=== Self memory" in prompt
     assert "技术分享更容易得到回应" in prompt
+
+
+def test_reply_style_injected_for_owner_c2c(
+    monkeypatch: pytest.MonkeyPatch, cfg_with_assets: Config
+) -> None:
+    """Owner C2C turns carry the §0.6 expression rules and log the prompt version."""
+    records: list[tuple[str, dict]] = []
+
+    class _Rec:
+        def info(self, message: str, **fields: object) -> None:
+            records.append((message, fields))
+
+    monkeypatch.setattr(ctx, "_context_logger", _Rec())
+
+    prompt = build_system_prompt(_companion_state(), cfg_with_assets)
+
+    assert "[即时聊天表达规则]" in prompt
+    assert "一次回复通常表达 1–3 个短小意思" in prompt
+    assert any(
+        message == "reply style block injected" and fields.get("version") == ctx.REPLY_STYLE_VERSION
+        for message, fields in records
+    )
+
+
+def test_reply_style_skipped_without_companion_context(cfg_with_assets: Config) -> None:
+    """Group chats, non-owners and operator turns must not see the companion style rules."""
+    prompt = build_system_prompt(_state([HumanMessage(content="hi")]), cfg_with_assets)
+
+    assert "[即时聊天表达规则]" not in prompt

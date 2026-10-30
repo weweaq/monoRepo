@@ -117,6 +117,22 @@ _PROPOSAL_RULE: Final = (
     "最后另起一行用一句“我建议选…”给出收尾建议。各方案与收尾之间空行分隔，不要列计划前缀。"
 )
 
+# Companion Reply Style (V1 §0.6, Step 9): expression preference only. It never
+# forces segmentation — the actual 1-3 message split is decided by
+# companion/reply_batch.plan_final_reply in the delivery layer.
+REPLY_STYLE_VERSION: Final = "companion-reply-style@v1"
+_REPLY_STYLE_BLOCK: Final = (
+    "[即时聊天表达规则]\n\n"
+    "- 日常闲聊像即时消息，不要一口气倾倒一大段。\n"
+    "- 一次回复通常表达 1–3 个短小意思。\n"
+    "- 不同意思之间可以用空行分隔，空行表示建议的消息边界。\n"
+    "- 一句话已经足够时就只发一句，不要为了“像人”强拆。\n"
+    "- 不逐句复述对方原话。\n"
+    "- 不要每次都总结、列清单或追加问题。\n"
+    "- 明确任务、技术解释、代码、表格和需要完整上下文的内容优先保证准确与完整，"
+    "不为分段牺牲可读性。"
+)
+
 # 向量召回背景（阶段三）：开启按最近一条用户消息并行召回 semantic + episodic 两表，
 # 注入为 RAG 背景。recall_context 自身 best-effort——向量库/模型不可用返回空，不注入。
 _RAG_HEADER: Final = "=== 向量召回记忆（语义画像 + 某天事件，仅供了解过往，绝不代表当前） ==="
@@ -248,6 +264,14 @@ def build_system_prompt(state: GAState, cfg: Config) -> str:
         if self_memory:
             prompt += f"\n\n{self_memory}"
             injected_bg = True
+            with contextlib.suppress(Exception):
+                from gacore.companion.context import SELF_MEMORY_BLOCK_VERSION
+
+                _context_logger.info(
+                    "self memory block injected",
+                    version=SELF_MEMORY_BLOCK_VERSION,
+                    actor_id=str(companion_context.get("actor_id") or ""),
+                )
     daily = load_recent_daily_summaries(cfg, as_of=as_of_day())
     if daily:
         prompt += f"\n{DAILY_HEADER}\n{stamp_daily_history(daily)}"
@@ -294,6 +318,16 @@ def build_system_prompt(state: GAState, cfg: Config) -> str:
             injected=bool(_fact_text),
             compact_chars=len(_fact_text),
         )
+    # Companion Reply Style (Step 9): owner C2C full agent turns only. Expression
+    # preference, never a segmentation mandate; the delivery layer still decides.
+    if companion_context:
+        prompt += f"\n\n{_REPLY_STYLE_BLOCK}"
+        with contextlib.suppress(Exception):
+            _context_logger.info(
+                "reply style block injected",
+                version=REPLY_STYLE_VERSION,
+                actor_id=str(companion_context.get("actor_id") or ""),
+            )
     # Multi-option output mode: set by qq.py::_run_agent when proposal_detect() fires;
     # cleared by graph.py::cleanup_images after the turn so it never leaks into later turns.
     mode = (state.get("output_mode") or "").strip()

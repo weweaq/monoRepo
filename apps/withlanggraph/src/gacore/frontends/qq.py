@@ -105,6 +105,7 @@ from gacore.character import card_name, card_prompt, list_cards
 from gacore.companion.config import load_companion_config
 from gacore.companion.coordinator import schedule_reflection_check, shutdown_reflection_coordinator
 from gacore.companion.identity import ActiveCardError, ActiveCardRepository, actor_id_for
+from gacore.companion.reply_batch import ReplyBatch, plan_final_reply
 from gacore.companion.store import CompanionStore, companion_db_path
 from gacore.companion.summary import minimize_user_message
 from gacore.config import Config, load_dotenv
@@ -190,6 +191,9 @@ _LOG_FILE: str = os.environ.get("QQ_LOG_FILE", "").strip()
 
 
 _SPLIT_LIMIT: Final = 4500  # QQ markdown message length safety margin
+# Companion reply batches: short pause between semantic segments so they read like
+# separate instant messages, capped to keep the turn responsive.
+_SEGMENT_INTERVAL_SECONDS: Final = 0.3
 
 # Burst messages from one user inside this window are merged into a single agent turn.
 _MERGE_WINDOW_SECONDS: Final = 1.2
@@ -1021,6 +1025,11 @@ class QQApp:
         # user_ids whose in-flight turn is being cancelled for a merge (no stop notice).
         self._merge_cancel: set[str] = set()
 
+        # chat_id -> asyncio.Lock serializing reply batches so two turns never interleave.
+        self._delivery_locks: dict[str, asyncio.Lock] = {}
+        # chat_id -> token of the batch currently delivering; set() drops unsent segments.
+        self._delivery_tokens: dict[str, asyncio.Event] = {}
+
         # user_id -> one-shot rollover injection text, consumed by the first _run_agent
         # turn after a cross-day _maybe_rollover (kept in RAM only; never persisted).
         self._pending_rollover: dict[str, str] = {}
@@ -1124,7 +1133,57 @@ class QQApp:
             _persist_chat_log(Config.default().memory_dir, chat_id, "", "bot", confirmed_text)
         return receipt
 
+    def _cancel_pending_delivery(self, chat_id: str) -> None:
+        """Drop the unsent segments of any batch still delivering to this chat."""
+        token = self._delivery_tokens.get(chat_id)
+        if token is not None:
+            token.set()
 
+    def _plan_final_reply(self, state: dict, final_text: str) -> ReplyBatch:
+        """Plan the final answer into a reply batch.
+
+        Proposal turns keep their 【方案N】 fan-out and stay atomic per proposal; all
+        other turns split only for owner C2C companion chats.
+        """
+        proposal_segments = _split_by_proposal(final_text)
+        if len(proposal_segments) > 1:
+            return ReplyBatch(logical_turn_id=uuid.uuid4().hex, segments=tuple(proposal_segments))
+        mode = "companion" if state.get("companion_context") else "atomic"
+        return plan_final_reply(final_text, mode)
+
+    async def _deliver_reply_batch(
+        self,
+        chat_id: str,
+        batch: ReplyBatch,
+        *,
+        is_group: bool,
+        msg_id: str | None = None,
+    ) -> list[SendReceipt]:
+        """Send one batch segment by segment under the per-chat delivery lock.
+
+        A new message sets the batch token; already confirmed segments stay facts,
+        unsent segments are dropped. Batches from different turns never interleave.
+        """
+        lock = self._delivery_locks.setdefault(chat_id, asyncio.Lock())
+        token = asyncio.Event()
+        self._delivery_tokens[chat_id] = token
+        receipts: list[SendReceipt] = []
+        try:
+            async with lock:
+                for index, segment in enumerate(batch.segments):
+                    if token.is_set():
+                        break
+                    if index:
+                        await asyncio.sleep(_SEGMENT_INTERVAL_SECONDS)
+                        if token.is_set():
+                            break
+                    receipts.append(
+                        await self.send_text(chat_id, segment, is_group=is_group, msg_id=msg_id)
+                    )
+        finally:
+            if self._delivery_tokens.get(chat_id) is token:
+                self._delivery_tokens.pop(chat_id, None)
+        return receipts
 
     # --------------------------------------------------------------- messages
 
@@ -1311,6 +1370,11 @@ class QQApp:
             # thread and stage yesterday's memory pack for silent first-turn injection.
             # Any failure is swallowed inside — chat must never be blocked by memory.
             await self._maybe_rollover(user_id)
+
+            # A new message supersedes any reply batch still delivering: keep the
+            # segments already confirmed, drop the unsent ones, and let the new turn
+            # answer immediately.
+            self._cancel_pending_delivery(chat_id)
 
 
             # --- Image messages: multi-image accumulation via interrupt/resume ---
@@ -2653,14 +2717,14 @@ class QQApp:
 
                     if final_text.strip():
 
-                        # Phase 2: fan out 【方案N】 anchors into separate QQ messages.
-                        segments = _split_by_proposal(final_text)
-                        receipts: list[SendReceipt] = []
-                        if len(segments) > 1:
-                            for seg in segments:
-                                receipts.append(await self.send_text(chat_id, seg, is_group=is_group))
-                        else:
-                            receipts.append(await self.send_text(chat_id, final_text, is_group=is_group))
+                        # Phase 2: 【方案N】 fan-out stays atomic per proposal; owner C2C
+                        # companion chats may split into 1-3 semantic segments. Delivery
+                        # runs under a per-chat lock with a cancellation token.
+                        planning_state = input_data if isinstance(input_data, dict) else {}
+                        batch = self._plan_final_reply(planning_state, final_text)
+                        receipts = await self._deliver_reply_batch(
+                            chat_id, batch, is_group=is_group
+                        )
                         if user_id is not None:
                             await self._record_companion_sent(user_id, msg_id, receipts)
 
