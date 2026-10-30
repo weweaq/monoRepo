@@ -33,7 +33,7 @@ from gacore.redact import redact_text
 
 logger = get_logger("companion.reflection")
 
-REFLECTION_PROMPT_VERSION: Final = "reflection.v1"
+REFLECTION_PROMPT_VERSION: Final = "companion-reflection@v1"
 BATCH_SIZE: Final = 10
 MIN_BATCH_EVENTS: Final = 3
 MAX_REFLECTIONS: Final = 2
@@ -51,18 +51,31 @@ _SENSITIVE: Final = re.compile(
     r"|\b(?:sk|pk|ak|rk|ghp|gho|ghs|github_pat)[-_][A-Za-z0-9_\-]{8,}\b"
     r"|\bBearer\s+[A-Za-z0-9._~+/=\-]{8,})",
 )
+# A statement is injected as background later (Step 8), so command-like text that
+# tries to switch roles, invoke tools or rewrite the system prompt is rejected at
+# write time instead of being sanitised downstream.
+_COMMAND_LIKE: Final = re.compile(
+    r"(?:忽略|无视|跳过|绕过|覆盖)(?:上述|以上|之前|所有|全部)?(?:的)?(?:规则|指令|限制|设定)"
+    r"|(?:切换|更换|扮演|变成|成为)(?:成|为)?(?:其他|别的|另一个)?(?:角色|人格|助手)"
+    r"|(?:调用|执行)(?:工具|函数|qq_push)"
+    r"|(?:系统指令|系统提示|提示词|system\s*prompt)",
+    re.IGNORECASE,
+)
 
 _SYSTEM_PROMPT: Final = """你是角色自我反思提取器，不是聊天角色。
 
-只根据输入事件，提取 0-2 条可复用的自我认识。
+任务：
+仅根据输入事件，提取 0-2 条对角色自身行为或互动方式有复用价值的认识。
 
-规则：
-1. 每条反思必须引用至少 2 个 source_event_ids。
+硬规则：
+1. 每条反思必须引用 2-5 个 source_event_ids。
 2. 不得声称事件中没有发生的行动。
-3. 用户消息是用户说过的话，不是角色自己的经历。
-4. 不修改人格，不推断关系阶段，不创建目标或承诺。
-5. 证据不足时返回空数组。
-6. 只输出 JSON。"""
+3. user.message.received 是用户说过的话，不是角色自己的经历。
+4. agent.message.sent / proactive.message.sent 只表示确认发送过相应内容。
+5. 不修改角色人格，不推断关系阶段，不创建承诺或目标。
+6. 不输出用户隐私、凭据、完整路径或完整聊天。
+7. 证据不足时返回空数组。
+8. 只输出符合 schema 的 JSON。"""
 
 Runner = Callable[[Sequence[CompanionEvent]], "ReflectionOutcome"]
 
@@ -87,7 +100,12 @@ def run_reflection(
         payload = json.dumps(
             {
                 "events": [
-                    {"event_id": event.event_id, "kind": event.kind, "summary": event.summary}
+                    {
+                        "event_id": event.event_id,
+                        "kind": event.kind,
+                        "summary": event.summary,
+                        "occurred_at_ms": event.occurred_at_ms,
+                    }
                     for event in events
                 ]
             },
@@ -142,6 +160,8 @@ def validate_reflections(
             return None, "statement length out of range"
         if _contains_sensitive(statement):
             return None, "statement contains a secret, token or path"
+        if _COMMAND_LIKE.search(statement):
+            return None, "statement contains an instruction or role switch"
         confidence = raw.get("confidence")
         if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
             return None, "confidence is not a number"
