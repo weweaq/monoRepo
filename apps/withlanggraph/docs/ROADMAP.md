@@ -4961,6 +4961,104 @@ tick 流水线 / 触发器 / last_outreach 状态注入 / 推送去 agent 化 / 
 **待办更新**：
 
 - [x] Step 1 共享 Active-Card Repository（代码 + 测试 + R5 三处同步）
-- [ ] Step 2 Owner 配置与 Proactive 人格贯穿（`COMPANION_OWNER_QQ_OPENID`、
-  删 `build_proactive_prompt` 里的"韩立口吻"、`_headless_run` 透传 `active_card`）
+- [x] Step 2 Owner 配置与 Proactive 人格贯穿（见下节，2026-10-30）
+
+## 2026-10-30 · Companion 自我记忆 V1 Step 2：Owner 配置与 Proactive 人格贯穿
+
+**背景**：`docs/companion-self-memory-v1-plan.md` Step 2。Step 1 已让 QQ 与 proactive
+共享 `ActiveCardRepository`，但 proactive 仍有两个断点：一是 `build_proactive_prompt` 把
+口吻硬编码成"韩立口吻"，与用户当前角色卡无关；二是 `_headless_run` 不传 `active_card`，
+`run_once` 生成的 system prompt 永远走默认角色。结果就是"主动消息的角色 ≠ 普通聊天的角色"。
+
+**已完成**：
+
+- 新增 `src/gacore/companion/config.py`：`CompanionConfig(enabled, owner_openid)` +
+  `load_companion_config(env=None)`，每次调用读环境变量。
+  - 开关 `COMPANION_MVP_ENABLED`，真值集合 `1/true/yes/on`（大小写与空白容错）。
+  - owner `COMPANION_OWNER_QQ_OPENID`，纯空白按未配置。
+  - `active` = 开关打开 **且** owner 非空；调用方一律以 `active` 为门限，缺 owner 时功能
+    关闭而不是猜一个 owner。
+- `src/gacore/companion/identity.py` 新增：
+  - `active_cards_path(cfg)` → `<cfg.root>/data/active_cards.json`（与 repository 默认路径
+    同源，`default_active_cards_path()` 改为调用它）。
+  - `is_owner(openid, companion)` → 开关打开且 openid 精确等于 owner。
+  - `owner_active_card(openid, companion, repo)` → 非 owner / 未启用时直接返回 `None`，
+    **不触碰 repository**（避免无谓文件 IO 与读重试）；只有 owner 才 `repo.get(openid)`。
+    `repo` 为必填参数，避免调用方漏传时回落到真实 `data/active_cards.json`。
+- `src/gacore/proactive.py`：
+  - `build_proactive_prompt` 新增 `actor_name: str = "助手"`，正文改为
+    `f"{actor_name}口吻"`，删除硬编码"韩立口吻"。
+  - `_headless_run` 新增 `active_card: str | None = None` 并透传给 `run_once(active_card=...)`
+    （`GAState.active_card` → system prompt），主动消息与普通聊天共用同一角色卡。
+  - `run_proactive_job` 在 worker 线程内 `load_companion_config()`；只有 `companion.active`
+    为真才构造 `ActiveCardRepository(active_cards_path(resolved_cfg))`，否则
+    `active_cards=None` 且从不读卡。逐用户
+    `active_card = owner_active_card(uid, companion, active_cards)`（未启用时直接 `None`）；
+    再用 `card_prompt(cfg, active_card)` 判卡是否有正文——无正文的卡会被
+    `build_system_prompt` 跳过，因此置 `active_card=None`；最后
+    `actor_name = card_name(resolved_cfg, active_card) or "助手"`。
+- 测试：
+  - 新增 `tests/test_companion_config.py`（5 条）：默认关闭、`active` 需开关 + owner
+    双满足、真值解析与 owner 去空白、`0` 关闭、空白 owner 视为未配置。
+  - `tests/test_companion_identity.py` 新增 5 条：`active_cards_path` 跟随 config root、
+    `is_owner` 精确匹配 + 开关门限、`owner_active_card` 只读 owner、非 owner 不触碰
+    repository、未启用不触碰 repository。
+  - `tests/test_proactive.py` 新增 `TestOwnerPersona`（7 条）：owner 卡驱动 prompt 与
+    `active_card`、切卡后下一轮生效、非 owner 走中性"助手口吻"、缺 owner 配置保持中性、
+    `build_proactive_prompt` 不再出现"韩立口吻"、只有标题无正文的卡回退中性、
+    `_headless_run` 把 `active_card` 透传给 `run_once`（patch
+    `gacore.graph.build_graph/run_once` 捕获实参）。
+  - 所有 `_headless_run` fake 签名追加 `active_card=None`（`test_proactive.py`、
+    `test_proactive_p1/p2/p3.py`、`test_proactive_p3_adaptive.py`、
+    `test_proactive_questions.py`、`test_proactive_candidates.py`）。
+
+**实测验证**：
+
+- `uv run pytest tests/test_companion_config.py tests/test_companion_identity.py tests/test_proactive.py -q`
+  → 89 passed
+- `uv run pytest tests/test_proactive.py tests/test_proactive_p1.py tests/test_proactive_p2.py
+  tests/test_proactive_p3.py tests/test_proactive_p3_adaptive.py tests/test_proactive_questions.py
+  tests/test_proactive_candidates.py tests/test_companion_config.py tests/test_companion_identity.py -q`
+  → 260 passed（首轮 2 failed：`test_proactive_p1.py` 两处单行 lambda fake 漏 `active_card`，
+  补齐后全绿）
+- `uv run ruff check`（companion 包 + proactive.py + 相关测试）→ All checks passed
+- 全仓 `uv run ruff check apps packages tests` → All checks passed
+- `uv run pytest tests -q`（apps/withlanggraph 全量）→ **1805 passed**（150s；
+  基线 1788 + 本次新增 17 条）。一次运行中出现 1 例
+  `test_langTrack_anomalies::test_v2_cross_day_work_stay_covers_next_noon` 的 Windows
+  `PermissionError: WinError 5`（`os.replace` 被瞬时占用），单独复跑 1 passed，属环境抖动，
+  与本次改动无关。
+- `node apps/mermaid-viewer/tests/check_prompt_logic.js` → ALL PASS（CC 节点插入后
+  RC/MMX/FB/MAIN/FLOW/WT 边/日报正文 边行号各 +1，已同步锚点）
+
+**偏差说明**：
+
+- 非 owner / 未启用时 `owner_active_card` 先返回再读文件，与"读卡再判断"相比少一次文件
+  IO；语义等价（返回值都是 `None`），但这是刻意的性能与安全边界。
+- **卡可用性以 `card_prompt` 是否有正文为准**：卡文件缺失、只有标题或正文为空时
+  `active_card` 置 `None`、`actor_name` 回退"助手"，与普通聊天
+  （`build_system_prompt` 对无正文卡直接跳过）保持一致；不因卡文件损坏而中断主动推送。
+- **卡名回退遵循 `character.card_name` 既有行为**：卡有正文但没有 `# ` 标题时，
+  `card_name` 返回文件名 stem（不是"助手"）；本次未改动该函数。
+
+**独立复审（R7 review-loop，1 轮）**：1 条 P1 + 2 条 P2 + 4 条 P3，全部处置。
+
+- P1 文档失真：初稿称"无 `# ` 标题也回退助手"，实际 `character.card_name` 返回文件名
+  stem。已改文档，并同时用 `card_prompt` 判卡是否有正文（见下）。
+- P2 空正文卡人格不一致：卡有标题但正文为空时 `card_prompt` 返回 `None`（system prompt
+  无角色），prompt 却写"X口吻"。已改为 `card_prompt` 无正文即置 `active_card=None`，
+  补 `test_card_without_persona_body_falls_back_to_neutral`。
+- P2 repo 默认值风险：`owner_active_card(repo=None)` 会回落到 `Config.default()` 的真实
+  `data/active_cards.json`。已把 `repo` 改为必填参数。
+- P3 Companion 关闭时仍构造 repo：已改为仅 `companion.active` 为真才构造。
+- P3 `test_proactive_p3.py` 的 `_PROMPT` fixture 仍写"韩立口吻"：已改"助手口吻"。
+- P3 端到端断言：`_headless_run → run_once` 透传由新增用例覆盖；`GAState.active_card →
+  system prompt` 由既有 `test_character_system_prompt.py` 端到端用例覆盖，两者拼成闭环。
+- P3 根 `.env.example` 缺 Companion 键：已补 `COMPANION_MVP_ENABLED` /
+  `COMPANION_OWNER_QQ_OPENID`。
+
+**待办更新**：
+
+- [x] Step 2 Owner 配置与 Proactive 人格贯穿（代码 + 测试 + R5 三处同步 + review-loop）
+- [ ] Step 3 起按 `docs/companion-self-memory-v1-plan.md` 继续
 

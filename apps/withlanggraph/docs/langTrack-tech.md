@@ -727,7 +727,10 @@ flowchart LR
     C --> D["context.py 唯一注入点<br/>L0工具准则 + 人物卡 + 工具桥接句"]
     E["frontends/qq.py /角色<br/>查看/切换/off"] -->|"set()/snapshot()"| R["companion/identity.py<br/>ActiveCardRepository<br/>唯一读写入口"]
     R -->|"临时文件 + os.replace"| F["data/active_cards.json<br/>user->card 映射,重启不丢"]
-    P["proactive.py<br/>(Step 2 接入)"] -.->|"get()/snapshot()"| R
+    G["companion/config.py<br/>COMPANION_MVP_ENABLED<br/>COMPANION_OWNER_QQ_OPENID"] --> H["identity.is_owner / owner_active_card<br/>仅 owner 且开关打开才读卡"]
+    H -->|"get(openid)"| R
+    P["proactive.py run_proactive_job"] -->|"owner_active_card(uid)"| H
+    P -->|"build_proactive_prompt(actor_name)<br/>_headless_run(active_card)"| C
 ```
 
 - 角色激活时 system prompt = **L0 工具准则 + 人物卡 + 工具桥接句**（“保留系统智能体全部能力，可调用系统工具，用角色口吻表达”），实例见 `context.py`。
@@ -742,11 +745,32 @@ flowchart LR
     时 Windows 会短暂拒绝读，旧逻辑会把它误判成"无角色"。
   - 文件不存在或空白视为首次启动，返回 `{}`；**JSON 损坏时读取降级为 `{}` 但不覆盖**——`set()` 抛 `ActiveCardCorruptError`，由 `qq.py::_set_user_card` 记 WARNING 后仅更新内存缓存，保证 `/角色` 不报错、磁盘上的人工改动不被静默清空。
   - `qq.py` 的进程内 `_user_card` 缓存只在 `_set_user_card()` 一处更新（角色切换 / 退出角色），启动时由 `repo.snapshot()` 填充。
-
+- **Owner 门限与 proactive 人格贯穿（2026-10-30，Companion V1 Step 2）**：
+  - `companion/config.py::load_companion_config()` 每次读环境变量，返回
+    `CompanionConfig(enabled, owner_openid)`；`active` = 开关打开 **且** owner 非空。
+    键名 `COMPANION_MVP_ENABLED`（真值 `1/true/yes/on`）、`COMPANION_OWNER_QQ_OPENID`
+    （纯空白按未配置）。缺 owner 时功能整体关闭，代码不猜 owner。
+  - `identity.is_owner(openid, companion)` = 开关打开且 openid 精确等于 owner；
+    `identity.owner_active_card(openid, companion, repo)` 对非 owner / 未启用**直接返回
+    `None`、不触碰 repository**，只有 owner 才 `repo.get(openid)`；`repo` 必填，避免漏传时
+    回落到真实 `data/active_cards.json`。
+  - `proactive.py::run_proactive_job` 仅在 `companion.active` 为真时构造
+    `ActiveCardRepository(active_cards_path(cfg))`，逐用户取
+    `active_card = owner_active_card(uid, ...)`；再用 `card_prompt(cfg, active_card)` 判卡
+    是否有正文（无正文卡会被 `build_system_prompt` 跳过），无正文则置 `None`；
+    `actor_name = card_name(cfg, active_card) or "助手"`，把 `actor_name` 传入
+    `build_proactive_prompt`（正文由 `f"{actor_name}口吻"` 生成，已无硬编码"韩立口吻"），
+    并把 `active_card` 透传给 `_headless_run → run_once(active_card=...)`，经
+    `GAState.active_card` 进入 `context.py` 的 system prompt——主动消息与普通聊天共用同一角色卡。
+  - 非 owner / 未配置 / 卡无正文时 `actor_name` 为 `"助手"`、`active_card` 为 `None`，即
+    中性口吻，不中断主动推送。卡有正文但无 `# ` 标题时，卡名沿用 `character.card_name`
+    既有行为取文件名 stem（不是"助手"）。
 
 ### 9.3 测试
 
-`tests/test_character.py`(7)、`tests/test_character_system_prompt.py`(4)、`tests/test_qq.py` `/角色` 相关 3 条；回归 69 passed。
+`tests/test_character.py`(7)、`tests/test_character_system_prompt.py`(4)、`tests/test_qq.py` `/角色` 相关 3 条、
+`tests/test_companion_identity.py`(21)、`tests/test_companion_config.py`(5)、
+`tests/test_proactive.py::TestOwnerPersona`(7)；Step 2 验收 89 passed。
 ### 9.4 主动推送（openid 落库 + qq_push）
 
 - 落库：`frontends/qq.py:_record_known_user()` —— 每次收到消息把用户 openid 写入 `data/qq_known_users.json`（`first_seen`/`last_seen`，损坏自动降级重建，失败仅告警不阻塞消息处理）。
