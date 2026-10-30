@@ -73,6 +73,7 @@ import uuid
 from collections import deque
 
 from contextlib import suppress
+from dataclasses import dataclass
 
 from datetime import datetime, timedelta, timezone
 
@@ -701,6 +702,59 @@ def _split_text(text: str) -> list[str]:
     return parts or ["..."]
 
 
+@dataclass(frozen=True)
+class SegmentReceipt:
+    """Outcome of one QQ-safe chunk sent to the platform."""
+
+    confirmed: bool
+    actual_text: str
+    provider_message_id: str | None
+    outcome_unknown: bool = False
+
+
+@dataclass(frozen=True)
+class SendReceipt:
+    """Outcome of a whole reply; confirmed only when every segment is confirmed."""
+
+    confirmed: bool
+    segments: tuple[SegmentReceipt, ...]
+
+
+# Timeout / connection failures mean the platform may already have delivered the
+# message. botpy maps HTTP error responses to its own RuntimeError subclasses, so
+# anything in this set (or a builtin TimeoutError/ConnectionError) is "unknown"
+# and must NOT trigger the plain-text fallback (that would duplicate the send).
+_UNKNOWN_SEND_ERROR_NAMES: Final = frozenset(
+    {
+        "ClientConnectionError",
+        "ClientConnectorError",
+        "ClientOSError",
+        "ClientPayloadError",
+        "ClientProxyConnectionError",
+        "ConnectionTimeoutError",
+        "ServerConnectionError",
+        "ServerDisconnectedError",
+        "ServerTimeoutError",
+        "TimeoutException",
+        "ConnectError",
+        "ReadError",
+        "WriteError",
+        "RemoteProtocolError",
+        "PoolTimeout",
+        "ConnectTimeout",
+        "ReadTimeout",
+        "WriteTimeout",
+    }
+)
+
+
+def _is_send_outcome_unknown(exc: BaseException) -> bool:
+    """True when a send may have reached the platform despite raising."""
+    if isinstance(exc, (TimeoutError, ConnectionError)):
+        return True
+    return type(exc).__name__ in _UNKNOWN_SEND_ERROR_NAMES
+
+
 _TZ_SH = timezone(timedelta(hours=8))
 _WEEK_CN = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
 _MEM_TIMESTAMP_RE = re.compile(r"\d{1,2}[点时]|\d{4}[-/年]\d{1,2}[-/月]\d{1,2}|\d{1,2}月\d{1,2}日")
@@ -962,54 +1016,90 @@ class QQApp:
 
 
 
-    async def _send_markdown(self, chat_id: str, content: str, *, is_group: bool, msg_id: str | None) -> None:
+    async def _send_markdown(
+        self, chat_id: str, content: str, *, is_group: bool, msg_id: str | None
+    ) -> SendReceipt:
+        """Send text as markdown; fall back to plain only on a definite failure.
 
-        """Send text as markdown, falling back to plain text on error. Retries on timeout."""
-
+        A timeout / connection error is an *unknown* outcome: the platform may have
+        delivered the markdown already, so falling back would duplicate the message.
+        Only a definite rejection (the API answered with an error) allows the plain
+        fallback. Every 4500-char chunk gets its own receipt so a partial send is
+        never mistaken for a full one.
+        """
+        parts = _split_text(content)
         if not self.client:
-
-            return
+            return SendReceipt(
+                confirmed=False,
+                segments=tuple(
+                    SegmentReceipt(False, part, None, outcome_unknown=False) for part in parts
+                ),
+            )
 
         api = self.client.api.post_group_message if is_group else self.client.api.post_c2c_message
-
         key = "group_openid" if is_group else "openid"
-
-        for part in _split_text(content):
-
+        segments: list[SegmentReceipt] = []
+        for part in parts:
             seq = _next_seq()
+            confirmed, provider_id, unknown = await self._attempt_send(
+                api,
+                {key: chat_id, "msg_type": 2, "markdown": {"content": part}, "msg_id": msg_id, "msg_seq": seq},
+            )
+            if not confirmed and not unknown:
+                confirmed, provider_id, unknown = await self._attempt_send(
+                    api,
+                    {key: chat_id, "msg_type": 0, "content": part, "msg_id": msg_id, "msg_seq": seq},
+                )
+            segments.append(SegmentReceipt(confirmed, part, provider_id, outcome_unknown=unknown))
 
-            for attempt in range(3):
+        receipt = SendReceipt(
+            confirmed=all(segment.confirmed for segment in segments),
+            segments=tuple(segments),
+        )
+        if not receipt.confirmed:
+            logger.error(
+                "QQ send not fully confirmed",
+                chat_id=chat_id,
+                confirmed_segments=sum(1 for segment in segments if segment.confirmed),
+                total_segments=len(segments),
+                unknown_segments=sum(1 for segment in segments if segment.outcome_unknown),
+            )
+        return receipt
 
-                try:
+    @staticmethod
+    async def _attempt_send(api, payload: dict) -> tuple[bool, str | None, bool]:
+        """One API call → (confirmed, provider_message_id, outcome_unknown)."""
+        try:
+            result = await api(**payload)
+        except Exception as exc:  # noqa: BLE001 — classified, never swallowed silently
+            unknown = _is_send_outcome_unknown(exc)
+            logger.warning(
+                "QQ send attempt failed",
+                outcome_unknown=unknown,
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+            return False, None, unknown
+        provider_id: str | None = None
+        if isinstance(result, dict):
+            raw = result.get("id")
+            provider_id = str(raw) if raw else None
+        elif isinstance(result, str) and result:
+            provider_id = result
+        return True, provider_id, False
 
-                    await api(**{key: chat_id, "msg_type": 2, "markdown": {"content": part}, "msg_id": msg_id, "msg_seq": seq})
-
-                    break
-
-                except Exception:  # noqa: BLE001 — markdown unsupported or timeout, fall back to plain text
-
-                    try:
-
-                        await api(**{key: chat_id, "msg_type": 0, "content": part, "msg_id": msg_id, "msg_seq": seq})
-
-                        break
-
-                    except Exception:  # noqa: BLE001 — retry
-
-                        if attempt == 2:
-
-                            logger.error(f"QQ send failed after 3 attempts: {chat_id}")
-
-                        await asyncio.sleep(1)
-
-
-
-    async def send_text(self, chat_id: str, content: str, *, msg_id: str | None = None, is_group: bool = False) -> None:
-
-        # Chat archive: every outgoing bot message → memory/qq_chat_log.jsonl (bot side).
-        _persist_chat_log(Config.default().memory_dir, chat_id, "", "bot", content)
-
-        await self._send_markdown(chat_id, content, is_group=is_group, msg_id=msg_id)
+    async def send_text(
+        self, chat_id: str, content: str, *, msg_id: str | None = None, is_group: bool = False
+    ) -> SendReceipt:
+        receipt = await self._send_markdown(chat_id, content, is_group=is_group, msg_id=msg_id)
+        # Chat archive is written after the receipt so it only contains text the
+        # platform actually confirmed — never a failed or unknown segment.
+        confirmed_text = "\n".join(
+            segment.actual_text for segment in receipt.segments if segment.confirmed
+        )
+        if confirmed_text:
+            _persist_chat_log(Config.default().memory_dir, chat_id, "", "bot", confirmed_text)
+        return receipt
 
 
 

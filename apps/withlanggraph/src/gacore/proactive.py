@@ -1553,21 +1553,35 @@ def _write_back_proactive(
             conn.close()
 
 
-def _qq_push_sent(qq_push_results: list[str]) -> bool:
-    """True when the latest qq_push tool result reports status "sent" (M4).
+def _qq_push_sent(qq_push_results: list[str], recipient: str) -> str | None:
+    """Return the actual delivered text when ``recipient`` is confirmed sent, else None.
 
-    Parses the ToolMessage content as JSON instead of substring matching, so a payload
-    like `{"ok": true, "sent": {"to": ["x"]}}` is recognized and an unrelated string
-    (or an unparseable payload) counts as NOT sent.
+    ``status == "sent"`` alone is not enough: another recipient succeeding must never
+    stand in for the recipient we care about. The recipient must appear in ``to``,
+    be absent from ``failures``, have an entry in ``ids`` (the id may be empty when
+    the platform omitted it), and the payload must carry ``actual_message`` — the
+    text actually transmitted, not the last AIMessage.
     """
-    if not qq_push_results:
-        return False
+    if not qq_push_results or not recipient:
+        return None
     latest = qq_push_results[-1]
     try:
         parsed = json.loads(latest)
     except (TypeError, ValueError):
-        return False
-    return isinstance(parsed, dict) and parsed.get("status") == "sent"
+        return None
+    if not isinstance(parsed, dict) or parsed.get("status") != "sent":
+        return None
+    if recipient in (parsed.get("failures") or []):
+        return None
+    if recipient not in (parsed.get("to") or []):
+        return None
+    ids = parsed.get("ids")
+    if not isinstance(ids, dict) or recipient not in ids:
+        return None
+    actual = parsed.get("actual_message")
+    if not isinstance(actual, str) or not actual.strip():
+        return None
+    return actual
 
 
 def _snippet(text: str | None, limit: int = 200) -> str:
@@ -1857,7 +1871,8 @@ def run_proactive_job(
                 )
                 result["skipped"].append({"user": uid, "reason": "llm_no_push"})
                 continue
-            if not _qq_push_sent(qq_results):
+            actual_message = _qq_push_sent(qq_results, uid)
+            if actual_message is None:
                 _mark_failed(resolved_cfg, uid, scene, now)
                 logger.warning(
                     "proactive: qq_push did not confirm delivery",

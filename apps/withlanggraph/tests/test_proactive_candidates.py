@@ -361,7 +361,17 @@ def test_questions_scene_falls_back_to_candidate_pool(tmp_path, monkeypatch):
 
     def fake_headless(job, cfg_, prompt, max_turns, active_card=None):
         captured["prompt"] = prompt
-        return "END", "转述完成", [json.dumps({"status": "sent", "to": ["u1"]})]
+        return "END", "转述完成", [
+            json.dumps(
+                {
+                    "status": "sent",
+                    "to": ["u1"],
+                    "failures": [],
+                    "ids": {"u1": "m1"},
+                    "actual_message": "转述完成",
+                }
+            )
+        ]
 
     monkeypatch.setattr("gacore.proactive._headless_run", fake_headless)
     monkeypatch.setattr("gacore.proactive._write_back_proactive", lambda *a, **k: False)

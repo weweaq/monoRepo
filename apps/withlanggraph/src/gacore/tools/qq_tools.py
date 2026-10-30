@@ -47,6 +47,7 @@ class QqPushResult(TypedDict):
     to: list[str]
     failures: list[str]
     ids: dict[str, str]
+    actual_message: str
     truncated: NotRequired[bool]
 
 
@@ -162,6 +163,14 @@ def qq_push(
             to=delivered,
             failures=failures,
             ids=ids,
+            actual_message=message,
             truncated=True,
         )
-    return QqPushResult(status="sent", ok=ok, to=delivered, failures=failures, ids=ids)
+    return QqPushResult(
+        status="sent",
+        ok=ok,
+        to=delivered,
+        failures=failures,
+        ids=ids,
+        actual_message=message,
+    )

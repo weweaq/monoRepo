@@ -56,6 +56,7 @@ def test_push_success_default_recipients(monkeypatch):
     assert result["to"] == ["openid_A", "openid_B"]
     assert result["failures"] == []
     assert result["ids"] == {"openid_A": "id-1", "openid_B": "id-2"}
+    assert result["actual_message"] == "昨日画像报告"
 
 
 def test_push_success_explicit_to(monkeypatch):
@@ -157,6 +158,7 @@ def test_push_truncates_overlong_message_and_flags(monkeypatch):
     assert result["status"] == "sent"
     assert result["truncated"] is True
     assert len(captured["content"]) == qq_tools_mod._PUSH_MAX_CHARS
+    assert result["actual_message"] == long_msg[: qq_tools_mod._PUSH_MAX_CHARS]
 
 
 def test_push_short_message_not_truncated(monkeypatch):

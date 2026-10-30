@@ -431,7 +431,7 @@ class TestRunProactiveJobP1:
             lambda job, cfg, prompt, max_turns, active_card=None: (
                 "CURRENT_TASK_DONE",
                 "韩立的早安",
-                ['{"status": "sent", "ok": 1}'],
+                ['{"status": "sent", "ok": 1, "to": ["u1"], "failures": [], "ids": {"u1": "m1"}, "actual_message": "早"}'],
             ),
         )
         job = Job(name="proactive-morning", schedule="every 1h", prompt="早安", type="proactive")
@@ -449,7 +449,7 @@ class TestRunProactiveJobP1:
             lambda job, cfg, prompt, max_turns, active_card=None: (
                 "CURRENT_TASK_DONE",
                 "韩立的早安",
-                ['{"status": "sent", "ok": 1}'],
+                ['{"status": "sent", "ok": 1, "to": ["u1"], "failures": [], "ids": {"u1": "m1"}, "actual_message": "早"}'],
             ),
         )
         job = Job(name="proactive-morning", schedule="every 1h", prompt="早安", type="proactive")
@@ -466,7 +466,7 @@ class TestRunProactiveJobP1:
 
         def fake_headless(job: Job, cfg: Config, prompt: str, max_turns: int, active_card: str | None = None) -> tuple:
             prompts.append(prompt)
-            return ("CURRENT_TASK_DONE", "接话题", ['{"status": "sent", "ok": 1}'])
+            return ("CURRENT_TASK_DONE", "接话题", ['{"status": "sent", "ok": 1, "to": ["u1"], "failures": [], "ids": {"u1": "m1"}, "actual_message": "早"}'])
 
         monkeypatch.setattr(proactive, "_headless_run", fake_headless)
         monkeypatch.setattr(
@@ -490,7 +490,7 @@ class TestRunProactiveJobP1:
 
         def fake_headless(job: Job, cfg: Config, prompt: str, max_turns: int, active_card: str | None = None) -> tuple:
             prompts.append(prompt)
-            return ("CURRENT_TASK_DONE", "问候", ['{"status": "sent", "ok": 1}'])
+            return ("CURRENT_TASK_DONE", "问候", ['{"status": "sent", "ok": 1, "to": ["u1"], "failures": [], "ids": {"u1": "m1"}, "actual_message": "早"}'])
 
         monkeypatch.setattr(proactive, "_headless_run", fake_headless)
         monkeypatch.setattr(

@@ -444,7 +444,10 @@ class TestRunProactiveJob:
             lambda job, cfg, prompt, max_turns, active_card=None: (
                 "CURRENT_TASK_DONE",
                 "韩立的早安",
-                ['{"status": "sent", "ok": 1}'],
+                [
+                    '{"status": "sent", "ok": 2, "to": ["u1", "u2"], "failures": [], '
+                    '"ids": {"u1": "m1", "u2": "m2"}, "actual_message": "韩立的早安"}'
+                ],
             ),
         )
         job = Job(
@@ -523,7 +526,7 @@ class TestRunProactiveJob:
 
         def fake_headless(*args: object) -> tuple:
             called.append(True)
-            return ("CURRENT_TASK_DONE", "", ['{"status": "sent"}'])
+            return ("CURRENT_TASK_DONE", "", ['{"status": "sent", "to": ["u1"], "ids": {"u1": "m1"}, "actual_message": "hi"}'])
 
         monkeypatch.setattr(proactive, "_headless_run", fake_headless)
         job = Job(name="proactive-morning", schedule="every 1h", prompt="早安", type="proactive")
@@ -551,7 +554,12 @@ class TestRunProactiveJob:
             calls["n"] += 1
             if calls["n"] == 1:
                 raise RuntimeError("boom")
-            return ("CURRENT_TASK_DONE", "ok", ['{"status": "sent", "ok": 1}'])
+            return (
+                "CURRENT_TASK_DONE",
+                "ok",
+                ['{"status": "sent", "ok": 1, "to": ["u2"], "failures": [], '
+                 '"ids": {"u2": "m2"}, "actual_message": "ok"}'],
+            )
 
         monkeypatch.setattr(proactive, "_headless_run", flaky_headless)
         job = Job(name="proactive-morning", schedule="every 1h", prompt="早安", type="proactive")
@@ -619,25 +627,62 @@ class TestWindowEast8:
 
 
 class TestQqPushSent:
-    def test_parses_sent_status(self) -> None:
-        assert proactive._qq_push_sent(['{"status": "sent", "ok": 1}']) is True
+    @staticmethod
+    def _payload(**overrides) -> str:
+        base = {
+            "status": "sent",
+            "ok": 1,
+            "to": ["u1"],
+            "failures": [],
+            "ids": {"u1": "m1"},
+            "actual_message": "实际正文",
+        }
+        base.update(overrides)
+        return json.dumps(base, ensure_ascii=False)
+
+    def test_owner_success_returns_actual_message(self) -> None:
+        assert proactive._qq_push_sent([self._payload()], "u1") == "实际正文"
 
     def test_error_status_is_not_sent(self) -> None:
-        assert proactive._qq_push_sent(['{"status": "error", "message": "nope"}']) is False
+        assert proactive._qq_push_sent(['{"status": "error", "message": "nope"}'], "u1") is None
 
     def test_ok_flag_without_sent_status_is_not_sent(self) -> None:
         # {"ok": true, ...} alone is NOT a confirmation under M4 — status must be "sent".
-        assert proactive._qq_push_sent(['{"ok": true, "sent": {"to": ["x"]}}']) is False
+        assert proactive._qq_push_sent(['{"ok": true, "sent": {"to": ["x"]}}'], "u1") is None
 
     def test_unparseable_payload_is_not_sent(self) -> None:
-        assert proactive._qq_push_sent(["not-json"]) is False
+        assert proactive._qq_push_sent(["not-json"], "u1") is None
 
     def test_empty_results_is_not_sent(self) -> None:
-        assert proactive._qq_push_sent([]) is False
+        assert proactive._qq_push_sent([], "u1") is None
 
     def test_latest_result_wins(self) -> None:
-        assert proactive._qq_push_sent(['{"status": "error"}', '{"status": "sent"}']) is True
-        assert proactive._qq_push_sent(['{"status": "sent"}', '{"status": "error"}']) is False
+        assert proactive._qq_push_sent(['{"status": "error"}', self._payload()], "u1") == "实际正文"
+        assert proactive._qq_push_sent([self._payload(), '{"status": "error"}'], "u1") is None
+
+    def test_other_recipient_success_does_not_count_for_owner(self) -> None:
+        # ok=1 但成功的是别人，owner 在 failures：总体不算成功。
+        payload = self._payload(to=["other"], failures=["u1"], ids={"other": "m-other"})
+        assert proactive._qq_push_sent([payload], "u1") is None
+
+    def test_owner_missing_from_success_targets_is_not_sent(self) -> None:
+        payload = self._payload(to=["other"], ids={"other": "m-other"})
+        assert proactive._qq_push_sent([payload], "u1") is None
+
+    def test_owner_without_id_entry_is_not_sent(self) -> None:
+        payload = self._payload(ids={})
+        assert proactive._qq_push_sent([payload], "u1") is None
+
+    def test_empty_provider_id_still_confirmed(self) -> None:
+        # 平台可能不返回 id：只要 ids 里有 owner 这个键，仍算明确成功。
+        payload = self._payload(ids={"u1": ""})
+        assert proactive._qq_push_sent([payload], "u1") == "实际正文"
+
+    def test_missing_actual_message_is_not_sent(self) -> None:
+        payload = self._payload()
+        parsed = json.loads(payload)
+        parsed.pop("actual_message")
+        assert proactive._qq_push_sent([json.dumps(parsed)], "u1") is None
 
 
 # ---------- M3: failure retry cap ----------
@@ -668,7 +713,11 @@ class TestFailureCap:
 
         def fake_headless(job: Job, cfg: Config, prompt: str, max_turns: int, active_card: str | None = None) -> tuple:
             called.append(prompt)
-            return ("CURRENT_TASK_DONE", "ok", ['{"status": "sent"}'])
+            return (
+                "CURRENT_TASK_DONE",
+                "ok",
+                ['{"status": "sent", "to": ["u1"], "failures": [], "ids": {"u1": "m1"}, "actual_message": "ok"}'],
+            )
 
         monkeypatch.setattr(proactive, "_headless_run", fake_headless)
         job = Job(name="proactive-morning", schedule="every 1h", prompt="早安", type="proactive")
@@ -687,7 +736,11 @@ class TestFailureCap:
         monkeypatch.setattr(
             proactive,
             "_headless_run",
-            lambda job, cfg, prompt, max_turns, active_card=None: ("CURRENT_TASK_DONE", "ok", ['{"status": "sent"}']),
+            lambda job, cfg, prompt, max_turns, active_card=None: (
+                "CURRENT_TASK_DONE",
+                "ok",
+                ['{"status": "sent", "to": ["u1"], "failures": [], "ids": {"u1": "m1"}, "actual_message": "ok"}'],
+            ),
         )
         job = Job(name="proactive-morning", schedule="every 1h", prompt="早安", type="proactive")
         result = proactive.run_proactive_job(job, cfg=cfg, clock=lambda: _dt(2026, 8, 27, 7, 30))
@@ -736,7 +789,22 @@ class TestOwnerPersona:
 
         def fake(job: Job, cfg_: Config, prompt: str, max_turns: int, active_card: str | None = None) -> tuple:
             seen.update(prompt=prompt, active_card=active_card)
-            return ("CURRENT_TASK_DONE", "早", ['{"status": "sent", "ok": 1}'])
+            return (
+                "CURRENT_TASK_DONE",
+                "早",
+                [
+                    json.dumps(
+                        {
+                            "status": "sent",
+                            "ok": len(users),
+                            "to": users,
+                            "failures": [],
+                            "ids": {user: f"m-{user}" for user in users},
+                            "actual_message": "早",
+                        }
+                    )
+                ],
+            )
 
         monkeypatch.setattr(proactive, "_headless_run", fake)
         job = Job(name="proactive-morning", schedule="every 1h", prompt="早安", type="proactive")

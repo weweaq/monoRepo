@@ -186,7 +186,7 @@ class TestWriteBackProactive:
 def _sent_headless(captured: list[str]) -> object:
     def fake(job: Job, cfg: Config, prompt: str, max_turns: int, active_card: str | None = None) -> tuple:
         captured.append(prompt)
-        return ("CURRENT_TASK_DONE", "早呀船长", ['{"status": "sent", "ok": 1}'])
+        return ("CURRENT_TASK_DONE", "早呀船长", ['{"status": "sent", "ok": 1, "to": ["u1"], "failures": [], "ids": {"u1": "m1"}, "actual_message": "早呀船长"}'])
 
     return fake
 

@@ -59,7 +59,15 @@ def test_questions_scene_push_marks_asks(tmp_path, monkeypatch):
 
     def fake_headless(job, cfg_, prompt, max_turns, active_card=None):
         captured["prompt"] = prompt
-        return "END", "转述完成", [json.dumps({"status": "sent", "to": ["u1"]})]
+        return "END", "转述完成", [json.dumps(
+                {
+                    "status": "sent",
+                    "to": ["u1"],
+                    "failures": [],
+                    "ids": {"u1": "m1"},
+                    "actual_message": "转述完成",
+                }
+            )]
 
     monkeypatch.setattr("gacore.proactive._headless_run", fake_headless)
     monkeypatch.setattr("gacore.proactive._write_back_proactive", lambda *a, **k: False)
@@ -84,7 +92,15 @@ def test_questions_scene_pushes_at_most_three_per_message(tmp_path, monkeypatch)
 
     def fake_headless(job, cfg_, prompt, max_turns, active_card=None):
         captured["prompt"] = prompt
-        return "END", "转述完成", [json.dumps({"status": "sent", "to": ["u1"]})]
+        return "END", "转述完成", [json.dumps(
+                {
+                    "status": "sent",
+                    "to": ["u1"],
+                    "failures": [],
+                    "ids": {"u1": "m1"},
+                    "actual_message": "转述完成",
+                }
+            )]
 
     monkeypatch.setattr("gacore.proactive._headless_run", fake_headless)
     monkeypatch.setattr("gacore.proactive._write_back_proactive", lambda *a, **k: False)
@@ -105,7 +121,15 @@ def test_questions_scene_archives_before_push_so_last_ask_is_answerable(tmp_path
     monkeypatch.setattr("gacore.proactive._target_users", lambda job: ["u1"])
 
     def fake_headless(job, cfg_, prompt, max_turns, active_card=None):
-        return "END", "转述完成", [json.dumps({"status": "sent", "to": ["u1"]})]
+        return "END", "转述完成", [json.dumps(
+                {
+                    "status": "sent",
+                    "to": ["u1"],
+                    "failures": [],
+                    "ids": {"u1": "m1"},
+                    "actual_message": "转述完成",
+                }
+            )]
 
     monkeypatch.setattr("gacore.proactive._headless_run", fake_headless)
     monkeypatch.setattr("gacore.proactive._write_back_proactive", lambda *a, **k: False)
