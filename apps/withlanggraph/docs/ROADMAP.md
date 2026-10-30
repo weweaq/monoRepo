@@ -6176,3 +6176,39 @@ V1 稳定性缺口里，1/2/3/4/5/6/7 也在同一批未提交改动里。
 - [x] V2 全部 7 个 Step 落地
 - [ ] 观察期：从 2026-10-30 首篇日记起两周，关注主动消息模板感/打扰率/沉默比例/成本
 - [ ] 把受控主动循环接进 scheduler（当前为库 + sender seam，未替换 08:30 job）
+
+## 2026-10-30 · Companion 影子模式（V2 收尾，接进 scheduler 但不发送）
+
+**背景**：新受控循环已实现但无生产调用方。直接替换线上唯一主动通道风险高、且当前输入数据
+（关系/Mood/承诺/目标）几乎全空，无法判断好坏。先以**影子模式**并排跑：只写日志，绝不发送。
+
+**已完成**：
+
+- `companion/outreach.py`：新增 `build_gate_input()`（从存储推导窗口/配额/间隔/热聊/
+  无回复连续数/活动状态）、`shadow_decision()`（只读排练）、`log_shadow_decision()`
+  （异常吞掉、结构化日志）。
+- `scheduler.py`：`type=proactive` 分支在 `proactive_due` 通过后、提交旧 job 前调用
+  `_log_outreach_shadow()`；`COMPANION_SHADOW_OUTREACH=0` 可关；companion 未启用直接跳过。
+- 测试：`TestShadowMode`（4 例）+ `TestOutreachShadow`（3 例）。
+- R5 三处同步：本文件 + tech §9.2.16 + 架构图 `SC → OUTREACH` 影子边。
+
+**实测验证**：
+
+- `uv run pytest apps/withlanggraph/tests/test_companion_outreach.py
+  apps/withlanggraph/tests/test_scheduler.py -q` → **116 passed**
+- 全仓 → **2235 passed, 4 skipped**；ruff 全绿；mermaid 校验 ALL PASS
+- 手工触发一次 `_log_outreach_shadow()`：日志出现 `outreach shadow decision
+  action=STAY_SILENT reason=NO_CANDIDATE llm_calls=0`，未产生任何事件
+
+**偏差说明**：
+
+- 影子模式用的是**真实 Decision LLM**（不是假 runner），否则对比没有意义；成本被"有候选才调"
+  天然限制，当前实际为 0。
+- 影子只在旧 job 到点那一刻跑一次，不跟随 30 秒轮询，避免重复调用与日志噪音。
+- 还没有"影子结果 vs 旧结果"的自动对比报表：先把数据攒起来，人工看日志即可，避免过早做报表。
+
+**待办更新**：
+
+- [x] 影子模式接进 scheduler（不发送）
+- [ ] 观察 3–5 天影子日志，决定"叠加闸门"还是"直接替换"
+- [ ] 真实两周观察期（从 2026-10-30 首篇日记起算）

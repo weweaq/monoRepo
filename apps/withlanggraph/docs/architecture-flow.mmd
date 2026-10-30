@@ -310,3 +310,6 @@ flowchart TD
     class LIFE state
     class TRUST bnd
     class CLICMD out
+
+    %% V2 收尾：影子模式（2026-10-30）
+    SC -. "proactive 到点前先跑一次 decide()<br/>只写 outreach shadow decision 日志<br/>绝不发送 · COMPANION_SHADOW_OUTREACH=0 可关" .-> OUTREACH

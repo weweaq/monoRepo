@@ -1283,6 +1283,39 @@ TELL_ONLY 截断、STAY_SILENT 不发、SYSTEM_FAILURE 不写叙事、未批准�
 owner 轮注入 / 非 owner 不注入、信任包装与 system prompt 洁净、10 个 CLI 子命令的行为
 （含 rebuild 的 dry-run 与 --apply 差异）。
 
+### 9.2.16 Companion 影子模式（2026-10-30，V2 收尾）
+
+> 目的：在新循环接管之前，让它与旧的 08:30 主动 job **并排跑一遍**，只写日志比较两者，
+> 零线上影响、几乎零成本。
+
+**接法**：`scheduler.run_loop()` 的 `type=proactive` 分支，在 `proactive_due` 通过之后、
+`PROACTIVE_POOL.submit(run_proactive_job, ...)` 之前插入一行 `_log_outreach_shadow(cfg, job)`。
+旧 job 完全照旧执行，影子只多一条日志。
+
+**影子怎么跑**：`outreach.shadow_decision()` = `build_gate_input()`（纯读库）+ `decide()`：
+
+- `build_gate_input()` 从 `companion_event` 推 `last_owner_message_ms` / `last_outreach_ms` /
+  `daily_count`（近 24h 出站条数），从 `companion_outreach_feedback` 数连续
+  `no_response`，从 `companion_activity` 看是否有进行中活动；
+- `decide()` 本身对存储零写入（无候选 0 次模型、gate 拦下 0 次模型），所以影子是
+  **只读排练**；
+- 日志一行 `outreach shadow decision`：`action` / `reason` / `candidates` /
+  `message_chars` / `goal_id` / `llm_calls` / `job`。
+
+**成本**：只有"有候选 ∧ gate 通过"时才会调一次 Decision LLM；当前候选来源（open thread /
+到期承诺 / 担心情绪 / 待批目标）大多为空，所以实际约等于 0 次调用。一天最多一次（08:30）。
+
+**开关**：`COMPANION_SHADOW_OUTREACH=0` 关闭；companion 未启用时直接跳过；
+任何异常都被吞掉并记 `outreach shadow setup failed`，**绝不影响**旧 job。
+
+**为什么先影子**：新循环的输入（关系/Mood/承诺/目标/话题）目前几乎全空，此刻直接接管
+无法判断好坏；影子跑几天后，用"新循环会说什么"对比"旧 job 实际发了什么"，再决定
+走"叠加闸门"还是"直接替换"。
+
+**测试**：`test_companion_outreach.py::TestShadowMode`（4 例：无候选 0 次调用、gate 用真实
+存储状态判定 USER_BUSY、影子不写事件、日志异常不抛出）+
+`test_scheduler.py::TestOutreachShadow`（3 例：env 关闭、companion 未启用短路、异常吞掉）。
+
 ### 9.3 测试
 
 `tests/test_character.py`(7)、`tests/test_character_system_prompt.py`(4)、`tests/test_qq.py` `/角色` 相关 3 条、
