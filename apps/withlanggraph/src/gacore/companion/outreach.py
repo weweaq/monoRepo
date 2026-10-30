@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
+import traceback
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from typing import Final
@@ -564,3 +566,119 @@ def _now(now_ms: int | None) -> int:
     if now_ms is not None:
         return int(now_ms)
     return int(datetime.now(_TZ).timestamp() * 1000)
+
+# ---------------------------------------------------------------- shadow mode
+
+
+_OWNER_KINDS: Final = frozenset({"user.message.received"})
+_OUTBOUND_KINDS: Final = frozenset(
+    {"proactive.message.sent", "agent.message.sent"}
+)
+
+
+def build_gate_input(
+    store: CompanionStore,
+    actor_id: str,
+    principal_id: str,
+    *,
+    now_ms: int,
+    max_daily: int = 3,
+    min_gap_ms: int = MIN_OUTREACH_GAP_MS,
+    window_ms: int = REPLY_WINDOW_MS,
+) -> GateInput:
+    """Derive the gate inputs from stored state (no model, no side effects)."""
+    events = store.events_for_actor(actor_id, principal_id)
+    last_owner = next(
+        (event.occurred_at_ms for event in reversed(events) if event.kind in _OWNER_KINDS),
+        None,
+    )
+    outbound = [event for event in events if event.kind in _OUTBOUND_KINDS]
+    last_outreach = outbound[-1].occurred_at_ms if outbound else None
+    day_start = now_ms - 24 * 60 * 60 * 1000
+    daily_count = sum(1 for event in outbound if event.occurred_at_ms >= day_start)
+    streak = 0
+    for row in reversed(store.outreach_rows(actor_id, principal_id)):
+        sent = next(
+            (event.occurred_at_ms for event in events if event.event_id == row.sent_event_id),
+            None,
+        )
+        if sent is None or now_ms - sent > window_ms:
+            break
+        if row.kind != "no_response":
+            break
+        streak += 1
+    return GateInput(
+        now_ms=now_ms,
+        daily_count=daily_count,
+        max_daily=max_daily,
+        last_outreach_ms=last_outreach,
+        min_gap_ms=min_gap_ms,
+        no_response_streak=streak,
+        last_owner_message_ms=last_owner,
+        has_running_activity=store.running_activity(actor_id, principal_id) is not None,
+    )
+
+
+def shadow_decision(
+    store: CompanionStore,
+    actor_id: str,
+    principal_id: str,
+    *,
+    now_ms: int | None = None,
+    model: object | None = None,
+    runner: object | None = None,
+) -> Decision:
+    """Run one full tick of the loop against live state, for logging only.
+
+    Nothing is sent, nothing is written: ``decide()`` is pure with respect to storage, so
+    shadow mode is a read-only rehearsal of the new decision layer.
+    """
+    now = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    gate = build_gate_input(store, actor_id, principal_id, now_ms=now)
+    return decide(
+        store,
+        actor_id,
+        principal_id,
+        gate=gate,
+        model=model,
+        runner=runner,
+        now_ms=now,
+    )
+
+
+def log_shadow_decision(
+    store: CompanionStore,
+    actor_id: str,
+    principal_id: str,
+    *,
+    job_name: str,
+    now_ms: int | None = None,
+    model: object | None = None,
+    runner: object | None = None,
+) -> Decision | None:
+    """Shadow-mode entry used by the scheduler: log the decision, never raise, never send."""
+    try:
+        decision = shadow_decision(
+            store,
+            actor_id,
+            principal_id,
+            now_ms=now_ms,
+            model=model,
+            runner=runner,
+        )
+    except Exception:  # noqa: BLE001 — shadow mode must never disturb the real job
+        logger.warning(
+            "outreach shadow decision failed", job=job_name, stack_trace=traceback.format_exc()
+        )
+        return None
+    logger.info(
+        "outreach shadow decision",
+        job=job_name,
+        action=decision.action,
+        reason=decision.reason,
+        candidates=[candidate.kind for candidate in decision.candidates],
+        message_chars=len(decision.message),
+        goal_id=decision.goal_id,
+        llm_calls=decision.llm_calls,
+    )
+    return decision

@@ -1172,3 +1172,45 @@ class TestShippedSchedule:
 
         assert len(jobs) == len(enabled), "every enabled job in schedule.json must parse"
         assert "companion-journal" in {job.name for job in jobs}
+
+class TestOutreachShadow:
+    """V2 收尾：影子模式只写日志，绝不发送。"""
+
+    def test_disabled_by_env(self, monkeypatch) -> None:
+        from gacore import scheduler
+
+        monkeypatch.setenv("COMPANION_SHADOW_OUTREACH", "0")
+        assert scheduler._shadow_outreach_enabled() is False
+
+    def test_inactive_companion_short_circuits(self, monkeypatch, tmp_path) -> None:
+        from gacore import scheduler
+
+        monkeypatch.delenv("COMPANION_SHADOW_OUTREACH", raising=False)
+        sent: list[str] = []
+
+        class _Inactive:
+            active = False
+            owner_openid = ""
+
+        monkeypatch.setattr(
+            "gacore.companion.config.load_companion_config", lambda _cfg: _Inactive()
+        )
+        scheduler._log_outreach_shadow(
+            type("Cfg", (), {})(), type("Job", (), {"name": "daily-questions"})()
+        )
+        assert sent == []
+
+    def test_failure_is_swallowed(self, monkeypatch) -> None:
+        from gacore import scheduler
+
+        monkeypatch.delenv("COMPANION_SHADOW_OUTREACH", raising=False)
+
+        def boom(_cfg):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr("gacore.companion.config.load_companion_config", boom)
+
+        # Must not raise: the real proactive job still has to run.
+        scheduler._log_outreach_shadow(
+            type("Cfg", (), {})(), type("Job", (), {"name": "daily-questions"})()
+        )

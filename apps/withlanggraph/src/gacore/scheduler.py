@@ -205,6 +205,49 @@ def _to_int(value: object, default: int = 0) -> int:
         return default
 
 
+def _shadow_outreach_enabled() -> bool:
+    """Shadow mode is on by default; ``COMPANION_SHADOW_OUTREACH=0`` mutes it."""
+    import os
+
+    return os.environ.get("COMPANION_SHADOW_OUTREACH", "1").strip() not in {
+        "0",
+        "false",
+        "False",
+        "off",
+    }
+
+
+def _log_outreach_shadow(cfg: Config, job: Job) -> None:
+    """Log what the V2 decision layer would do for this proactive tick (never sends).
+
+    Purely observational: the function writes one log line and returns. Any failure is
+    swallowed so the existing proactive job always runs exactly as before.
+    """
+    if not _shadow_outreach_enabled():
+        return
+    try:
+        from gacore.companion.config import load_companion_config
+        from gacore.companion.identity import DEFAULT_ACTOR_ID, ActiveCardRepository
+        from gacore.companion.outreach import log_shadow_decision
+        from gacore.companion.store import CompanionStore
+
+        companion = load_companion_config(cfg)
+        if not companion.active:
+            return
+        actor_id = ActiveCardRepository().get(companion.owner_openid) or DEFAULT_ACTOR_ID
+        log_shadow_decision(
+            CompanionStore.from_config(cfg),
+            actor_id,
+            "owner",
+            job_name=job.name,
+        )
+    except Exception:  # noqa: BLE001 — shadow mode must never disturb the real job
+        import traceback
+
+        logger.warning(
+            "outreach shadow setup failed", job=job.name, stack_trace=traceback.format_exc()
+        )
+
 def _log_proactive_failure(fut: object) -> None:
     """Log a top-level exception from a proactive worker (L1: never swallow)."""
     exc = fut.exception() if hasattr(fut, "exception") else None  # type: ignore[attr-defined]
@@ -1622,6 +1665,10 @@ def run_loop(
                             now=now.isoformat(timespec="seconds"),
                         )
                         continue
+                    # Shadow mode (V2 收尾): rehearse the new decision layer and log what it
+                    # would do. It never sends and never raises; the real job below remains
+                    # the only path that can reach the owner.
+                    _log_outreach_shadow(resolved_cfg, job)
                     future = PROACTIVE_POOL.submit(run_proactive_job, job, resolved_cfg)
                     if future is None:
                         logger.warning(

@@ -9,6 +9,9 @@ import pytest
 
 from gacore.companion.outreach import (
     MAX_MESSAGE_CHARS,
+    build_gate_input,
+    log_shadow_decision,
+    shadow_decision,
     GateInput,
     classify_reply,
     collect_candidates,
@@ -373,3 +376,68 @@ class TestOutreachFeedback:
         assert classify_reply("好的呀") == "positive"
         assert classify_reply("别问了") == "boundary"
         assert classify_reply("不用了谢谢") == "negative"
+
+class TestShadowMode:
+    def test_no_candidates_means_no_model_call(self, tmp_path: Path) -> None:
+        store = _store(tmp_path)
+        called: list[int] = []
+
+        decision = shadow_decision(
+            store,
+            "linwan",
+            "owner",
+            now_ms=_ms(_DAY, 9),
+            runner=lambda _c: called.append(1),
+        )
+
+        assert decision.action == "STAY_SILENT"
+        assert decision.reason == "NO_CANDIDATE"
+        assert decision.llm_calls == 0 and called == []
+
+    def test_gate_reflects_stored_state(self, tmp_path: Path) -> None:
+        store = _store(tmp_path)
+        _event(store, "u-recent", summary="在吗", at_ms=_ms(_DAY, 9) - 60_000)
+        _open_thread(store, "t1")
+
+        gate = build_gate_input(store, "linwan", "owner", now_ms=_ms(_DAY, 9))
+
+        # the open-thread helper itself wrote a user event at 09:00, which is the latest one
+        assert gate.last_owner_message_ms == _ms(_DAY, 9)
+        decision = shadow_decision(
+            store,
+            "linwan",
+            "owner",
+            now_ms=_ms(_DAY, 9),
+            runner=lambda _c: {"action": "TELL_ONLY", "message": "hi"},
+        )
+        assert decision.action == "STAY_SILENT" and decision.reason == "USER_BUSY"
+
+    def test_shadow_writes_no_events(self, tmp_path: Path) -> None:
+        store = _store(tmp_path)
+        _open_thread(store, "t1")
+        _event(store, "u-old", summary="早", at_ms=_ms(_DAY, 8))
+        before = len(store.events_for_actor("linwan", "owner"))
+
+        shadow_decision(
+            store,
+            "linwan",
+            "owner",
+            now_ms=_ms(_DAY, 15),
+            runner=lambda _c: {"action": "TELL_ONLY", "message": "想问问你"},
+        )
+
+        assert len(store.events_for_actor("linwan", "owner")) == before
+
+    def test_shadow_logging_never_raises(self, tmp_path: Path, monkeypatch) -> None:
+        import gacore.companion.outreach as module
+
+        store = _store(tmp_path)
+
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("boom")
+
+        monkeypatch.setattr(module, "shadow_decision", boom)
+
+        assert (
+            log_shadow_decision(store, "linwan", "owner", job_name="daily-questions") is None
+        )
