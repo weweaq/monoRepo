@@ -1,12 +1,14 @@
-"""Minimal Companion V1 SQLite store: events, reflections, sources, cursor.
+"""Companion SQLite store: events, reflections, journals, sources, cursor.
 
-Design: ``docs/companion-self-memory-mvp.md`` §5. The store is the single fact
-source for what the character really received and really said. V1 deliberately
-has no outbox, no episode projection, and no cross-actor visibility.
+Design: ``docs/companion-self-memory-mvp.md`` §5 and
+``docs/companion-self-memory-v2-plan.md`` §4.1. The store is the single fact
+source for what the character really received and really said; journals are a
+readable projection of those facts, never a second source.
 
-Every connection enables ``foreign_keys``, WAL and a busy timeout. Schema
-creation runs in one ``BEGIN IMMEDIATE`` transaction and stamps
-``PRAGMA user_version = 1`` only after every statement succeeded.
+Every connection enables ``foreign_keys``, WAL and a busy timeout. Each schema
+step runs in its own ``BEGIN IMMEDIATE`` transaction and stamps
+``PRAGMA user_version`` only after every statement in that step succeeded, so a
+v1 database upgrades in place without losing events.
 """
 
 from __future__ import annotations
@@ -17,20 +19,27 @@ import uuid
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Final
 
 from gacore.config import Config
 
-SCHEMA_VERSION: Final = 1
+SCHEMA_VERSION: Final = 2
 DEFAULT_BUSY_TIMEOUT_MS: Final = 5000
 
-# Versioned registry: V1 allows the three message events only. A future version
-# extends this dict instead of rebuilding the event table or adding a CHECK.
+# Versioned registry: V1/V2 allow the three message events only. Journal data is a
+# projection of those events, so v2 adds no event kind. A future version extends
+# this dict instead of rebuilding the event table or adding a CHECK.
 EVENT_KINDS: Final[dict[int, frozenset[str]]] = {
     1: frozenset({"user.message.received", "agent.message.sent", "proactive.message.sent"}),
+    2: frozenset({"user.message.received", "agent.message.sent", "proactive.message.sent"}),
 }
 SUPPORTED_EVENT_KINDS: Final = EVENT_KINDS[SCHEMA_VERSION]
+
+JOURNAL_VISIBILITIES: Final = frozenset({"to_owner", "private"})
+# UTC+8 is the product's "today" (R6 timestamps use the same offset).
+_DAY_TZ: Final = timezone(timedelta(hours=8))
 
 
 class CompanionStoreError(Exception):
@@ -87,6 +96,30 @@ class ReflectionDraft:
 
 
 @dataclass(frozen=True, slots=True)
+class JournalRecord:
+    journal_id: str
+    actor_id: str
+    principal_id: str
+    day: str
+    visibility: str
+    body: str
+    prompt_version: str
+    status: str
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class JournalDraft:
+    """One journal entry to persist; sources must all fall inside the journal day."""
+
+    visibility: str
+    body: str
+    source_event_ids: tuple[str, ...] = ()
+    source_reflection_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
 class Cursor:
     actor_id: str
     principal_id: str
@@ -98,6 +131,18 @@ class Cursor:
 
 
 _TIMESTAMP_DEFAULT: Final = "datetime('now','+8 hours')"
+
+
+def day_key(ms: int) -> str:
+    """Product-local (UTC+8) ``YYYY-MM-DD`` for one epoch-millisecond timestamp."""
+    return datetime.fromtimestamp(ms / 1000, tz=_DAY_TZ).date().isoformat()
+
+
+def day_bounds_ms(day: str) -> tuple[int, int]:
+    """Half-open ``[start, end)`` epoch-millisecond bounds of one product-local day."""
+    start = datetime.fromisoformat(day).replace(tzinfo=_DAY_TZ)
+    return int(start.timestamp() * 1000), int((start + timedelta(days=1)).timestamp() * 1000)
+
 
 MIGRATION_V1: Final[tuple[str, ...]] = (
     f"""
@@ -156,6 +201,52 @@ MIGRATION_V1: Final[tuple[str, ...]] = (
     """,
 )
 
+MIGRATION_V2: Final[tuple[str, ...]] = (
+    f"""
+    CREATE TABLE IF NOT EXISTS companion_journal (
+        journal_id       TEXT PRIMARY KEY,
+        actor_id         TEXT NOT NULL,
+        principal_id     TEXT NOT NULL,
+        day              TEXT NOT NULL,
+        visibility       TEXT NOT NULL CHECK (visibility IN ('to_owner', 'private')),
+        body             TEXT NOT NULL,
+        prompt_version   TEXT NOT NULL,
+        status           TEXT NOT NULL CHECK (status IN ('draft', 'final', 'stale')),
+        created_at       TEXT NOT NULL DEFAULT ({_TIMESTAMP_DEFAULT}),
+        updated_at       TEXT NOT NULL DEFAULT ({_TIMESTAMP_DEFAULT}),
+        UNIQUE (actor_id, principal_id, day, visibility)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_companion_journal_actor_day
+    ON companion_journal(actor_id, principal_id, day)
+    """,
+    f"""
+    CREATE TABLE IF NOT EXISTS companion_journal_event_source (
+        journal_id       TEXT NOT NULL REFERENCES companion_journal(journal_id),
+        event_id         TEXT NOT NULL REFERENCES companion_event(event_id),
+        created_at       TEXT NOT NULL DEFAULT ({_TIMESTAMP_DEFAULT}),
+        updated_at       TEXT NOT NULL DEFAULT ({_TIMESTAMP_DEFAULT}),
+        PRIMARY KEY (journal_id, event_id)
+    )
+    """,
+    f"""
+    CREATE TABLE IF NOT EXISTS companion_journal_reflection_source (
+        journal_id       TEXT NOT NULL REFERENCES companion_journal(journal_id),
+        reflection_id    TEXT NOT NULL REFERENCES companion_reflection(reflection_id),
+        created_at       TEXT NOT NULL DEFAULT ({_TIMESTAMP_DEFAULT}),
+        updated_at       TEXT NOT NULL DEFAULT ({_TIMESTAMP_DEFAULT}),
+        PRIMARY KEY (journal_id, reflection_id)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_companion_event_actor_occurred
+    ON companion_event(actor_id, principal_id, occurred_at_ms)
+    """,
+)
+
+MIGRATIONS: Final[dict[int, tuple[str, ...]]] = {1: MIGRATION_V1, 2: MIGRATION_V2}
+
 
 def companion_db_path(cfg: Config) -> Path:
     """Resolve the Companion DB path, defaulting to ``<root>/data/companion.db``."""
@@ -163,16 +254,34 @@ def companion_db_path(cfg: Config) -> Path:
 
 
 def apply_migration(
-    conn: sqlite3.Connection, statements: Sequence[str] = MIGRATION_V1
+    conn: sqlite3.Connection,
+    statements: Sequence[str] | None = None,
+    *,
+    target_version: int | None = None,
 ) -> None:
-    """Create schema v1 atomically; a failure rolls back and leaves user_version untouched."""
-    if int(conn.execute("PRAGMA user_version").fetchone()[0]) >= SCHEMA_VERSION:
+    """Bring the schema up to ``target_version`` (default: current), one atomic step per version.
+
+    ``statements`` overrides the statements of the target step; tests use it to
+    prove a broken step rolls back and leaves ``user_version`` untouched.
+    """
+    target = SCHEMA_VERSION if target_version is None else int(target_version)
+    current = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    if current >= target:
         return
+    if statements is not None:
+        steps = [(target, tuple(statements))]
+    else:
+        steps = [(version, MIGRATIONS[version]) for version in range(current + 1, target + 1)]
+    for version, step in steps:
+        _apply_migration_step(conn, step, version)
+
+
+def _apply_migration_step(conn: sqlite3.Connection, statements: Sequence[str], version: int) -> None:
     try:
         conn.execute("BEGIN IMMEDIATE")
         for statement in statements:
             conn.execute(statement)
-        conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+        conn.execute(f"PRAGMA user_version = {int(version)}")
         conn.execute("COMMIT")
     except BaseException:
         if conn.in_transaction:
@@ -342,6 +451,224 @@ class CompanionStore:
                 (actor_id, principal_id, int(limit)),
             ).fetchall()
         return [_row_to_reflection(row) for row in rows]
+
+    def events_for_day(
+        self, actor_id: str, principal_id: str, day: str
+    ) -> list[CompanionEvent]:
+        """Events of one actor that happened inside one product-local day, oldest first."""
+        start_ms, end_ms = day_bounds_ms(day)
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM companion_event
+                WHERE actor_id = ? AND principal_id = ?
+                  AND occurred_at_ms >= ? AND occurred_at_ms < ?
+                ORDER BY seq ASC
+                """,
+                (actor_id, principal_id, start_ms, end_ms),
+            ).fetchall()
+        return [_row_to_event(row) for row in rows]
+
+    def reflections_for_day(
+        self, actor_id: str, principal_id: str, day: str
+    ) -> list[ReflectionRecord]:
+        """Reflections of one actor written inside one product-local day, oldest first."""
+        next_day = day_key(day_bounds_ms(day)[1])
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM companion_reflection
+                WHERE actor_id = ? AND principal_id = ?
+                  AND created_at >= ? AND created_at < ?
+                ORDER BY created_at ASC, rowid ASC
+                """,
+                (actor_id, principal_id, f"{day} 00:00:00", f"{next_day} 00:00:00"),
+            ).fetchall()
+        return [_row_to_reflection(row) for row in rows]
+
+    def journals_for_day(
+        self, actor_id: str, principal_id: str, day: str
+    ) -> list[JournalRecord]:
+        """Both journals of one actor for one day, ordered ``private`` then ``to_owner``."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM companion_journal
+                WHERE actor_id = ? AND principal_id = ? AND day = ?
+                ORDER BY visibility ASC
+                """,
+                (actor_id, principal_id, day),
+            ).fetchall()
+        return [_row_to_journal(row) for row in rows]
+
+    def journal_sources(
+        self, journal_id: str
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        """``(event_ids, reflection_ids)`` cited by one journal, both ordered."""
+        with self._connect() as conn:
+            event_ids = tuple(
+                row["event_id"]
+                for row in conn.execute(
+                    """
+                    SELECT source.event_id
+                    FROM companion_journal_event_source AS source
+                    JOIN companion_event AS event ON event.event_id = source.event_id
+                    WHERE source.journal_id = ?
+                    ORDER BY event.seq
+                    """,
+                    (journal_id,),
+                )
+            )
+            reflection_ids = tuple(
+                row["reflection_id"]
+                for row in conn.execute(
+                    "SELECT reflection_id FROM companion_journal_reflection_source"
+                    " WHERE journal_id = ? ORDER BY reflection_id",
+                    (journal_id,),
+                )
+            )
+        return event_ids, reflection_ids
+
+    def save_journals(
+        self,
+        *,
+        actor_id: str,
+        principal_id: str,
+        day: str,
+        drafts: Sequence[JournalDraft],
+        prompt_version: str,
+        replace_stale: bool = False,
+    ) -> tuple[str, ...]:
+        """Insert (or rewrite stale) journals and their sources in one transaction.
+
+        Every cited event/reflection must belong to the same ``(actor_id,
+        principal_id)`` and fall inside ``day``; a violation rejects the whole
+        batch before anything is written. An existing non-stale row is left
+        untouched, which makes a repeated same-day run idempotent.
+        """
+        if not drafts:
+            raise ValueError("at least one journal draft is required")
+        _require_non_empty("day", day)
+        _require_non_empty("prompt_version", prompt_version)
+        day_bounds_ms(day)  # fail fast on a malformed day
+        visibilities = [draft.visibility for draft in drafts]
+        if len(set(visibilities)) != len(visibilities):
+            raise ValueError(f"duplicate journal visibility in one batch: {visibilities}")
+        for draft in drafts:
+            if draft.visibility not in JOURNAL_VISIBILITIES:
+                raise ValueError(f"unknown journal visibility {draft.visibility!r}")
+            _require_non_empty("body", draft.body)
+            if not draft.source_event_ids and not draft.source_reflection_ids:
+                raise ValueError(f"journal {draft.visibility!r} must cite at least one source")
+
+        with self._transaction() as conn:
+            _assert_journal_sources_in_day(
+                conn,
+                actor_id=actor_id,
+                principal_id=principal_id,
+                day=day,
+                event_ids={e for draft in drafts for e in draft.source_event_ids},
+                reflection_ids={r for draft in drafts for r in draft.source_reflection_ids},
+            )
+            saved: list[str] = []
+            for draft in drafts:
+                existing = conn.execute(
+                    """
+                    SELECT journal_id, status FROM companion_journal
+                    WHERE actor_id = ? AND principal_id = ? AND day = ? AND visibility = ?
+                    """,
+                    (actor_id, principal_id, day, draft.visibility),
+                ).fetchone()
+                if existing is None:
+                    journal_id = f"jrn_{uuid.uuid4().hex}"
+                    conn.execute(
+                        """
+                        INSERT INTO companion_journal (
+                            journal_id, actor_id, principal_id, day,
+                            visibility, body, prompt_version, status
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'final')
+                        """,
+                        (journal_id, actor_id, principal_id, day, draft.visibility, draft.body, prompt_version),
+                    )
+                    _insert_journal_sources(conn, journal_id, draft)
+                elif replace_stale and existing["status"] == "stale":
+                    journal_id = str(existing["journal_id"])
+                    conn.execute(
+                        f"""
+                        UPDATE companion_journal
+                        SET body = ?, prompt_version = ?, status = 'final',
+                            updated_at = {_TIMESTAMP_DEFAULT}
+                        WHERE journal_id = ?
+                        """,
+                        (draft.body, prompt_version, journal_id),
+                    )
+                    conn.execute(
+                        "DELETE FROM companion_journal_event_source WHERE journal_id = ?",
+                        (journal_id,),
+                    )
+                    conn.execute(
+                        "DELETE FROM companion_journal_reflection_source WHERE journal_id = ?",
+                        (journal_id,),
+                    )
+                    _insert_journal_sources(conn, journal_id, draft)
+                else:
+                    journal_id = str(existing["journal_id"])
+                saved.append(journal_id)
+        return tuple(saved)
+
+    def mark_journal_stale(
+        self, actor_id: str, principal_id: str, day: str, visibility: str
+    ) -> bool:
+        """Flag one journal as stale so the next run may rewrite it; False if it did not exist."""
+        with self._transaction() as conn:
+            cur = conn.execute(
+                f"""
+                UPDATE companion_journal
+                SET status = 'stale', updated_at = {_TIMESTAMP_DEFAULT}
+                WHERE actor_id = ? AND principal_id = ? AND day = ?
+                  AND visibility = ? AND status <> 'stale'
+                """,
+                (actor_id, principal_id, day, visibility),
+            )
+        return cur.rowcount > 0
+
+    def append_reflection(
+        self,
+        *,
+        actor_id: str,
+        principal_id: str,
+        statement: str,
+        confidence: float,
+        source_event_ids: Sequence[str],
+        prompt_version: str,
+    ) -> str:
+        """Insert one reflection + its sources without moving the V1 reflection cursor.
+
+        Used by the journal projector: the journal is not part of the reflection
+        batch, so it must not advance ``last_reflected_seq``.
+        """
+        draft = ReflectionDraft(
+            statement=statement,
+            confidence=float(confidence),
+            source_event_ids=tuple(dict.fromkeys(source_event_ids)),
+        )
+        reflection_id = f"refl_{uuid.uuid4().hex}"
+        with self._transaction() as conn:
+            _assert_sources_owned(conn, actor_id, principal_id, [draft])
+            conn.execute(
+                """
+                INSERT INTO companion_reflection (
+                    reflection_id, actor_id, principal_id, statement, confidence, prompt_version
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (reflection_id, actor_id, principal_id, draft.statement, draft.confidence, prompt_version),
+            )
+            for event_id in draft.source_event_ids:
+                conn.execute(
+                    "INSERT INTO companion_reflection_source (reflection_id, event_id) VALUES (?, ?)",
+                    (reflection_id, event_id),
+                )
+        return reflection_id
 
     def get_cursor(self, actor_id: str, principal_id: str) -> Cursor:
         """Current cursor for one actor; a missing row is an all-zero cursor."""
@@ -546,6 +873,90 @@ def _row_to_reflection(row: sqlite3.Row) -> ReflectionRecord:
         statement=row["statement"],
         confidence=float(row["confidence"]),
         prompt_version=row["prompt_version"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _assert_journal_sources_in_day(
+    conn: sqlite3.Connection,
+    *,
+    actor_id: str,
+    principal_id: str,
+    day: str,
+    event_ids: set[str],
+    reflection_ids: set[str],
+) -> None:
+    """Reject any cited event/reflection that is missing, foreign, or outside ``day``."""
+    if event_ids:
+        placeholders = ",".join("?" for _ in event_ids)
+        rows = conn.execute(
+            f"""
+            SELECT event_id, actor_id, principal_id, occurred_at_ms
+            FROM companion_event WHERE event_id IN ({placeholders})
+            """,
+            tuple(event_ids),
+        ).fetchall()
+        owned = {
+            row["event_id"]
+            for row in rows
+            if row["actor_id"] == actor_id
+            and row["principal_id"] == principal_id
+            and day_key(int(row["occurred_at_ms"])) == day
+        }
+        missing = event_ids - owned
+        if missing:
+            raise SourceOwnershipError(
+                f"journal event sources not owned by ({actor_id!r}, {principal_id!r})"
+                f" on {day}: {sorted(missing)}"
+            )
+    if reflection_ids:
+        placeholders = ",".join("?" for _ in reflection_ids)
+        rows = conn.execute(
+            f"""
+            SELECT reflection_id, actor_id, principal_id, created_at
+            FROM companion_reflection WHERE reflection_id IN ({placeholders})
+            """,
+            tuple(reflection_ids),
+        ).fetchall()
+        owned = {
+            row["reflection_id"]
+            for row in rows
+            if row["actor_id"] == actor_id
+            and row["principal_id"] == principal_id
+            and str(row["created_at"])[:10] == day
+        }
+        missing = reflection_ids - owned
+        if missing:
+            raise SourceOwnershipError(
+                f"journal reflection sources not owned by ({actor_id!r}, {principal_id!r})"
+                f" on {day}: {sorted(missing)}"
+            )
+
+
+def _insert_journal_sources(conn: sqlite3.Connection, journal_id: str, draft: JournalDraft) -> None:
+    for event_id in dict.fromkeys(draft.source_event_ids):
+        conn.execute(
+            "INSERT INTO companion_journal_event_source (journal_id, event_id) VALUES (?, ?)",
+            (journal_id, event_id),
+        )
+    for reflection_id in dict.fromkeys(draft.source_reflection_ids):
+        conn.execute(
+            "INSERT INTO companion_journal_reflection_source (journal_id, reflection_id) VALUES (?, ?)",
+            (journal_id, reflection_id),
+        )
+
+
+def _row_to_journal(row: sqlite3.Row) -> JournalRecord:
+    return JournalRecord(
+        journal_id=row["journal_id"],
+        actor_id=row["actor_id"],
+        principal_id=row["principal_id"],
+        day=row["day"],
+        visibility=row["visibility"],
+        body=row["body"],
+        prompt_version=row["prompt_version"],
+        status=row["status"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )

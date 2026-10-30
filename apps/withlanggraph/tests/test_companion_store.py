@@ -76,7 +76,7 @@ class TestSchema:
 
         conn = sqlite3.connect(str(path))
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 1
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
         finally:
             conn.close()
         assert {

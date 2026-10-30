@@ -10,6 +10,7 @@ Modules land step by step per ``docs/companion-self-memory-v1-plan.md``:
 - ``coordinator`` — single-flight background reflection checks (Step 7)
 - ``context`` — the bounded Self memory block injected into owner C2C prompts (Step 8)
 - ``reply_batch`` — 1-3 semantic segments for owner C2C chat replies (Step 9)
+- ``journal`` — the two daily journals projected from real events (V2-Step 1)
 """
 
 from __future__ import annotations
@@ -37,6 +38,17 @@ from gacore.companion.identity import (
     is_owner,
     owner_active_card,
 )
+from gacore.companion.journal import (
+    JOURNAL_PROMPT_VERSION,
+    PRIVATE_REFLECTION_PROMPT_VERSION,
+    JournalOutcome,
+    JournalPayload,
+    export_day_journals,
+    generate_day_journals,
+    generate_due_journals,
+    run_journal,
+    validate_journal_payload,
+)
 from gacore.companion.reflection import (
     REFLECTION_PROMPT_VERSION,
     ReflectionOutcome,
@@ -58,9 +70,13 @@ __all__ = [
     "ActiveCardRepository",
     "CompanionConfig",
     "DEFAULT_ACTOR_ID",
+    "JOURNAL_PROMPT_VERSION",
+    "JournalOutcome",
+    "JournalPayload",
     "MAX_REPLY_SEGMENTS",
     "MAX_SELF_MEMORY_CHARS",
     "MAX_SELF_MEMORY_REFLECTIONS",
+    "PRIVATE_REFLECTION_PROMPT_VERSION",
     "REFLECTION_PROMPT_VERSION",
     "REPLY_BATCH_VERSION",
     "ReflectionCoordinator",
@@ -71,14 +87,19 @@ __all__ = [
     "actor_id_for",
     "build_self_memory_block",
     "default_active_cards_path",
+    "export_day_journals",
+    "generate_day_journals",
+    "generate_due_journals",
     "is_owner",
     "load_companion_config",
     "minimize_user_message",
     "owner_active_card",
     "plan_final_reply",
     "reflect_due",
+    "run_journal",
     "run_reflection",
     "schedule_reflection_check",
     "shutdown_reflection_coordinator",
+    "validate_journal_payload",
     "validate_reflections",
 ]

@@ -327,6 +327,15 @@ def _contains_sensitive(statement: str) -> bool:
     return bool(_SENSITIVE.search(statement))
 
 
+def is_unsafe_statement(text: str) -> bool:
+    """True when ``text`` carries a credential/path or tries to act like an instruction.
+
+    Shared by the reflection and journal validators: both write text that is later
+    injected as background, so the check happens once at write time.
+    """
+    return _contains_sensitive(text) or bool(_COMMAND_LIKE.search(text))
+
+
 def _default_model() -> object:
     from gacore.llm import get_llm
 
