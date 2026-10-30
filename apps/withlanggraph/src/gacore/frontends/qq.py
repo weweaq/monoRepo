@@ -97,7 +97,10 @@ from langgraph.types import Command
 
 
 from gacore.character import card_name, card_prompt, list_cards
-from gacore.companion.identity import ActiveCardError, ActiveCardRepository
+from gacore.companion.config import load_companion_config
+from gacore.companion.identity import ActiveCardError, ActiveCardRepository, actor_id_for
+from gacore.companion.store import CompanionStore, companion_db_path
+from gacore.companion.summary import minimize_user_message
 from gacore.config import Config, load_dotenv
 from gacore.graph import DEFAULT_RECURSION_LIMIT, build_graph
 from gacore.heartbeat import DEFAULT_INTERVAL_SECONDS, Heartbeat, run_dir
@@ -329,6 +332,20 @@ def _set_user_card(user_id: str, card_id: str | None) -> None:
 # repository instance is the only component allowed to persist the same mapping, so the
 # cache cannot go stale behind our back (revisit if another writer appears).
 _user_card: dict[str, str] = _active_card_repo.snapshot()
+
+
+# Companion stores, one per resolved DB path. Created lazily on the first owner
+# message (the schema migration must not run at import time) and only from the
+# event loop thread, so the dict needs no lock.
+_companion_stores: dict[Path, CompanionStore] = {}
+
+
+def _companion_store(cfg: Config) -> CompanionStore:
+    path = companion_db_path(cfg)
+    store = _companion_stores.get(path)
+    if store is None:
+        store = _companion_stores[path] = CompanionStore.from_config(cfg)
+    return store
 
 
 def _known_users_file() -> Path:
@@ -1000,6 +1017,50 @@ class QQApp:
 
 
 
+    async def _record_companion_ingress(self, user_id: str, msg_id, content: str) -> None:
+
+        """Record one owner C2C text event (Companion V1).
+
+        Called before every business branch, so commands, feedback, QA, trivial and
+        normal agent input all leave a trace. Best-effort by design: any failure is
+        logged and the chat proceeds — memory must never block or break a reply.
+        """
+
+        try:
+
+            companion = load_companion_config()
+
+            actor_id = actor_id_for(user_id, companion, _user_card.get(user_id))
+
+            if actor_id is None:
+
+                return
+
+            store = _companion_store(Config.default())
+
+            await asyncio.to_thread(
+
+                store.append_event,
+
+                kind="user.message.received",
+
+                actor_id=actor_id,
+
+                principal_id="owner",
+
+                source_id=str(msg_id),
+
+                summary=minimize_user_message(content),
+
+                idempotency_key=f"qq-user:{msg_id}",
+
+            )
+
+        except Exception:  # noqa: BLE001 — memory write must never break the chat path
+
+            logger.warning("companion ingress write failed", stack_trace=traceback.format_exc())
+
+
     async def on_message(self, data, is_group: bool = False) -> None:
 
         """Main message handler: dedupe -> auth -> route to command / resume / agent."""
@@ -1077,6 +1138,15 @@ class QQApp:
             if not content:
 
                 return
+
+
+
+            # Companion V1: owner C2C text lands in the fact source before any business
+            # routing (commands / feedback / QA / trivial / agent all count; images and
+            # empty text returned above). Group chats are never recorded.
+            if not is_group:
+
+                await self._record_companion_ingress(user_id, msg_id, content)
 
 
 

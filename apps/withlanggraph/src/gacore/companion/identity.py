@@ -35,6 +35,9 @@ if TYPE_CHECKING:
 
 logger = get_logger("companion.identity")
 
+# Companion actor when the owner has no active character card (design §4.2).
+DEFAULT_ACTOR_ID: Final = "assistant-default"
+
 _ACTIVE_CARDS_FILE: Final = "active_cards.json"
 # Windows 上 os.replace 偶发 PermissionError（杀毒/索引器瞬时占用目标文件），重试几次即可。
 _REPLACE_RETRIES: Final = 5
@@ -220,3 +223,18 @@ def owner_active_card(
     if not is_owner(openid, companion):
         return None
     return repo.get(openid)
+
+
+def actor_id_for(
+    openid: str,
+    companion: CompanionConfig,
+    active_card: str | None,
+) -> str | None:
+    """Companion actor for an owner message; ``None`` means "not the owner, don't record".
+
+    Takes the caller's already-cached card instead of reading the repository, so the
+    actor matches the ``active_card`` the same message hands to the graph.
+    """
+    if not is_owner(openid, companion):
+        return None
+    return (active_card or "").strip() or DEFAULT_ACTOR_ID
