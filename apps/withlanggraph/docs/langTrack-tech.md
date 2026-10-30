@@ -856,6 +856,31 @@ flowchart LR
   （平台 id 可为空串）且 `actual_message` 非空时返回实际正文，否则 `None`。**不以总
   `ok>0` 代替本人成功**；`run_proactive_job` 逐用户传 `uid` 校验。
 
+### 9.2.4 Companion 已确认发送事件（2026-10-30，Step 6）
+
+基于 9.2.3 的回执写入真实 sent event，仍**不触发反思**（Step 7 才接线）。
+
+- 普通最终回复（`_stream_agent` 的 final 分支）：
+  - `send_text()` 的每个 `SendReceipt` 按发送顺序收集，全部交给
+    `QQApp._record_companion_sent(user_id, msg_id, receipts)`。
+  - 只取**按顺序确认成功的前缀段**（`_confirmed_prefix`）：首段未确认即停，后续成功段
+    不能跨过失败段被计入。前缀为空（全部失败 / unknown / 取消）时不写事件，仅记
+    `companion sent event skipped: no confirmed segment`。
+  - `summary = "\n".join(前缀段 actual_text)`；若前缀短于总段数，前缀加
+    `[仅成功发送 N/M 段]` 并记 `companion sent event records a confirmed prefix only`。
+  - `source_id = "qq-sent:" + sha256(provider_id + actual_text …)[:16]`（稳定可重放）。
+  - 幂等键 `qq-agent:<msg_id>`；`msg_id` 缺失时回退 `qq-agent:<source_id>`。
+  - 写失败只 `logger.warning`，不重试、不影响回复。
+- proactive（`run_proactive_job` 确认 `qq_push` 成功后）：
+  - `_qq_push_receipt(qq_results, uid) -> (actual_message, owner_message_id) | None`；
+    `_qq_push_sent` 保留为取其正文的薄包装。
+  - `_record_companion_sent(...)` 写 `proactive.message.sent`，`summary` 用
+    `actual_message`（**绝不使用 `_headless_run()` 的最后 AIMessage**），
+    `source_id` 用 owner 本人的平台消息 id；平台未返回 id 时回退
+    `"proactive-sent:" + sha256(uid + actual_message)[:16]`。
+  - 幂等键 `proactive-sent:<job>:<uid>:<source_id>`；actor 由
+    `actor_id_for(uid, companion, active_card)` 决定，非 owner / 未启用不写。
+
 ### 9.3 测试
 
 `tests/test_character.py`(7)、`tests/test_character_system_prompt.py`(4)、`tests/test_qq.py` `/角色` 相关 3 条、
@@ -863,14 +888,18 @@ flowchart LR
 `tests/test_proactive.py::TestOwnerPersona`(7)；Step 2 验收 89 passed。
 `tests/test_companion_store.py`(17)：migration 幂等 / 失败回滚 / user_version / 每连接 PRAGMA /
 幂等键 / FK / actor 隔离 / 并发独立连接 / reflection-source-cursor 全事务回滚；Step 3 验收 17 passed。
-`tests/test_companion_events.py`(21)：摘要折叠/脱敏/200 字截断、actor 判定、owner 命令与各业务
+`tests/test_companion_events.py`(32)：摘要折叠/脱敏/200 字截断、actor 判定、owner 命令与各业务
 分支各写一次、群聊/非 owner/图片/空文本不写、重复 message ID 幂等、store 异常不阻断聊天；
-Step 4 验收 21 passed。
+Step 4 验收 21 passed。`TestSent`(11) 覆盖 Step 6：确认写一次、部分成功只记确认前缀、
+unknown/全失败/零段不写、多 receipt 顺序合并、同 attempt 重放幂等、缺 msg_id 回退 source
+hash、非 owner 不写、store 异常不抛、最终回复路径真实接线。
 `tests/test_companion_delivery.py`(9)：markdown 成功 / 明确失败降级 plain / timeout 不降级 /
 全失败 / 多段部分成功 / 平台 id 为空仍确认 / 无 client / chat log 仅记确认段；Step 5 验收 9 passed。
 `tests/test_proactive.py` 的 `TestQqPushSent` 扩为严格回执：本人成功返回 `actual_message`、
 别人成功不算、缺 `to`/`ids`/`actual_message` 均不算；各 proactive 端到端 fake 载荷同步补齐
-`to`/`failures`/`ids`/`actual_message`。
+`to`/`failures`/`ids`/`actual_message`。`TestProactiveSent`(5)：`_qq_push_receipt` 返回
+正文 + owner id、别人成功无回执、端到端写 `proactive.message.sent`（正文与 id 一致）、
+推送失败不写、空平台 id 回退 hash 且重放幂等。
 
 ### 9.4 主动推送（openid 落库 + qq_push）
 

@@ -5252,4 +5252,67 @@ event**（Step 6 才依据 `SendReceipt.confirmed` 写 `agent.message.sent`）�
 **待办更新**：
 
 - [x] Step 5 发送回执基础设施（代码 + 测试 + R5 三处同步）
-- [ ] Step 6 已确认发送事件（基于 `SendReceipt.confirmed` 写 `agent.message.sent`）
+- [x] Step 6 已确认发送事件（基于 `SendReceipt.confirmed` 写 `agent.message.sent`）
+
+
+## 2026-10-30 · Companion 自我记忆 V1 Step 6：已确认发送事件
+
+**背景**：按 `docs/companion-self-memory-v1-plan.md` Step 6，把 Step 5 的真实回执落成
+Companion 事实源里的 sent 事件。仍**不触发反思**（Step 7 才接线）。
+
+**已完成**：
+
+- `src/gacore/frontends/qq.py`：
+  - 新增 `_confirmed_prefix(segments)`：只取从首段开始连续确认成功的前缀，后续成功段
+    不能跨过失败段计入。
+  - 新增 `_sent_source_id(segments)`：`"qq-sent:" + sha256(平台 id + 实际正文 …)[:16]`，
+    同一 attempt 重放稳定。
+  - 新增 `QQApp._record_companion_sent(user_id, msg_id, receipts)`：
+    `actor_id_for(...)` 非 owner/未启用直接返回；前缀为空不写事件并记
+    `companion sent event skipped: no confirmed segment`；前缀短于总段数时 summary 前加
+    `[仅成功发送 N/M 段]` 并记 warning；写 `agent.message.sent`、
+    `principal_id="owner"`、幂等键 `qq-agent:<msg_id>`（缺 msg_id 回退
+    `qq-agent:<source_id>`）；异常仅 warning，不重试、不影响回复。
+  - `_stream_agent` final 分支：按发送顺序收集每个 `SendReceipt`，全部交给
+    `_record_companion_sent`；中间进度/ask_user/取消/错误提示仍不写事件。
+- `src/gacore/proactive.py`：
+  - `_qq_push_receipt(qq_results, uid) -> (actual_message, owner_message_id) | None`，
+    原 `_qq_push_sent` 保留为取正文的薄包装（Step 5 测试不变）。
+  - 新增 `_companion_store(cfg)`（按 DB 路径缓存 + 线程锁）与 `_record_companion_sent(...)`：
+    写 `proactive.message.sent`，`summary=actual_message`（**不使用最后 AIMessage**），
+    `source_id` 用 owner 平台消息 id、为空回退 `"proactive-sent:"+sha256(uid+正文)[:16]`，
+    幂等键 `proactive-sent:<job>:<uid>:<source_id>`。
+  - `run_proactive_job` 在 `_mark_sent` / `result["sent"] += 1` 之后调用记录；失败路径
+    （别人成功 / owner 失败）继续走 `push_failed`，不写事件。
+- `tests/test_companion_events.py`：新增 `TestSent`(11) — 确认写一次、部分成功只记确认
+  前缀、unknown 段不入 summary、全失败/零段不写、多 receipt 顺序合并、同 attempt 重放幂等、
+  缺 msg_id 回退 source hash、非 owner 不写、store 异常不抛、`_stream_agent` 最终回复
+  真实接线。
+- `tests/test_proactive.py`：新增 `TestProactiveSent`(5) — `_qq_push_receipt` 返回正文与
+  owner id、别人成功无回执、端到端写 `proactive.message.sent`（正文/`source_id` 一致）、
+  推送失败不写、空平台 id 回退 hash 且重放幂等。
+
+**实测验证**：
+
+- `uv run pytest apps/withlanggraph/tests/test_companion_events.py apps/withlanggraph/tests/test_proactive.py apps/withlanggraph/tests/test_qq.py -q`
+  → **132 passed**（23.28s）
+- `uv run pytest -q`（全仓）→ **1931 passed, 4 skipped**（142.46s）
+- `uv run ruff check apps packages tests` → All checks passed
+- `node apps/mermaid-viewer/tests/check_prompt_logic.js` → ALL PASS（本步只改既有节点文案，
+  未新增/删除行，行号锚点未受影响）
+
+**偏差说明**：
+
+- 计划修改文件列出 `src/gacore/companion/store.py`，实际 `append_event` 已支持三种 kind，
+  无需改表/接口；Step 6 未改 store。
+- 计划测试文件列 `tests/test_proactive.py`，未新增独立文件：普通回复回执测试并入
+  `test_companion_events.py` 的 `TestSent`，避免再建平行文件。
+- 「取消」段天然不进 summary：`asyncio.CancelledError` 分支不调用记录函数；`unknown`
+  段 `confirmed=False`，被前缀规则排除。
+- 中间进度提示（`思考中...`、`[agent] ->`、`[tools] <-`、ask_user 问题）不写 sent 事件，
+  只有最终回复的确认前缀落库。
+
+**待办更新**：
+
+- [x] Step 6 已确认发送事件（代码 + 测试 + R5 三处同步）
+- [ ] Step 7 Evidence-Bound Reflection（至少 3 条新事件生成 0–2 条带来源反思）
