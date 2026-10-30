@@ -26,7 +26,7 @@ from typing import Final
 
 from gacore.config import Config
 
-SCHEMA_VERSION: Final = 6
+SCHEMA_VERSION: Final = 7
 DEFAULT_BUSY_TIMEOUT_MS: Final = 5000
 
 # Versioned registry: V1/V2 allow the three message events only. Journal data is a
@@ -51,6 +51,17 @@ _EVENT_KINDS_V6: Final = _EVENT_KINDS_V1 | frozenset(
         "commitment.cancelled",
     }
 )
+# v7 adds the activity lifecycle, so "paused/completed" is evidence, not just a column.
+_EVENT_KINDS_V7: Final = _EVENT_KINDS_V6 | frozenset(
+    {
+        "activity.started",
+        "activity.paused",
+        "activity.resumed",
+        "activity.completed",
+        "activity.failed",
+        "activity.cancelled",
+    }
+)
 EVENT_KINDS: Final[dict[int, frozenset[str]]] = {
     1: _EVENT_KINDS_V1,
     2: _EVENT_KINDS_V1,
@@ -58,6 +69,7 @@ EVENT_KINDS: Final[dict[int, frozenset[str]]] = {
     4: _EVENT_KINDS_V1,
     5: _EVENT_KINDS_V1,
     6: _EVENT_KINDS_V6,
+    7: _EVENT_KINDS_V7,
 }
 SUPPORTED_EVENT_KINDS: Final = EVENT_KINDS[SCHEMA_VERSION]
 
@@ -72,6 +84,15 @@ COMMITMENT_STATUSES: Final = frozenset(
     {"proposed", "active", "overdue", "succeeded", "failed", "cancelled"}
 )
 COMMITMENT_OPEN_STATUSES: Final = frozenset({"proposed", "active", "overdue"})
+
+# Activity / outreach vocabulary (V2-Step 6).
+ACTIVITY_STATUSES: Final = frozenset(
+    {"planned", "active", "paused", "completed", "failed", "cancelled"}
+)
+ACTIVITY_TERMINAL_STATUSES: Final = frozenset({"completed", "failed", "cancelled"})
+OUTREACH_KINDS: Final = frozenset(
+    {"positive", "negative", "boundary", "topic_shift", "no_response"}
+)
 
 # Goal lifecycle (V2-Step 5). One goal at a time may be in_progress (partial unique
 # index); execution is restricted to the read-only tool whitelist below.
@@ -253,6 +274,57 @@ class Commitment:
     success_criteria: str
     status: str
     result_event_id: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class Activity:
+    """One bounded, pausable piece of work the character is doing."""
+
+    activity_id: str
+    actor_id: str
+    principal_id: str
+    kind: str
+    status: str
+    started_at_ms: int | None
+    resume_after_ms: int | None
+    source_goal_id: str | None
+    last_result_event_id: str | None
+    budget: dict[str, object]
+    spent: dict[str, object]
+    reason: str | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class SelfPreference:
+    """The character's own taste for a topic: decays, can invert, never touches persona."""
+
+    actor_id: str
+    principal_id: str
+    topic: str
+    weight: float
+    novelty: float
+    fatigue: float
+    source_event_ids: tuple[str, ...]
+    expires_at_ms: int | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class OutreachFeedback:
+    """What happened after one proactive/agent outreach — linked to its sent event."""
+
+    outreach_id: str
+    actor_id: str
+    principal_id: str
+    sent_event_id: str
+    reply_event_id: str | None
+    kind: str
+    response_delay_ms: int | None
     created_at: str
     updated_at: str
 
@@ -569,6 +641,79 @@ MIGRATION_V6: Final[tuple[str, ...]] = (
     """,
 )
 
+MIGRATION_V7: Final[tuple[str, ...]] = (
+    f"""
+    CREATE TABLE IF NOT EXISTS companion_activity (
+        activity_id          TEXT PRIMARY KEY,
+        actor_id             TEXT NOT NULL,
+        principal_id         TEXT NOT NULL,
+        kind                 TEXT NOT NULL,
+        status               TEXT NOT NULL CHECK (status IN (
+                               'planned', 'active', 'paused',
+                               'completed', 'failed', 'cancelled'
+                             )),
+        started_at_ms        INTEGER,
+        resume_after_ms      INTEGER,
+        source_goal_id       TEXT REFERENCES companion_goal(goal_id),
+        last_result_event_id TEXT REFERENCES companion_event(event_id),
+        budget_json          TEXT NOT NULL DEFAULT '{{}}'
+                               CHECK (json_valid(budget_json)),
+        spent_json           TEXT NOT NULL DEFAULT '{{}}'
+                               CHECK (json_valid(spent_json)),
+        reason               TEXT,
+        created_at           TEXT NOT NULL DEFAULT ({_TIMESTAMP_DEFAULT}),
+        updated_at           TEXT NOT NULL DEFAULT ({_TIMESTAMP_DEFAULT})
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_one_running_activity
+    ON companion_activity(actor_id, principal_id)
+    WHERE status IN ('active', 'paused')
+    """,
+    f"""
+    CREATE TABLE IF NOT EXISTS companion_self_preference (
+        actor_id              TEXT NOT NULL,
+        principal_id          TEXT NOT NULL,
+        topic                 TEXT NOT NULL,
+        weight                REAL NOT NULL CHECK (weight >= -1 AND weight <= 1),
+        novelty               REAL NOT NULL DEFAULT 0.5
+                                CHECK (novelty >= 0 AND novelty <= 1),
+        fatigue               REAL NOT NULL DEFAULT 0
+                                CHECK (fatigue >= 0 AND fatigue <= 1),
+        source_event_ids_json TEXT NOT NULL DEFAULT '[]'
+                                CHECK (json_valid(source_event_ids_json)),
+        expires_at_ms         INTEGER,
+        created_at            TEXT NOT NULL DEFAULT ({_TIMESTAMP_DEFAULT}),
+        updated_at            TEXT NOT NULL DEFAULT ({_TIMESTAMP_DEFAULT}),
+        PRIMARY KEY (actor_id, principal_id, topic)
+    )
+    """,
+    f"""
+    CREATE TABLE IF NOT EXISTS companion_outreach_feedback (
+        outreach_id       TEXT PRIMARY KEY,
+        actor_id          TEXT NOT NULL,
+        principal_id      TEXT NOT NULL,
+        sent_event_id     TEXT NOT NULL REFERENCES companion_event(event_id),
+        reply_event_id    TEXT REFERENCES companion_event(event_id),
+        kind              TEXT NOT NULL CHECK (kind IN (
+                            'positive', 'negative', 'boundary',
+                            'topic_shift', 'no_response'
+                          )),
+        response_delay_ms INTEGER,
+        created_at        TEXT NOT NULL DEFAULT ({_TIMESTAMP_DEFAULT}),
+        updated_at        TEXT NOT NULL DEFAULT ({_TIMESTAMP_DEFAULT})
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_companion_outreach_sent
+    ON companion_outreach_feedback(actor_id, principal_id, sent_event_id)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_companion_outreach_kind
+    ON companion_outreach_feedback(actor_id, principal_id, kind)
+    """,
+)
+
 MIGRATIONS: Final[dict[int, tuple[str, ...]]] = {
     1: MIGRATION_V1,
     2: MIGRATION_V2,
@@ -576,6 +721,7 @@ MIGRATIONS: Final[dict[int, tuple[str, ...]]] = {
     4: MIGRATION_V4,
     5: MIGRATION_V5,
     6: MIGRATION_V6,
+    7: MIGRATION_V7,
 }
 
 
@@ -1838,6 +1984,317 @@ class CompanionStore:
         assert updated is not None  # pragma: no cover
         return _row_to_goal(updated)
 
+    # ----------------------------------------------------------------- activity
+
+    def activities(
+        self, actor_id: str, principal_id: str, *, status: str | None = None
+    ) -> list[Activity]:
+        """Activities of one actor, oldest first; ``status=None`` returns every state."""
+        with self._connect() as conn:
+            if status is None:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM companion_activity
+                    WHERE actor_id = ? AND principal_id = ?
+                    ORDER BY created_at ASC, rowid ASC
+                    """,
+                    (actor_id, principal_id),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM companion_activity
+                    WHERE actor_id = ? AND principal_id = ? AND status = ?
+                    ORDER BY created_at ASC, rowid ASC
+                    """,
+                    (actor_id, principal_id, status),
+                ).fetchall()
+        return [_row_to_activity(row) for row in rows]
+
+    def get_activity(self, activity_id: str) -> Activity | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM companion_activity WHERE activity_id = ?", (activity_id,)
+            ).fetchone()
+        return _row_to_activity(row) if row is not None else None
+
+    def running_activity(self, actor_id: str, principal_id: str) -> Activity | None:
+        """The single active/paused activity (partial unique index guarantees one)."""
+        for status in ("active", "paused"):
+            rows = self.activities(actor_id, principal_id, status=status)
+            if rows:
+                return rows[0]
+        return None
+
+    def add_activity(
+        self,
+        *,
+        actor_id: str,
+        principal_id: str,
+        kind: str,
+        budget: dict[str, object],
+        source_goal_id: str | None = None,
+        started_at_ms: int | None = None,
+    ) -> Activity:
+        """Start one activity; a second running activity is refused by the index."""
+        _require_non_empty("actor_id", actor_id)
+        _require_non_empty("principal_id", principal_id)
+        _require_non_empty("kind", kind)
+        with self._transaction() as conn:
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO companion_activity (
+                        activity_id, actor_id, principal_id, kind, status,
+                        started_at_ms, source_goal_id, budget_json, spent_json
+                    ) VALUES (?, ?, ?, ?, 'active', ?, ?, ?, '{{}}')
+                    """.replace("'{{}}'", "'{}'"),
+                    (
+                        f"act_{uuid.uuid4().hex}",
+                        actor_id,
+                        principal_id,
+                        kind,
+                        started_at_ms,
+                        source_goal_id,
+                        json.dumps(budget, ensure_ascii=False),
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise CompanionStoreError(
+                    "another activity is already running for this actor"
+                ) from exc
+            row = conn.execute(
+                """
+                SELECT * FROM companion_activity
+                WHERE actor_id = ? AND principal_id = ?
+                ORDER BY rowid DESC LIMIT 1
+                """,
+                (actor_id, principal_id),
+            ).fetchone()
+        assert row is not None  # pragma: no cover
+        return _row_to_activity(row)
+
+    def set_activity_status(
+        self,
+        activity_id: str,
+        *,
+        status: str,
+        reason: str | None = None,
+        resume_after_ms: int | None = None,
+        last_result_event_id: str | None = None,
+    ) -> Activity:
+        """Move one activity forward; terminal states are final."""
+        if status not in ACTIVITY_STATUSES:
+            raise ValueError(f"unknown activity status: {status!r}")
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM companion_activity WHERE activity_id = ?", (activity_id,)
+            ).fetchone()
+            if row is None:
+                raise CompanionStoreError(f"unknown activity: {activity_id!r}")
+            if row["status"] in ACTIVITY_TERMINAL_STATUSES:
+                raise CompanionStoreError(
+                    f"activity {activity_id!r} is already {row['status']!r}"
+                )
+            try:
+                conn.execute(
+                    f"""
+                    UPDATE companion_activity
+                    SET status = ?, reason = COALESCE(?, reason),
+                        resume_after_ms = COALESCE(?, resume_after_ms),
+                        last_result_event_id = COALESCE(?, last_result_event_id),
+                        updated_at = {_TIMESTAMP_DEFAULT}
+                    WHERE activity_id = ?
+                    """,
+                    (status, reason, resume_after_ms, last_result_event_id, activity_id),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise CompanionStoreError(
+                    "another activity is already running for this actor"
+                ) from exc
+            updated = conn.execute(
+                "SELECT * FROM companion_activity WHERE activity_id = ?", (activity_id,)
+            ).fetchone()
+        assert updated is not None  # pragma: no cover
+        return _row_to_activity(updated)
+
+    def update_activity_spend(
+        self, activity_id: str, spent: dict[str, object]
+    ) -> Activity:
+        """Persist the running spend counters (called after every bounded step)."""
+        with self._transaction() as conn:
+            conn.execute(
+                f"""
+                UPDATE companion_activity
+                SET spent_json = ?, updated_at = {_TIMESTAMP_DEFAULT}
+                WHERE activity_id = ?
+                """,
+                (json.dumps(spent, ensure_ascii=False), activity_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM companion_activity WHERE activity_id = ?", (activity_id,)
+            ).fetchone()
+        if row is None:
+            raise CompanionStoreError(f"unknown activity: {activity_id!r}")
+        return _row_to_activity(row)
+
+    # ------------------------------------------------------------- preferences
+
+    def preferences(
+        self, actor_id: str, principal_id: str, *, now_ms: int | None = None
+    ) -> list[SelfPreference]:
+        """The character's own topic taste, newest first; expired rows are excluded."""
+        now = int(time.time() * 1000) if now_ms is None else int(now_ms)
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM companion_self_preference
+                WHERE actor_id = ? AND principal_id = ?
+                  AND (expires_at_ms IS NULL OR expires_at_ms > ?)
+                ORDER BY updated_at DESC, rowid DESC
+                """,
+                (actor_id, principal_id, now),
+            ).fetchall()
+        return [_row_to_preference(row) for row in rows]
+
+    def save_preference(
+        self,
+        *,
+        actor_id: str,
+        principal_id: str,
+        topic: str,
+        weight: float,
+        novelty: float,
+        fatigue: float,
+        source_event_ids: Sequence[str],
+        expires_at_ms: int | None = None,
+    ) -> SelfPreference:
+        """Upsert one topic preference (weight -1..1, novelty/fatigue 0..1)."""
+        _require_non_empty("topic", topic)
+        for name, value, low, high in (
+            ("weight", weight, -1.0, 1.0),
+            ("novelty", novelty, 0.0, 1.0),
+            ("fatigue", fatigue, 0.0, 1.0),
+        ):
+            if not low <= float(value) <= high:
+                raise ValueError(f"{name} out of range: {value}")
+        with self._transaction() as conn:
+            conn.execute(
+                f"""
+                INSERT INTO companion_self_preference (
+                    actor_id, principal_id, topic, weight, novelty, fatigue,
+                    source_event_ids_json, expires_at_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(actor_id, principal_id, topic) DO UPDATE SET
+                    weight = excluded.weight,
+                    novelty = excluded.novelty,
+                    fatigue = excluded.fatigue,
+                    source_event_ids_json = excluded.source_event_ids_json,
+                    expires_at_ms = excluded.expires_at_ms,
+                    updated_at = {_TIMESTAMP_DEFAULT}
+                """,
+                (
+                    actor_id,
+                    principal_id,
+                    topic,
+                    float(weight),
+                    float(novelty),
+                    float(fatigue),
+                    json.dumps(list(source_event_ids), ensure_ascii=False),
+                    expires_at_ms,
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT * FROM companion_self_preference
+                WHERE actor_id = ? AND principal_id = ? AND topic = ?
+                """,
+                (actor_id, principal_id, topic),
+            ).fetchone()
+        assert row is not None  # pragma: no cover
+        return _row_to_preference(row)
+
+    # ---------------------------------------------------------------- outreach
+
+    def record_outreach(
+        self, *, actor_id: str, principal_id: str, sent_event_id: str
+    ) -> OutreachFeedback:
+        """Create the unanswered outreach row for one confirmed send."""
+        _require_non_empty("sent_event_id", sent_event_id)
+        with self._transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO companion_outreach_feedback (
+                    outreach_id, actor_id, principal_id, sent_event_id, kind
+                ) VALUES (?, ?, ?, ?, 'no_response')
+                ON CONFLICT(actor_id, principal_id, sent_event_id) DO NOTHING
+                """,
+                (f"out_{uuid.uuid4().hex}", actor_id, principal_id, sent_event_id),
+            )
+            row = conn.execute(
+                """
+                SELECT * FROM companion_outreach_feedback
+                WHERE actor_id = ? AND principal_id = ? AND sent_event_id = ?
+                """,
+                (actor_id, principal_id, sent_event_id),
+            ).fetchone()
+        assert row is not None  # pragma: no cover
+        return _row_to_outreach(row)
+
+    def outreach_rows(
+        self, actor_id: str, principal_id: str, *, kind: str | None = None
+    ) -> list[OutreachFeedback]:
+        """Outreach feedback rows, oldest first, optionally filtered by kind."""
+        with self._connect() as conn:
+            if kind is None:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM companion_outreach_feedback
+                    WHERE actor_id = ? AND principal_id = ?
+                    ORDER BY created_at ASC, rowid ASC
+                    """,
+                    (actor_id, principal_id),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM companion_outreach_feedback
+                    WHERE actor_id = ? AND principal_id = ? AND kind = ?
+                    ORDER BY created_at ASC, rowid ASC
+                    """,
+                    (actor_id, principal_id, kind),
+                ).fetchall()
+        return [_row_to_outreach(row) for row in rows]
+
+    def set_outreach_reply(
+        self,
+        outreach_id: str,
+        *,
+        kind: str,
+        reply_event_id: str | None,
+        response_delay_ms: int | None,
+    ) -> OutreachFeedback:
+        """Attach the owner's reply (or ``no_response``) to one outreach row."""
+        if kind not in OUTREACH_KINDS:
+            raise ValueError(f"unknown outreach kind: {kind!r}")
+        with self._transaction() as conn:
+            conn.execute(
+                f"""
+                UPDATE companion_outreach_feedback
+                SET kind = ?, reply_event_id = ?, response_delay_ms = ?,
+                    updated_at = {_TIMESTAMP_DEFAULT}
+                WHERE outreach_id = ?
+                """,
+                (kind, reply_event_id, response_delay_ms, outreach_id),
+            )
+            row = conn.execute(
+                "SELECT * FROM companion_outreach_feedback WHERE outreach_id = ?",
+                (outreach_id,),
+            ).fetchone()
+        if row is None:
+            raise CompanionStoreError(f"unknown outreach: {outreach_id!r}")
+        return _row_to_outreach(row)
+
 def _assert_sources_owned(
     conn: sqlite3.Connection,
     actor_id: str,
@@ -2062,6 +2519,70 @@ def _row_to_goal(row: sqlite3.Row) -> Goal:
         allowed_tools=tools,
         deadline_ms=int(row["deadline_ms"]),
         result_event_id=row["result_event_id"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _row_to_activity(row: sqlite3.Row) -> Activity:
+    try:
+        budget = json.loads(row["budget_json"] or "{}")
+    except ValueError:  # pragma: no cover
+        budget = {}
+    try:
+        spent = json.loads(row["spent_json"] or "{}")
+    except ValueError:  # pragma: no cover
+        spent = {}
+    return Activity(
+        activity_id=row["activity_id"],
+        actor_id=row["actor_id"],
+        principal_id=row["principal_id"],
+        kind=row["kind"],
+        status=row["status"],
+        started_at_ms=None if row["started_at_ms"] is None else int(row["started_at_ms"]),
+        resume_after_ms=(
+            None if row["resume_after_ms"] is None else int(row["resume_after_ms"])
+        ),
+        source_goal_id=row["source_goal_id"],
+        last_result_event_id=row["last_result_event_id"],
+        budget=budget,
+        spent=spent,
+        reason=row["reason"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _row_to_preference(row: sqlite3.Row) -> SelfPreference:
+    try:
+        sources = tuple(json.loads(row["source_event_ids_json"] or "[]"))
+    except ValueError:  # pragma: no cover
+        sources = ()
+    return SelfPreference(
+        actor_id=row["actor_id"],
+        principal_id=row["principal_id"],
+        topic=row["topic"],
+        weight=float(row["weight"]),
+        novelty=float(row["novelty"]),
+        fatigue=float(row["fatigue"]),
+        source_event_ids=sources,
+        expires_at_ms=None if row["expires_at_ms"] is None else int(row["expires_at_ms"]),
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _row_to_outreach(row: sqlite3.Row) -> OutreachFeedback:
+    return OutreachFeedback(
+        outreach_id=row["outreach_id"],
+        actor_id=row["actor_id"],
+        principal_id=row["principal_id"],
+        sent_event_id=row["sent_event_id"],
+        reply_event_id=row["reply_event_id"],
+        kind=row["kind"],
+        response_delay_ms=(
+            None if row["response_delay_ms"] is None else int(row["response_delay_ms"])
+        ),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
