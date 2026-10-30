@@ -104,7 +104,12 @@ from langgraph.types import Command
 from gacore.character import card_name, list_cards
 from gacore.companion.config import load_companion_config
 from gacore.companion.coordinator import schedule_reflection_check, shutdown_reflection_coordinator
-from gacore.companion.identity import ActiveCardError, ActiveCardRepository, actor_id_for
+from gacore.companion.identity import (
+    ActiveCardError,
+    ActiveCardRepository,
+    actor_id_for,
+    legacy_memory_allowed,
+)
 from gacore.companion.reply_batch import ReplyBatch, plan_final_reply
 from gacore.companion.store import CompanionStore, companion_db_path
 from gacore.companion.summary import minimize_user_message
@@ -120,6 +125,7 @@ from gacore.proactive import (
     record_user_emotion,
 )
 from gacore.qa_store import match_and_record, try_answer
+from gacore.redact import redact_text
 from gacore.weekly_eval import try_weekly_interaction
 
 from gacore.state import new_state
@@ -1151,7 +1157,15 @@ class QQApp:
         if token is not None:
             token.set()
 
-    async def _trace_tool_event(self, chat_id: str, text: str, *, is_group: bool, tool: str = "") -> None:
+    async def _trace_tool_event(
+        self,
+        chat_id: str,
+        text: str,
+        *,
+        is_group: bool,
+        tool: str = "",
+        suppress: bool = False,
+    ) -> None:
         """Tool traces (``[agent] -> …`` / ``[tools] <- …``) are debugging data, not chat.
 
         They always go to the JSONL log; the chat bubble only appears when
@@ -1162,7 +1176,7 @@ class QQApp:
         never be treated as a companion utterance either.
         """
         logger.info("tool trace", tool=tool or "", is_group=is_group, line=text[:300])
-        if _TOOL_TRACE_ENABLED:
+        if _TOOL_TRACE_ENABLED and not suppress:
             await self.send_text(chat_id, text, is_group=is_group)
 
     def _plan_final_reply(self, state: dict, final_text: str) -> ReplyBatch:
@@ -1265,13 +1279,23 @@ class QQApp:
             logger.warning("companion ingress write failed", stack_trace=traceback.format_exc())
 
 
-    async def _record_companion_sent(self, user_id: str, msg_id, receipts: Sequence[SendReceipt]) -> None:
+    async def _record_companion_sent(
+        self,
+        user_id: str,
+        msg_id,
+        receipts: Sequence[SendReceipt],
+        logical_turn_id: str = "",
+    ) -> None:
 
         """Record one ``agent.message.sent`` event for the confirmed prefix (Companion V1).
 
         Only segments the platform confirmed, in order from the start, enter the summary;
         a later success never bridges an earlier failure. Zero confirmed segments means
         no event at all. Best-effort: any failure is logged and the reply is unaffected.
+
+        ``logical_turn_id`` (from the reply batch) joins the idempotency key when the
+        platform gives no message id, so two identical replies in one chat are two
+        events instead of a silent dedupe.
         """
 
         try:
@@ -1311,6 +1335,10 @@ class QQApp:
 
             source_id = _sent_source_id(prefix)
 
+            # Unified redaction: the stored summary is what reflection reads later, so
+            # credentials pasted into a reply must never land in companion.db.
+            summary = redact_text(summary)
+
             store = _companion_store(Config.default())
 
             result = await asyncio.to_thread(
@@ -1327,7 +1355,15 @@ class QQApp:
 
                 summary=summary,
 
-                idempotency_key=f"qq-agent:{msg_id}" if msg_id else f"qq-agent:{source_id}",
+                # Platform message id is unique per delivery; without one, the logical
+                # turn id separates two identical replies that share a text hash.
+                idempotency_key=(
+                    f"qq-agent:{msg_id}"
+                    if msg_id
+                    else f"qq-agent:{logical_turn_id}:{source_id}"
+                    if logical_turn_id
+                    else f"qq-agent:{source_id}"
+                ),
 
             )
 
@@ -1387,15 +1423,22 @@ class QQApp:
             # Record the user's openid so qq_push.py can reach them proactively.
 
             _record_known_user(user_id)
-            record_last_active(user_id)
-            # P2: lightweight emotion tag of the latest user message, persisted to the
-            # proactive state so a later outreach can reference it (gentle concern).
-            record_user_emotion(user_id, content)
+            # Legacy per-user memory paths are owner C2C only: group members and
+            # non-owners must never feed activity/emotion state, cross-day rollover,
+            # long-term memory or QA capture.
+            memory_owner = legacy_memory_allowed(
+                user_id, load_companion_config(), is_group=is_group
+            )
+            if memory_owner:
+                record_last_active(user_id)
+                # P2: lightweight emotion tag of the latest user message, persisted to the
+                # proactive state so a later outreach can reference it (gentle concern).
+                record_user_emotion(user_id, content)
 
-            # Cross-day rollover: on the first message of a new day, swap to a fresh
-            # thread and stage yesterday's memory pack for silent first-turn injection.
-            # Any failure is swallowed inside — chat must never be blocked by memory.
-            await self._maybe_rollover(user_id)
+                # Cross-day rollover: on the first message of a new day, swap to a fresh
+                # thread and stage yesterday's memory pack for silent first-turn injection.
+                # Any failure is swallowed inside — chat must never be blocked by memory.
+                await self._maybe_rollover(user_id)
 
             # A new message supersedes any reply batch still delivering: keep the
             # segments already confirmed, drop the unsent ones, and let the new turn
@@ -1511,11 +1554,13 @@ class QQApp:
             route = feedback_route(content)
 
             # 3.55) 周报评分/候选捕获（P4）：pending 期间「4 3」评分与「1/-2/0」候选操作，
-            #       优先于 QA 捕获（纯数字消息在 pending 期间归周报交互）。
-            try:
-                weekly_reply = try_weekly_interaction(Config.default(), content)
-            except Exception:  # noqa: BLE001 — 周报捕获失败绝不影响正常聊天
-                weekly_reply = None
+            #       优先于 QA 捕获（纯数字消息在 pending 期间归周报交互）。仅 owner C2C。
+            weekly_reply = None
+            if memory_owner:
+                try:
+                    weekly_reply = try_weekly_interaction(Config.default(), content)
+                except Exception:  # noqa: BLE001 — 周报捕获失败绝不影响正常聊天
+                    weekly_reply = None
             if weekly_reply is not None:
                 asyncio.create_task(
                     self.send_text(chat_id, weekly_reply, msg_id=msg_id, is_group=is_group)
@@ -1524,10 +1569,13 @@ class QQApp:
 
             # 3.6) 想问你回答捕获（P3，决策 8：不走订正阶梯）：显式 [Qn] 引用或唯一
             #      开放问题时的裸短答，命中即确认并 return，不进 feedback、不进 agent 轮。
-            try:
-                qa_reply = try_answer(Config.default(), content, allow_bare=route is None)
-            except Exception:  # noqa: BLE001 — qa 捕获失败绝不影响正常聊天
-                qa_reply = None
+            #      仅 owner C2C：群聊/非 owner 的回答不写入 owner 的 QA 账本。
+            qa_reply = None
+            if memory_owner:
+                try:
+                    qa_reply = try_answer(Config.default(), content, allow_bare=route is None)
+                except Exception:  # noqa: BLE001 — qa 捕获失败绝不影响正常聊天
+                    qa_reply = None
             if qa_reply is not None:
                 asyncio.create_task(
                     self.send_text(chat_id, qa_reply, msg_id=msg_id, is_group=is_group)
@@ -1537,7 +1585,7 @@ class QQApp:
             # 3.65) P1 多问题回答归因：显式锚点与唯一开放问题的裸答已在上一步拦截；
             #       这里只对"多问题并存时的自然语言回答"做后台归因（规则 + LLM 兜底），
             #       命中静默落账，未命中或超时都不影响本条消息继续走正常聊天/反馈链路。
-            if route is None and user_id not in self._feedback_sessions:
+            if memory_owner and route is None and user_id not in self._feedback_sessions:
                 asyncio.create_task(self._match_qa_background(content))
 
             if route is not None or user_id in self._feedback_sessions:
@@ -2037,6 +2085,16 @@ class QQApp:
                 return await self.send_text(chat_id, "\n".join(lines), msg_id=msg_id, is_group=is_group)
 
             target = parts[1]
+            # Group chats must never switch or clear the owner's C2C card: the card map
+            # is keyed by openid, so a group `/角色` would silently rewrite the private
+            # chat persona. Listing stays available (read-only).
+            if is_group:
+                return await self.send_text(
+                    chat_id,
+                    "🔒 群聊里不能切换角色，请私聊我再用 /角色 <id>。",
+                    msg_id=msg_id,
+                    is_group=is_group,
+                )
             if target == "off":
                 old_thread = _user_threads.pop(user_id, None)
                 if old_thread:
@@ -2296,6 +2354,9 @@ class QQApp:
         # Self memory is owner C2C only: group chats and non-owners never carry a
         # companion identity into the graph, so they cannot read the owner's reflections.
         companion_context = None
+        memory_owner = legacy_memory_allowed(
+            user_id, load_companion_config(), is_group=is_group
+        )
         if not is_group:
             actor_id = actor_id_for(user_id, load_companion_config(), current_card)
             if actor_id:
@@ -2307,6 +2368,7 @@ class QQApp:
             active_card=current_card,
             companion_context=companion_context,
             fast_reply=fast,
+            memory_scope="owner" if memory_owner else "guest",
         )  # 进入图前贴上当前真实时间
 
         # Consume the staged cross-day rollover injection on this first turn.
@@ -2515,6 +2577,10 @@ class QQApp:
 
         reply_parts: list[str] = []
 
+        # Companion turns never show tool traces, even with QQ_TOOL_TRACE=1: the owner
+        # only wants the character's own words in that chat.
+        silent_traces = isinstance(input_data, dict) and bool(input_data.get("companion_context"))
+
         rendered: set[str] = _rendered_msg_ids.setdefault(user_id, set()) if user_id is not None else set()
 
         # Seed the dedupe set with every message id already persisted in this thread's
@@ -2637,7 +2703,8 @@ class QQApp:
                                         if name == "ask_user":
 
                                             await self._trace_tool_event(
-                                                chat_id, "[agent] -> ask_user", is_group=is_group
+                                                chat_id, "[agent] -> ask_user", is_group=is_group,
+                                                suppress=silent_traces,
                                             )
 
                                         else:
@@ -2652,6 +2719,8 @@ class QQApp:
                                                 is_group=is_group,
 
                                                 tool=name,
+
+                                                suppress=silent_traces,
 
                                             )
 
@@ -2668,7 +2737,8 @@ class QQApp:
                                     content = content[:197] + "..."
 
                                 await self._trace_tool_event(
-                                    chat_id, f"[tools] <- {content}", is_group=is_group
+                                    chat_id, f"[tools] <- {content}", is_group=is_group,
+                                    suppress=silent_traces,
                                 )
 
                             if mid is not None:
@@ -2710,7 +2780,9 @@ class QQApp:
                             chat_id, batch, is_group=is_group
                         )
                         if user_id is not None:
-                            await self._record_companion_sent(user_id, msg_id, receipts)
+                            await self._record_companion_sent(
+                                user_id, msg_id, receipts, batch.logical_turn_id
+                            )
 
 
 

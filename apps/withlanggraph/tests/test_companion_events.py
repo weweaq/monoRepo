@@ -328,6 +328,17 @@ class TestSent:
         assert len(rows) == 1
         assert rows[0]["idempotency_key"] == f"qq-agent:{rows[0]['source_id']}"
 
+    async def test_logical_turn_id_separates_identical_replies(self, owner_env: Config) -> None:
+        """Without a platform id, two identical replies must stay two events (V1 gap 7)."""
+        app = _app()
+        receipt = _receipt((True, "你好", "", False))
+        await app._record_companion_sent(OWNER, None, [receipt], logical_turn_id="turn-a")
+        await app._record_companion_sent(OWNER, None, [receipt], logical_turn_id="turn-b")
+
+        rows = _rows(owner_env)
+        assert len(rows) == 2
+        assert all(":turn-" in row["idempotency_key"] for row in rows)
+
     async def test_non_owner_writes_nothing(self, owner_env: Config) -> None:
         app = _app()
         await app._record_companion_sent("stranger", "m-stranger", [_receipt((True, "你好", "p1", False))])

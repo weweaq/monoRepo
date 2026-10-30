@@ -204,6 +204,10 @@ def memory_maintain(state: GAState) -> dict:
     no-op and the daily-sediment path remains the source of truth.
     """
     last = _last_user_text(state.get("messages") or [])
+    # Group-chat / non-owner turns are marked "guest": they must never feed the owner's
+    # long-term memory. The node still returns {} so the graph edge stays unchanged.
+    if state.get("memory_scope") == "guest":
+        return {}
     cfg = _memory_cfg.get() or Config.default()
     _start = time.monotonic()
     try:

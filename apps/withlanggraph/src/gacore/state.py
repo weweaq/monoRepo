@@ -55,6 +55,7 @@ class GAState(AgentState[Any], total=False):
     output_mode: str | None  # per-turn output formatting mode ("proposal" = multi-option reply); cleared by cleanup_images after the turn
     target_day: str | None  # scheduled/rerun: historical target day for fact-card time-slicing; None = real-time today
     companion_context: CompanionTurnContext | None  # owner C2C only; enables the Self memory block
+    memory_scope: str  # "owner" (default) or "guest": guests skip legacy long-term memory writes
     fast_reply: bool  # cheap turn for casual one-liners: tool-less graph, no RAG recall
 
 
@@ -65,6 +66,7 @@ def new_state(
     target_day: str | None = None,
     companion_context: CompanionTurnContext | None = None,
     fast_reply: bool = False,
+    memory_scope: str = "owner",
 ) -> GAState:
     """Seed a fresh GAState for a new conversation with the user's first message.
 
@@ -76,6 +78,9 @@ def new_state(
 
     fast_reply: casual one-liner turn — same graph/prompt/delivery path as every other
     turn, only built without tools and without the vector-recall step (see qq.py).
+
+    memory_scope: ``"owner"`` (default) keeps the legacy long-term-memory path; ``"guest"``
+    marks a group-chat or non-owner turn so ``memory_maintain`` never writes user memory.
     """
     return GAState(
         messages=[HumanMessage(content=user_input)],
@@ -89,6 +94,7 @@ def new_state(
         active_card=active_card,
         target_day=target_day,
         companion_context=companion_context,
+        memory_scope=memory_scope,
         fast_reply=fast_reply,
         pending_images=[],
     )

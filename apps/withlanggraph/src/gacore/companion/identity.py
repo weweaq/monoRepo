@@ -225,6 +225,25 @@ def owner_active_card(
     return repo.get(openid)
 
 
+def legacy_memory_allowed(
+    openid: str,
+    companion: CompanionConfig,
+    *,
+    is_group: bool,
+) -> bool:
+    """Whether legacy per-user memory paths may write for this message.
+
+    Group chats never do. With Companion switched off the deployment is single-user,
+    so the pre-Companion behaviour is preserved; once Companion is on, only the
+    configured owner may feed long-term memory, daily rollover or QA capture.
+    """
+    if is_group:
+        return False
+    if not companion.active:
+        return True
+    return is_owner(openid, companion)
+
+
 def actor_id_for(
     openid: str,
     companion: CompanionConfig,
