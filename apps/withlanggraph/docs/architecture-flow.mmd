@@ -260,3 +260,10 @@ flowchart TD
     class COORD state
     class REFL state
     class RVW bnd
+
+    %% V2-Step 2：关系与未完成话题（migration v3，2026-10-30）
+    RELSTATE[("companion/relationship.py refresh_relationship<br/>纯规则投影，无模型调用<br/>stage: new→familiar→established(计数阈值)<br/>status: stable→strained→repairing→stable<br/>boundary 需用户原文事件，模型不可放宽 actor 边界<br/>open thread 必带 source_event_id")]
+    RELSTATE -. "events_for_actor 只读 + save_relationship/open_threads 单事务" .-> CSTORE
+    QQ -. "每个 confirmed 事件落地后<br/>_refresh_relationship_quietly → refresh_relationship" .-> RELSTATE
+    RELSTATE -. "stage/status/boundaries/open threads<br/>供 Step 6 有界 Prompt 与主动 gate 读取" .-> CTX
+    class RELSTATE state

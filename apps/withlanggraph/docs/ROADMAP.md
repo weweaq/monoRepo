@@ -5903,3 +5903,60 @@ V1 稳定性缺口里，1/2/3/4/5/6/7 也在同一批未提交改动里。
 - [x] 日记/反思 prompt schema 修复 + 守卫测试
 - [ ] 今晚 00:10 观察首篇真实日记（现在预期 `code=written, journals=2`）
 - [ ] 明天跨日后观察首条真实反思（预期 `drafts≥1`，随后 Self memory 首次非空注入）
+## 2026-10-30 · Companion V2-Step 2：关系状态与未完成话题（migration v3）
+
+**背景**：按 V2 计划 Step 2 落地「关系状态 + 未完成话题」。本步刻意**不引入任何模型调用**：
+关系阶段、状态、边界、未完成话题全部由 V1 真实事件按规则派生，保证每条结论可回溯到 event_id。
+
+**已完成**：
+
+- `companion/store.py`：`SCHEMA_VERSION=3`，新增 `MIGRATION_V3`
+  （`companion_relationship` + `companion_open_thread`，两张表都带 R6 双时间戳；
+  open thread 有 FK→event、FK→relationship、`UNIQUE(actor,principal,topic) WHERE open`）；
+  新增 `Relationship` / `OpenThread` 数据类与
+  `relationship()` / `events_for_actor()` / `save_relationship()` /
+  `open_threads()` / `add_open_thread()` / `set_open_thread_status()`；
+  `add_open_thread` 校验 source 事件必须属于同一 actor（`SourceOwnershipError`）。
+- `companion/relationship.py`（新增，纯规则、无 LLM）：
+  - `project(events, previous=)`：计数、stage 阈值、stable/strained/repairing 状态机、
+    边界提取、open thread 识别；纯函数，不写库。
+  - `refresh_relationship(store, actor, principal)`：一次事务写关系行 + 同步 threads。
+  - 规则要点：meaningful = owner(≥2 字) + confirmed 发送；positive_feedback = 角色发送后
+    10 分钟内的 owner 回话（V1 唯一可证据化的"正面"信号）；established 额外要求
+    `positive_feedback≥1`（Step 4 承诺落地前的可靠性等价事件）；`status != stable` 时
+    stage 冻结；用户边界必须带 owner 原文事件，`actor_boundaries` 恒为策略常量。
+  - 边界话题去掉"这个话题/这件事"等填充词（"加班这个话题不想聊这个了" → "加班"），
+    这样后续发送只需提到"加班"即可判定复踩。
+- `companion/__init__.py`：导出 `refresh_relationship` / `project` /
+  `DEFAULT_ACTOR_BOUNDARIES` / `BoundaryHit` / `RelationshipProjection`。
+- `frontends/qq.py`：新增 `_refresh_relationship_quietly()`，在
+  `_record_companion_ingress` 与 `_record_companion_sent` 的 `inserted=True` 分支里
+  `asyncio.to_thread` 调用（异常只记日志），所以 owner 刚说出的边界下一条消息就生效。
+- `tests/test_companion_relationship.py`（新增 18 例）逐条覆盖 Step 2 验收；
+  `test_companion_store.py` / `test_companion_journal.py` 的版本断言改为跟随
+  `SCHEMA_VERSION`（v2 专用用例改为显式 `target_version=2`，避免下一次迁移把它废掉）。
+- R5 三处同步：本文件 + `docs/langTrack-tech.md`（新增 §9.2.10）+ `docs/architecture-flow.mmd`
+  （新增 `RELSTATE` 节点与 QQ→RELSTATE / RELSTATE→CSTORE / RELSTATE→CTX 三条边）。
+
+**实测验证**：
+
+- `uv run pytest apps/withlanggraph/tests/test_companion_relationship.py -q` → **18 passed**
+- `uv run pytest`（companion 全组）→ **101 passed**；全仓 → **2104 passed, 4 skipped**
+- `uv run ruff check apps/withlanggraph` → All checks passed
+- `node apps/mermaid-viewer/tests/check_prompt_logic.js` → ALL PASS（新节点追加在文件末尾，
+  RC/MAIN 行号锚点未移动）
+
+**偏差说明**：
+
+- 「boundary 生效」采用"下一次事件即刷新"，没有做实时推送或阻断：本步只负责记录与状态，
+  真正"不要再提这个话题"的对话层约束属于 Step 6 的 Prompt/gate。
+- 「strained 时不能高频主动联系」在 Step 2 只体现为 stage 冻结；主动频率闸门在 Step 6 接。
+- open thread 的 `cancelled` 状态本步没有自动入口（只提供 `set_open_thread_status`），
+  等 Step 6 的用户显式取消再接。
+- 关系投影未接 LLM，因此不会"理解"边界语义，只做短语匹配；误判率要靠真实语料观察调整词表。
+
+**待办更新**：
+
+- [x] V2-Step 2 关系与 Open Threads（migration v3）
+- [ ] V2-Step 3：临时 Mood（migration v4）
+- [ ] 关系投影词表随真实语料校准（观察到误判再补 `_BOUNDARY_PHRASES`）

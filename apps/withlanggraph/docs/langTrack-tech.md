@@ -1048,6 +1048,47 @@ flowchart LR
   - `run_loop` 在 `type == "journal"` 分支投递到 `JOURNAL_POOL` 并立即落 `last_run`，与
     proactive/extract 分支同构，避免长任务阻塞轮询、避免同 tick 重复触发。
 
+### 9.2.10 Companion V2-Step 2 关系与未完成话题（migration v3，2026-10-30）
+
+> 计划：`docs/companion-self-memory-v2-plan.md` V2-Step 2 / §4.2。本步**不调用模型**，
+> 一切由 V1 事件按规则派生，每条结论都能回溯到 `event_id`。
+
+**数据模型（v3 两张表）**：
+
+- `companion_relationship`：`stage`（new/familiar/established）、`status`
+  （stable/strained/repairing）、`meaningful_interactions`、`active_days`、
+  `positive_feedback`、`user_boundaries_json`、`actor_boundaries_json`、
+  `last_negative_event_id`、`last_repair_event_id`、`last_interaction_at_ms`，
+  主键 `(actor_id, principal_id)`；两个 event 列是 FK。
+- `companion_open_thread`：`topic` + `source_event_id`(FK→`companion_event`) +
+  `status`(open/resolved/cancelled)，FK 指向 `companion_relationship`；
+  `ux_companion_open_thread_topic` 保证同一 actor 同 topic 只有一条 open。
+
+**投影规则（`companion/relationship.py`，纯函数 `project()` + 落库 `refresh_relationship()`）**：
+
+| 指标 | 规则 |
+|---|---|
+| `meaningful_interactions` | owner 中长度 ≥2 的消息数 + 所有 confirmed 角色发送数（单个"嗯"不算一次交流） |
+| `active_days` | 该 actor 全部事件在 UTC+8 下的不同日期数 |
+| `positive_feedback` | 角色发送后 10 分钟内的 owner 回话数（V1 能提供的唯一"正面"证据） |
+| stage | new→familiar：≥5 次交流且 ≥2 天；familiar→established：≥20 次、≥14 天，**且** `positive_feedback≥1`（Step 4 承诺落地前的"可靠性等价事件"） |
+| status | stable→strained：owner 明说不聊某话题后，后续角色发送**再次命中该话题**；无回复永不判 strained。strained→repairing：owner 出现致歉/接受类回话；repairing→stable：致歉之后还有一次正常回话 |
+| 冻结 | `status != stable` 时 stage 不再升级（也不回退），避免冲突期用计数把阶段"刷"上去 |
+| 边界 | 用户边界来自 owner 原文（`_BOUNDARY_PHRASES`，话题取拒绝从句去掉"这个话题/这件事"等填充词）；`actor_boundaries_json` 恒为 `DEFAULT_ACTOR_BOUNDARIES`，投影器从不写它 |
+| open thread | owner 提问且 30 分钟内无角色回复 → 建 thread（topic 去空白截 60 字）；之后任一角色发送晚于该问题即 `resolved` |
+
+**触发接线（每事件增量、非定时）**：`qq.py::_record_companion_ingress` 与
+`_record_companion_sent` 在 `AppendResult.inserted=True` 后调用
+`_refresh_relationship_quietly(store, actor_id)`（`asyncio.to_thread`，异常只记日志），
+因此 owner 刚说出的边界在下一条消息就生效，而不是等次日 job。
+
+**测试**：`tests/test_companion_relationship.py`（18 例）逐条覆盖 Step 2 验收：
+单次互动不跳 stage、双阈值才 familiar、established 需可靠性信号、actor 隔离、
+边界须有 source 且普通否定不误判、复踩话题才 strained、静默不 strained、
+致歉+跟进才修复、strained 冻结 stage、actor 边界只来自策略、
+open thread 建/解/去重、thread source 必须同 actor、`project()` 无副作用且
+positive 窗口计数正确。
+
 ### 9.3 测试
 
 `tests/test_character.py`(7)、`tests/test_character_system_prompt.py`(4)、`tests/test_qq.py` `/角色` 相关 3 条、
