@@ -1,9 +1,13 @@
-"""The single source of the per-user active character card.
+"""The single source of the per-user active character card and the owner gate.
 
 The QQ frontend (``/角色`` command) and proactive outreach both need to know which
 character card a user is currently playing. Before this module each path would have
 had to parse ``data/active_cards.json`` itself; now they share one repository so the
 two can never disagree about who the current character is.
+
+Owner gate: proactive only adopts a persona for the configured Companion owner, so
+``is_owner`` / ``owner_active_card`` live here next to the repository — a non-owner
+or a disabled Companion never reads the owner's card at all.
 
 Guarantees:
   - Same file and same format as before (``data/active_cards.json``, ``user -> card``);
@@ -21,10 +25,13 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 from gacore.config import Config
 from gacore.jsonl_logger import get_logger
+
+if TYPE_CHECKING:
+    from gacore.companion.config import CompanionConfig
 
 logger = get_logger("companion.identity")
 
@@ -71,9 +78,14 @@ class ActiveCardCorruptError(ActiveCardError):
     """The state file is unusable (not JSON / not an object); do not overwrite it."""
 
 
+def active_cards_path(cfg: Config) -> Path:
+    """Return ``<cfg.root>/data/active_cards.json`` — the canonical state file."""
+    return cfg.root / "data" / _ACTIVE_CARDS_FILE
+
+
 def default_active_cards_path() -> Path:
-    """Return ``<project root>/data/active_cards.json`` — the canonical state file."""
-    return Config.default().root / "data" / _ACTIVE_CARDS_FILE
+    """Return the canonical state file for this process (``Config.default()``)."""
+    return active_cards_path(Config.default())
 
 
 class ActiveCardRepository:
@@ -188,3 +200,23 @@ def _parse_cards(raw: str) -> dict[str, str] | None:
     if not isinstance(payload, dict):
         return None
     return {str(k): str(v) for k, v in payload.items() if isinstance(v, str)}
+
+
+def is_owner(openid: str, companion: CompanionConfig) -> bool:
+    """True only when Companion is switched on and ``openid`` is the configured owner."""
+    return bool(openid) and companion.active and openid == companion.owner_openid
+
+
+def owner_active_card(
+    openid: str,
+    companion: CompanionConfig,
+    repo: ActiveCardRepository,
+) -> str | None:
+    """Return the owner's active card id; non-owners and a disabled Companion read nothing.
+
+    ``repo`` is required so a caller can never fall back to a repository over the real
+    ``data/active_cards.json`` by accident.
+    """
+    if not is_owner(openid, companion):
+        return None
+    return repo.get(openid)

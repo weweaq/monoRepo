@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from gacore import proactive
+from gacore.companion.config import CompanionConfig
 from gacore.config import Config
 from gacore.scheduler import Job, JobState, load_jobs, load_state, run_loop
 
@@ -440,7 +441,7 @@ class TestRunProactiveJob:
         monkeypatch.setattr(
             proactive,
             "_headless_run",
-            lambda job, cfg, prompt, max_turns: (
+            lambda job, cfg, prompt, max_turns, active_card=None: (
                 "CURRENT_TASK_DONE",
                 "韩立的早安",
                 ['{"status": "sent", "ok": 1}'],
@@ -470,7 +471,7 @@ class TestRunProactiveJob:
         monkeypatch.setattr(
             proactive,
             "_headless_run",
-            lambda job, cfg, prompt, max_turns: ("CURRENT_TASK_DONE", "", []),
+            lambda job, cfg, prompt, max_turns, active_card=None: ("CURRENT_TASK_DONE", "", []),
         )
         job = Job(name="proactive-morning", schedule="every 1h", prompt="早安", type="proactive")
         result = proactive.run_proactive_job(job, cfg=cfg, clock=lambda: _dt(2026, 8, 27, 7, 30))
@@ -485,7 +486,7 @@ class TestRunProactiveJob:
         monkeypatch.setattr(
             proactive,
             "_headless_run",
-            lambda job, cfg, prompt, max_turns: (
+            lambda job, cfg, prompt, max_turns, active_card=None: (
                 "CURRENT_TASK_DONE",
                 "",
                 ['{"error": "no_recipients", "message": "no users"}'],
@@ -545,7 +546,7 @@ class TestRunProactiveJob:
 
         calls = {"n": 0}
 
-        def flaky_headless(job: Job, cfg: Config, prompt: str, max_turns: int) -> tuple:
+        def flaky_headless(job: Job, cfg: Config, prompt: str, max_turns: int, active_card: str | None = None) -> tuple:
             # Distinguish users by call order (u1 first, u2 second).
             calls["n"] += 1
             if calls["n"] == 1:
@@ -665,7 +666,7 @@ class TestFailureCap:
         )
         called: list[str] = []
 
-        def fake_headless(job: Job, cfg: Config, prompt: str, max_turns: int) -> tuple:
+        def fake_headless(job: Job, cfg: Config, prompt: str, max_turns: int, active_card: str | None = None) -> tuple:
             called.append(prompt)
             return ("CURRENT_TASK_DONE", "ok", ['{"status": "sent"}'])
 
@@ -686,7 +687,7 @@ class TestFailureCap:
         monkeypatch.setattr(
             proactive,
             "_headless_run",
-            lambda job, cfg, prompt, max_turns: ("CURRENT_TASK_DONE", "ok", ['{"status": "sent"}']),
+            lambda job, cfg, prompt, max_turns, active_card=None: ("CURRENT_TASK_DONE", "ok", ['{"status": "sent"}']),
         )
         job = Job(name="proactive-morning", schedule="every 1h", prompt="早安", type="proactive")
         result = proactive.run_proactive_job(job, cfg=cfg, clock=lambda: _dt(2026, 8, 27, 7, 30))
@@ -695,3 +696,149 @@ class TestFailureCap:
         assert "failed_count" not in entry
         assert "last_failed" not in entry
         assert entry["daily_count"] == 1
+
+
+# ---------- Step 2: owner persona continuity ----------
+
+
+class TestOwnerPersona:
+    """Proactive must speak in the owner's active card, never a hardcoded persona."""
+
+    @staticmethod
+    def _seed_card(cfg: Config, card_id: str, name: str) -> None:
+        d = cfg.asset_dir / "characters"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{card_id}.md").write_text(f"# {name}\n{name}的口吻示例。\n", encoding="utf-8")
+
+    @staticmethod
+    def _seed_active(cfg: Config, mapping: dict[str, str]) -> None:
+        data = cfg.root / "data"
+        data.mkdir(parents=True, exist_ok=True)
+        (data / "active_cards.json").write_text(json.dumps(mapping), encoding="utf-8")
+
+    def _run(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        cfg: Config,
+        *,
+        owner: str | None,
+        users: list[str],
+        now: datetime,
+        enabled: bool = True,
+    ) -> dict:
+        monkeypatch.setattr(proactive, "load_known_users", lambda: {u: {} for u in users})
+        monkeypatch.setattr(
+            proactive,
+            "load_companion_config",
+            lambda: CompanionConfig(enabled=enabled, owner_openid=owner),
+        )
+        seen: dict = {}
+
+        def fake(job: Job, cfg_: Config, prompt: str, max_turns: int, active_card: str | None = None) -> tuple:
+            seen.update(prompt=prompt, active_card=active_card)
+            return ("CURRENT_TASK_DONE", "早", ['{"status": "sent", "ok": 1}'])
+
+        monkeypatch.setattr(proactive, "_headless_run", fake)
+        job = Job(name="proactive-morning", schedule="every 1h", prompt="早安", type="proactive")
+        result = proactive.run_proactive_job(job, cfg=cfg, clock=lambda: now)
+        return {"result": result, **seen}
+
+    def test_owner_card_drives_prompt_and_state(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        cfg = Config.for_tests(tmp_path)
+        self._seed_card(cfg, "linwan", "林晚")
+        self._seed_active(cfg, {"u1": "linwan"})
+
+        out = self._run(monkeypatch, cfg, owner="u1", users=["u1"], now=_dt(2026, 8, 27, 7, 30))
+
+        assert out["result"]["sent"] == 1
+        assert out["active_card"] == "linwan"
+        assert "林晚口吻" in out["prompt"]
+        assert "韩立口吻" not in out["prompt"]
+
+    def test_card_switch_applies_to_next_run(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        cfg = Config.for_tests(tmp_path)
+        self._seed_card(cfg, "linwan", "林晚")
+        self._seed_card(cfg, "nami", "娜美")
+        self._seed_active(cfg, {"u1": "linwan"})
+
+        first = self._run(monkeypatch, cfg, owner="u1", users=["u1"], now=_dt(2026, 8, 27, 7, 30))
+        assert first["active_card"] == "linwan"
+
+        self._seed_active(cfg, {"u1": "nami"})
+        second = self._run(monkeypatch, cfg, owner="u1", users=["u1"], now=_dt(2026, 8, 28, 7, 30))
+        assert second["active_card"] == "nami"
+        assert "娜美口吻" in second["prompt"]
+
+    def test_non_owner_gets_neutral_prompt_and_no_card(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        cfg = Config.for_tests(tmp_path)
+        self._seed_card(cfg, "linwan", "林晚")
+        self._seed_card(cfg, "nami", "娜美")
+        self._seed_active(cfg, {"u1": "linwan", "u2": "nami"})
+
+        out = self._run(monkeypatch, cfg, owner="u1", users=["u2"], now=_dt(2026, 8, 27, 7, 30))
+
+        assert out["result"]["sent"] == 1
+        assert out["active_card"] is None
+        assert "助手口吻" in out["prompt"]
+        assert "林晚口吻" not in out["prompt"]
+        assert "娜美口吻" not in out["prompt"]
+
+    def test_missing_owner_config_keeps_neutral(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        cfg = Config.for_tests(tmp_path)
+        self._seed_card(cfg, "linwan", "林晚")
+        self._seed_active(cfg, {"u1": "linwan"})
+
+        out = self._run(monkeypatch, cfg, owner=None, users=["u1"], now=_dt(2026, 8, 27, 7, 30))
+
+        assert out["result"]["sent"] == 1
+        assert out["active_card"] is None
+        assert "助手口吻" in out["prompt"]
+
+    def test_prompt_no_longer_hardcodes_hanli(self) -> None:
+        job = Job(name="proactive-morning", schedule="every 1h", prompt="早安", type="proactive")
+        text = proactive.build_proactive_prompt(job, "u1", _dt(2026, 8, 27, 7, 30))
+
+        assert "韩立口吻" not in text
+        assert "助手口吻" in text
+
+    def test_card_without_persona_body_falls_back_to_neutral(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A heading-only card is skipped by build_system_prompt, so keep the neutral voice."""
+        cfg = Config.for_tests(tmp_path)
+        d = cfg.asset_dir / "characters"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "linwan.md").write_text("# 林晚\n", encoding="utf-8")
+        self._seed_active(cfg, {"u1": "linwan"})
+
+        out = self._run(monkeypatch, cfg, owner="u1", users=["u1"], now=_dt(2026, 8, 27, 7, 30))
+
+        assert out["active_card"] is None
+        assert "助手口吻" in out["prompt"]
+
+    def test_headless_run_forwards_active_card_to_run_once(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The persona only reaches the graph if ``_headless_run`` forwards it."""
+        captured: dict = {}
+        monkeypatch.setattr("gacore.graph.build_graph", lambda cfg=None: object())
+
+        def fake_run_once(graph, prompt, **kwargs):
+            captured.update(kwargs)
+            return {"messages": [], "exit_reason": "CURRENT_TASK_DONE"}
+
+        monkeypatch.setattr("gacore.graph.run_once", fake_run_once)
+        job = Job(name="proactive-morning", schedule="every 1h", prompt="早安", type="proactive")
+        cfg = Config.for_tests(tmp_path)
+
+        proactive._headless_run(job, cfg, "prompt", 3, active_card="linwan")
+
+        assert captured["active_card"] == "linwan"

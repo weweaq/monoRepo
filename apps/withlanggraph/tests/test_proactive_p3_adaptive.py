@@ -395,7 +395,7 @@ class TestSourceMuteWiring:
         monkeypatch.setattr(proactive, "_target_users", lambda job: ["u1"])
         captured: dict = {}
 
-        def fake_headless(job, cfg_, prompt, max_turns):
+        def fake_headless(job, cfg_, prompt, max_turns, active_card=None):
             captured["prompt"] = prompt
             return "END", "转述完成", [json.dumps({"status": "sent", "to": ["u1"]})]
 

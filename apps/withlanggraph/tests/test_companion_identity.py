@@ -1,8 +1,9 @@
-"""Step 1 of Companion Self-Memory V1: the shared active-card repository.
+"""Step 1/2 of Companion Self-Memory V1: the shared active-card repository + owner gate.
 
 QQ (`frontends/qq.py`) and proactive outreach must read the same per-user active
 character card, so persistence moves into ``gacore.companion.identity``. The file
-format and location (``data/active_cards.json``) stay unchanged.
+format and location (``data/active_cards.json``) stay unchanged. Step 2 adds the
+owner gate: only the configured owner's card is ever read.
 """
 
 from __future__ import annotations
@@ -14,10 +15,14 @@ from pathlib import Path
 import pytest
 
 import gacore.companion.identity as identity
+from gacore.companion.config import CompanionConfig
 from gacore.companion.identity import (
     ActiveCardCorruptError,
     ActiveCardRepository,
+    active_cards_path,
     default_active_cards_path,
+    is_owner,
+    owner_active_card,
 )
 from gacore.config import Config
 
@@ -220,3 +225,61 @@ def test_read_retries_transient_permission_error(tmp_path: Path, monkeypatch: py
 def test_default_path_is_project_data_dir() -> None:
     """Both QQ and proactive must resolve the one canonical state file."""
     assert default_active_cards_path() == Config.default().root / "data" / "active_cards.json"
+
+
+def test_active_cards_path_follows_config_root(tmp_path: Path) -> None:
+    """A hermetic cfg must point at its own data dir, not the checkout's."""
+    cfg = Config.for_tests(tmp_path)
+
+    assert active_cards_path(cfg) == tmp_path / "data" / "active_cards.json"
+
+
+def test_is_owner_requires_switch_and_exact_match() -> None:
+    """Only the configured owner under an active Companion counts as owner."""
+    on = CompanionConfig(enabled=True, owner_openid="u1")
+
+    assert is_owner("u1", on) is True
+    assert is_owner("u2", on) is False
+    assert is_owner("", on) is False
+    assert is_owner("u1", CompanionConfig(enabled=False, owner_openid="u1")) is False
+    assert is_owner("u1", CompanionConfig(enabled=True, owner_openid=None)) is False
+
+
+def test_owner_active_card_reads_owner_only(tmp_path: Path) -> None:
+    path = tmp_path / "data" / "active_cards.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"u1": "linwan", "u2": "nami"}), encoding="utf-8")
+    repo = ActiveCardRepository(path)
+    companion = CompanionConfig(enabled=True, owner_openid="u1")
+
+    assert owner_active_card("u1", companion, repo) == "linwan"
+    assert owner_active_card("u2", companion, repo) is None
+
+
+def test_owner_active_card_does_not_touch_repo_for_non_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-owner must be rejected before any file read."""
+    repo = ActiveCardRepository(tmp_path / "data" / "active_cards.json")
+
+    def _must_not_read(_openid: str) -> str | None:
+        raise AssertionError("non-owner must not read the active card")
+
+    monkeypatch.setattr(repo, "get", _must_not_read)
+    companion = CompanionConfig(enabled=True, owner_openid="u1")
+
+    assert owner_active_card("u2", companion, repo) is None
+
+
+def test_owner_active_card_does_not_touch_repo_when_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A disabled Companion must not read cards even for the configured owner."""
+    repo = ActiveCardRepository(tmp_path / "data" / "active_cards.json")
+
+    def _must_not_read(_openid: str) -> str | None:
+        raise AssertionError("disabled Companion must not read the active card")
+
+    monkeypatch.setattr(repo, "get", _must_not_read)
+
+    assert owner_active_card("u1", CompanionConfig(enabled=False, owner_openid="u1"), repo) is None

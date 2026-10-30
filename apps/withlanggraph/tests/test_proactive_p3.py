@@ -23,7 +23,7 @@ from gacore.config import Config
 from gacore.scheduler import Job
 
 _PROMPT = (
-    "目标：主动给主人发一条 QQ 私聊消息（≤200字，韩立口吻，克制不啰嗦）。\n"
+    "目标：主动给主人发一条 QQ 私聊消息（≤200字，助手口吻，克制不啰嗦）。\n"
     "目标收件人 openid：u1（调用 qq_push 时必须把该 openid 原样填入 to 参数）。\n"
     "场景说明：晨安问候\n"
     "当前时间（东八区）：2026-08-30 07:00:00\n"
@@ -184,7 +184,7 @@ class TestWriteBackProactive:
 
 
 def _sent_headless(captured: list[str]) -> object:
-    def fake(job: Job, cfg: Config, prompt: str, max_turns: int) -> tuple:
+    def fake(job: Job, cfg: Config, prompt: str, max_turns: int, active_card: str | None = None) -> tuple:
         captured.append(prompt)
         return ("CURRENT_TASK_DONE", "早呀船长", ['{"status": "sent", "ok": 1}'])
 
@@ -240,7 +240,7 @@ class TestRunProactiveJobWriteBack:
         monkeypatch.setattr(proactive, "load_known_users", lambda: {"u1": {}})
         monkeypatch.setattr(proactive, "recall_topic", lambda cfg_, uid, now: {"kind": "none", "text": "", "thread_id": ""})
 
-        def _fail_headless(job: Job, cfg: Config, prompt: str, max_turns: int) -> tuple:
+        def _fail_headless(job: Job, cfg: Config, prompt: str, max_turns: int, active_card: str | None = None) -> tuple:
             return ("CURRENT_TASK_DONE", "回复", ['{"status": "error"}'])
 
         monkeypatch.setattr(proactive, "_headless_run", _fail_headless)

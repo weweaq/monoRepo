@@ -57,7 +57,7 @@ def test_questions_scene_push_marks_asks(tmp_path, monkeypatch):
     monkeypatch.setattr("gacore.proactive._target_users", lambda job: ["u1"])
     captured: dict = {}
 
-    def fake_headless(job, cfg_, prompt, max_turns):
+    def fake_headless(job, cfg_, prompt, max_turns, active_card=None):
         captured["prompt"] = prompt
         return "END", "转述完成", [json.dumps({"status": "sent", "to": ["u1"]})]
 
@@ -82,7 +82,7 @@ def test_questions_scene_pushes_at_most_three_per_message(tmp_path, monkeypatch)
     monkeypatch.setattr("gacore.proactive._target_users", lambda job: ["u1"])
     captured: dict = {}
 
-    def fake_headless(job, cfg_, prompt, max_turns):
+    def fake_headless(job, cfg_, prompt, max_turns, active_card=None):
         captured["prompt"] = prompt
         return "END", "转述完成", [json.dumps({"status": "sent", "to": ["u1"]})]
 
@@ -104,7 +104,7 @@ def test_questions_scene_archives_before_push_so_last_ask_is_answerable(tmp_path
     mark_pushed(cfg, [key])
     monkeypatch.setattr("gacore.proactive._target_users", lambda job: ["u1"])
 
-    def fake_headless(job, cfg_, prompt, max_turns):
+    def fake_headless(job, cfg_, prompt, max_turns, active_card=None):
         return "END", "转述完成", [json.dumps({"status": "sent", "to": ["u1"]})]
 
     monkeypatch.setattr("gacore.proactive._headless_run", fake_headless)

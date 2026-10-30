@@ -320,7 +320,7 @@ class TestBuildPromptEmotion:
 
 
 def _sent_headless(captured: list[str]) -> object:
-    def fake(job: Job, cfg: Config, prompt: str, max_turns: int) -> tuple:
+    def fake(job: Job, cfg: Config, prompt: str, max_turns: int, active_card: str | None = None) -> tuple:
         captured.append(prompt)
         return ("CURRENT_TASK_DONE", "回复", ['{"status": "sent", "ok": 1}'])
 

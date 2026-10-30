@@ -359,7 +359,7 @@ def test_questions_scene_falls_back_to_candidate_pool(tmp_path, monkeypatch):
     monkeypatch.setattr("gacore.proactive_candidates.select", lambda *a, **k: [cand])
     captured: dict = {}
 
-    def fake_headless(job, cfg_, prompt, max_turns):
+    def fake_headless(job, cfg_, prompt, max_turns, active_card=None):
         captured["prompt"] = prompt
         return "END", "转述完成", [json.dumps({"status": "sent", "to": ["u1"]})]
 

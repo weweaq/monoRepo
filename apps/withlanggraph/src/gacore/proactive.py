@@ -36,6 +36,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
 
+from gacore.character import card_name, card_prompt
+from gacore.companion.config import load_companion_config
+from gacore.companion.identity import ActiveCardRepository, active_cards_path, owner_active_card
 from gacore.config import Config
 from gacore.jsonl_logger import get_logger
 from gacore.langTrack.qq_push import load_known_users
@@ -1294,6 +1297,7 @@ def build_proactive_prompt(
     emotion: str = "",
     questions: list[str] | None = None,
     verbatim_single: bool = False,
+    actor_name: str = "助手",
 ) -> str:
     """Assemble the proactive-outreach prompt for the headless agent.
 
@@ -1301,13 +1305,17 @@ def build_proactive_prompt(
     not calling it counts as giving up this round. It also marks the message as a
     proactive greeting, not a user fact, and pins the real East-8 time anchor.
 
+    ``actor_name`` is the persona label: the owner's active card display name when a
+    Companion card is set, otherwise the neutral ``助手``. It is never hardcoded, so
+    the proactive voice always matches the card used by normal chat.
+
     P1 Topic Recall: ``topic`` (last open question from the user's main thread) and
     ``insight`` (yesterday portrait) are injected as background material so the model
     can pick the conversation back up ("上次聊到…还没说完") or reference what the user
     was busy with yesterday ("昨天看到你在忙 XX").
 
     P2 emotion (design doc §5.6): a non-``normal`` ``emotion`` tag injects a concern
-    hint so 韩立 can follow the persona and care gently — never prying or lecturing.
+    hint so the active persona can care gently — never prying or lecturing.
 
     P3 questions scene (eval design §5.3): ``questions`` are the daily report's open
     想问你 items; they must be relayed verbatim with [Qn] numbering — the QQ capture
@@ -1371,7 +1379,8 @@ def build_proactive_prompt(
     )
 
     return (
-        "目标：主动给主人发一条 QQ 私聊消息（≤200字，韩立口吻，克制不啰嗦）。\n"
+        "目标：主动给主人发一条 QQ 私聊消息（≤200字，"
+        f"{actor_name}口吻，克制不啰嗦）。\n"
         f"目标收件人 openid：{user_id}（调用 qq_push 时必须把该 openid 原样填入 to 参数，"
         "不得改动、猜测或留空，否则消息会发错人）。\n"
         f"{scene_line}\n"
@@ -1385,8 +1394,17 @@ def build_proactive_prompt(
     )
 
 
-def _headless_run(job: Job, cfg: Config, prompt: str, max_turns: int) -> tuple[str | None, str, list[str]]:
+def _headless_run(
+    job: Job,
+    cfg: Config,
+    prompt: str,
+    max_turns: int,
+    active_card: str | None = None,
+) -> tuple[str | None, str, list[str]]:
     """Run a single-turn headless agent over the full tool list.
+
+    ``active_card`` is forwarded to ``run_once`` so the generated proactive message
+    speaks in the owner's current card persona (GAState.active_card → system prompt).
 
     Returns (exit_reason, reply, qq_push_results). ``qq_push_results`` is the list of
     ToolMessage contents of every qq_push tool call (empty when the model never called
@@ -1399,7 +1417,13 @@ def _headless_run(job: Job, cfg: Config, prompt: str, max_turns: int) -> tuple[s
 
     graph = build_graph(cfg=cfg)
     thread_id = f"proactive-{uuid.uuid4().hex[:8]}"
-    state = run_once(graph, prompt, thread_id=thread_id, max_turns=max_turns)
+    state = run_once(
+        graph,
+        prompt,
+        thread_id=thread_id,
+        max_turns=max_turns,
+        active_card=active_card,
+    )
     exit_reason = state.get("exit_reason")
     messages = state.get("messages") or []
 
@@ -1448,7 +1472,7 @@ def _write_back_proactive(
 
     After ``qq_push`` confirmed delivery, we append the turn to the user's main-thread
     checkpoint so that (a) chat records show a complete "定时任务触发 → AI 回复" exchange,
-    and (b) the next time the user replies, 韩立 sees his own proactive message in
+    and (b) the next time the user replies, the active persona sees its own proactive message in
     context instead of going amnesic.
 
     Concurrency scheme (avoids review H3): this runs in the pool worker thread and opens
@@ -1587,6 +1611,13 @@ def run_proactive_job(
     guard = load_guard_config(resolved_cfg)
     jitter = _jitter_minutes(guard)
     targets = _target_users(job)
+    # Companion V1 (Step 2): only the configured owner gets the active-card persona;
+    # a missing owner / disabled switch keeps the neutral voice and never reads a card.
+    companion = load_companion_config()
+    # Only an active Companion needs the repository; otherwise no card is ever read.
+    active_cards = (
+        ActiveCardRepository(active_cards_path(resolved_cfg)) if companion.active else None
+    )
 
     # P3 questions scene: relay the daily report's open 想问你 items. No open
     # questions means no push at all (0 条合法，不为凑数打扰).
@@ -1794,6 +1825,14 @@ def run_proactive_job(
                     kind=recall["kind"],
                     text=_snippet(topic or insight, 120),
                 )
+            active_card = (
+                owner_active_card(uid, companion, active_cards) if active_cards is not None else None
+            )
+            # A card with no persona body would be skipped by build_system_prompt, so
+            # treat it as no card and keep the neutral voice (actor and prompt agree).
+            if active_card and not card_prompt(resolved_cfg, active_card):
+                active_card = None
+            actor_name = (card_name(resolved_cfg, active_card) or "助手") if active_card else "助手"
             prompt = build_proactive_prompt(
                 job,
                 uid,
@@ -1804,8 +1843,11 @@ def run_proactive_job(
                 questions=[q["question"] for q in open_qa] if open_qa else None,
                 verbatim_single=bool(open_qa)
                 and all((q.get("kind") or "") == "composed" for q in open_qa),
+                actor_name=actor_name,
             )
-            exit_reason, reply, qq_results = _headless_run(job, resolved_cfg, prompt, job.max_turns)
+            exit_reason, reply, qq_results = _headless_run(
+                job, resolved_cfg, prompt, job.max_turns, active_card=active_card
+            )
             if not qq_results:
                 logger.info(
                     "proactive: llm decided not to push",
@@ -1849,7 +1891,7 @@ def run_proactive_job(
                         question_count=len(open_qa),
                     )
             # P3: once delivered, write the turn back into the user's main thread so
-            # 韩立 sees his own proactive message in the next turn's context and chat
+            # the active persona sees its own proactive message in the next turn's context and chat
             # records keep a complete "定时任务触发 → AI 回复" alternation. Best-effort:
             # a write-back failure is logged and never fails the outreach.
             _write_back_proactive(resolved_cfg, uid, prompt, reply)
