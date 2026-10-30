@@ -730,6 +730,9 @@ class TestProactiveSent:
         monkeypatch.setenv("COMPANION_OWNER_QQ_OPENID", "u1")
         proactive._companion_stores.clear()
         monkeypatch.setattr(proactive, "load_known_users", lambda: {"u1": {}})
+        # Step 7: sending an event schedules reflection; keep these delivery tests
+        # from spawning a background model call.
+        monkeypatch.setattr(proactive, "schedule_reflection_check", lambda *a, **kw: None)
         monkeypatch.setattr(
             proactive,
             "_headless_run",
@@ -791,6 +794,7 @@ class TestProactiveSent:
         monkeypatch.setenv("COMPANION_MVP_ENABLED", "1")
         monkeypatch.setenv("COMPANION_OWNER_QQ_OPENID", "u1")
         proactive._companion_stores.clear()
+        monkeypatch.setattr(proactive, "schedule_reflection_check", lambda *a, **kw: None)
         companion = CompanionConfig(enabled=True, owner_openid="u1")
 
         proactive._record_companion_sent(

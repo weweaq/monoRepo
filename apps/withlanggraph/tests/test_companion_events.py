@@ -89,6 +89,9 @@ def owner_env(monkeypatch, tmp_path: Path) -> Config:
     monkeypatch.setattr(qq, "_record_known_user", lambda user_id: None)
     monkeypatch.setattr(qq, "record_last_active", lambda user_id, *a, **kw: None)
     monkeypatch.setattr(qq, "record_user_emotion", lambda user_id, text, *a, **kw: None)
+    # Reflection scheduling is Step 7 behavior; event-writing tests must not spawn
+    # a background model call against the real Companion DB.
+    monkeypatch.setattr(qq, "schedule_reflection_check", lambda *a, **kw: None)
     qq._processed_ids.clear()
     qq._user_card.clear()
     qq._companion_stores.clear()

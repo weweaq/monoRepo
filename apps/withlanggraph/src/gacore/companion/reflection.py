@@ -1,0 +1,313 @@
+"""Evidence-bound reflection: 0-2 first-person takeaways from a fixed event batch.
+
+Design: ``docs/companion-self-memory-mvp.md`` §7. The reflector is deliberately
+strict — every takeaway must cite 2-5 events from the same batch and the same
+actor, and a batch never crosses a failure: the first failure retries the exact
+same events, the second failure skips them and records why.
+
+The model is an injection seam (``model=`` or ``runner=``) so tests never touch a
+real provider; ``get_llm([], bind_tools=False)`` is resolved lazily only when a
+real run happens.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import time
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import Final
+
+from langchain_core.messages import HumanMessage, SystemMessage
+
+from gacore.companion.store import (
+    CompanionEvent,
+    CompanionStore,
+    CompanionStoreError,
+    ReflectionDraft,
+)
+from gacore.jsonl_logger import get_logger
+from gacore.redact import redact_text
+
+logger = get_logger("companion.reflection")
+
+REFLECTION_PROMPT_VERSION: Final = "reflection.v1"
+BATCH_SIZE: Final = 10
+MIN_BATCH_EVENTS: Final = 3
+MAX_REFLECTIONS: Final = 2
+MIN_SOURCES: Final = 2
+MAX_SOURCES: Final = 5
+MAX_STATEMENT_CHARS: Final = 200
+
+# UTC+8 is the product's "today" (R6 timestamps use the same offset).
+_DAY_TZ: Final = timezone(timedelta(hours=8))
+
+_JSON_OBJECT: Final = re.compile(r"\{.*\}", re.S)
+# Statements must stay free of local paths and credential-looking strings.
+_SENSITIVE: Final = re.compile(
+    r"(?:[A-Za-z]:\\|\\\\[A-Za-z]|/home/|/Users/|/etc/|~/|\.env\b"
+    r"|\b(?:sk|pk|ak|rk|ghp|gho|ghs|github_pat)[-_][A-Za-z0-9_\-]{8,}\b"
+    r"|\bBearer\s+[A-Za-z0-9._~+/=\-]{8,})",
+)
+
+_SYSTEM_PROMPT: Final = """你是角色自我反思提取器，不是聊天角色。
+
+只根据输入事件，提取 0-2 条可复用的自我认识。
+
+规则：
+1. 每条反思必须引用至少 2 个 source_event_ids。
+2. 不得声称事件中没有发生的行动。
+3. 用户消息是用户说过的话，不是角色自己的经历。
+4. 不修改人格，不推断关系阶段，不创建目标或承诺。
+5. 证据不足时返回空数组。
+6. 只输出 JSON。"""
+
+Runner = Callable[[Sequence[CompanionEvent]], "ReflectionOutcome"]
+
+
+@dataclass(frozen=True, slots=True)
+class ReflectionOutcome:
+    """Validated reflection result; ``ok=False`` carries a human-readable reason."""
+
+    ok: bool
+    drafts: tuple[ReflectionDraft, ...] = ()
+    error: str | None = None
+
+
+def run_reflection(
+    events: Sequence[CompanionEvent], *, model: object | None = None
+) -> ReflectionOutcome:
+    """Ask the reflector for 0-2 takeaways and validate them against ``events``."""
+    if not events:
+        return ReflectionOutcome(ok=False, error="no events to reflect on")
+    try:
+        resolved = model if model is not None else _default_model()
+        payload = json.dumps(
+            {
+                "events": [
+                    {"event_id": event.event_id, "kind": event.kind, "summary": event.summary}
+                    for event in events
+                ]
+            },
+            ensure_ascii=False,
+        )
+        response = resolved.invoke(
+            [SystemMessage(content=_SYSTEM_PROMPT), HumanMessage(content=payload)]
+        )
+        raw = getattr(response, "content", response)
+        text = raw if isinstance(raw, str) else str(raw)
+    except Exception as exc:  # noqa: BLE001 — reflection failure is a retry signal, never a crash
+        logger.warning(
+            "companion reflection model call failed",
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+        )
+        return ReflectionOutcome(ok=False, error=f"model call failed: {type(exc).__name__}")
+
+    match = _JSON_OBJECT.search(text or "")
+    if not match:
+        return ReflectionOutcome(ok=False, error="response is not JSON")
+    try:
+        data = json.loads(match.group(0))
+    except ValueError:
+        return ReflectionOutcome(ok=False, error="response JSON is malformed")
+    drafts, error = validate_reflections(data, {event.event_id for event in events})
+    if drafts is None:
+        return ReflectionOutcome(ok=False, error=error)
+    return ReflectionOutcome(ok=True, drafts=drafts)
+
+
+def validate_reflections(
+    data: object, allowed_event_ids: set[str]
+) -> tuple[tuple[ReflectionDraft, ...] | None, str | None]:
+    """Validate the reflector payload; ``(None, reason)`` means the batch is invalid."""
+    if not isinstance(data, dict):
+        return None, "payload is not an object"
+    raw_reflections = data.get("reflections")
+    if not isinstance(raw_reflections, list):
+        return None, "reflections is not a list"
+    if len(raw_reflections) > MAX_REFLECTIONS:
+        return None, f"too many reflections ({len(raw_reflections)} > {MAX_REFLECTIONS})"
+    drafts: list[ReflectionDraft] = []
+    for raw in raw_reflections:
+        if not isinstance(raw, dict):
+            return None, "reflection is not an object"
+        statement = raw.get("statement")
+        if not isinstance(statement, str):
+            return None, "statement is not a string"
+        statement = statement.strip()
+        if not 1 <= len(statement) <= MAX_STATEMENT_CHARS:
+            return None, "statement length out of range"
+        if _contains_sensitive(statement):
+            return None, "statement contains a secret, token or path"
+        confidence = raw.get("confidence")
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+            return None, "confidence is not a number"
+        if not 0 <= float(confidence) <= 1:
+            return None, "confidence out of range"
+        sources = raw.get("source_event_ids")
+        if not isinstance(sources, list) or not all(isinstance(s, str) for s in sources):
+            return None, "source_event_ids is not a string list"
+        unique = list(dict.fromkeys(sources))
+        if not MIN_SOURCES <= len(unique) <= MAX_SOURCES:
+            return None, f"source count out of range ({len(unique)})"
+        unknown = [s for s in unique if s not in allowed_event_ids]
+        if unknown:
+            return None, f"sources outside the batch: {unknown[:3]}"
+        drafts.append(
+            ReflectionDraft(
+                statement=statement,
+                confidence=float(confidence),
+                source_event_ids=tuple(unique),
+            )
+        )
+    return tuple(drafts), None
+
+
+def reflect_due(
+    store: CompanionStore,
+    actor_id: str,
+    principal_id: str,
+    *,
+    runner: Runner | None = None,
+    now_ms: int | None = None,
+) -> str:
+    """Run one reflection check; returns a short outcome code for logs and tests.
+
+    Codes: ``too_few``, ``not_due_today``, ``reflected``, ``retry_scheduled``,
+    ``batch_skipped``. Never raises for model/store contract failures — those are
+    recorded on the cursor instead so the next event retries the same batch.
+    """
+    now = int(time.time() * 1000) if now_ms is None else int(now_ms)
+    cursor = store.get_cursor(actor_id, principal_id)
+
+    if cursor.retry_batch_end_seq is not None:
+        batch = store.events_between(
+            actor_id, principal_id, cursor.last_reflected_seq + 1, cursor.retry_batch_end_seq
+        )
+        batch_end_seq = int(cursor.retry_batch_end_seq)
+        if not batch:
+            store.record_reflection_failure(
+                actor_id=actor_id,
+                principal_id=principal_id,
+                batch_end_seq=batch_end_seq,
+                failure_count=0,
+                last_error="pinned retry batch is empty",
+                advance=True,
+            )
+            logger.warning(
+                "companion reflection retry batch vanished; cursor advanced",
+                actor_id=actor_id,
+                batch_end_seq=batch_end_seq,
+            )
+            return "batch_skipped"
+    else:
+        batch = store.events_after(actor_id, principal_id, cursor.last_reflected_seq, limit=BATCH_SIZE)
+        if len(batch) < MIN_BATCH_EVENTS:
+            return "too_few"
+        batch_end_seq = batch[-1].seq
+        store.begin_reflection_batch(actor_id, principal_id, batch_end_seq)
+
+    if _reflected_today(cursor.last_reflected_at_ms, now):
+        return "not_due_today"
+
+    outcome = runner(batch) if runner is not None else run_reflection(batch)
+    drafts, error = (
+        validate_reflections(
+            {
+                "reflections": [
+                    {
+                        "statement": draft.statement,
+                        "confidence": draft.confidence,
+                        "source_event_ids": list(draft.source_event_ids),
+                    }
+                    for draft in outcome.drafts
+                ]
+            },
+            {event.event_id for event in batch},
+        )
+        if outcome.ok
+        else (None, outcome.error)
+    )
+
+    if drafts is not None:
+        try:
+            store.commit_reflection_batch(
+                actor_id=actor_id,
+                principal_id=principal_id,
+                reflections=drafts,
+                prompt_version=REFLECTION_PROMPT_VERSION,
+                last_reflected_seq=batch_end_seq,
+                retry_batch_end_seq=None,
+                failure_count=0,
+                last_error=None,
+                last_reflected_at_ms=now,
+            )
+        except CompanionStoreError as exc:
+            error = f"commit rejected: {exc}"
+        else:
+            logger.info(
+                "companion reflection committed",
+                actor_id=actor_id,
+                batch_events=len(batch),
+                reflections=len(drafts),
+            )
+            return "reflected"
+
+    reason = error or "reflection failed"
+    if cursor.failure_count == 0:
+        store.record_reflection_failure(
+            actor_id=actor_id,
+            principal_id=principal_id,
+            batch_end_seq=batch_end_seq,
+            failure_count=1,
+            last_error=reason,
+            advance=False,
+        )
+        logger.warning(
+            "companion reflection failed; the same batch will be retried",
+            actor_id=actor_id,
+            batch_end_seq=batch_end_seq,
+            error=reason,
+        )
+        return "retry_scheduled"
+
+    store.record_reflection_failure(
+        actor_id=actor_id,
+        principal_id=principal_id,
+        batch_end_seq=batch_end_seq,
+        failure_count=0,
+        last_error=reason,
+        advance=True,
+    )
+    logger.warning(
+        "companion reflection failed twice; skipping the batch",
+        actor_id=actor_id,
+        batch_end_seq=batch_end_seq,
+        error=reason,
+    )
+    return "batch_skipped"
+
+
+def _reflected_today(last_reflected_at_ms: int | None, now_ms: int) -> bool:
+    if last_reflected_at_ms is None:
+        return False
+    return _day_key(int(last_reflected_at_ms)) == _day_key(now_ms)
+
+
+def _day_key(ms: int) -> str:
+    return datetime.fromtimestamp(ms / 1000, tz=_DAY_TZ).date().isoformat()
+
+
+def _contains_sensitive(statement: str) -> bool:
+    if redact_text(statement) != statement:
+        return True
+    return bool(_SENSITIVE.search(statement))
+
+
+def _default_model() -> object:
+    from gacore.llm import get_llm
+
+    return get_llm([], bind_tools=False)

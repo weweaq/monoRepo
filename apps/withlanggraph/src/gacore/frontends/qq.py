@@ -103,6 +103,7 @@ from langgraph.types import Command
 
 from gacore.character import card_name, card_prompt, list_cards
 from gacore.companion.config import load_companion_config
+from gacore.companion.coordinator import schedule_reflection_check, shutdown_reflection_coordinator
 from gacore.companion.identity import ActiveCardError, ActiveCardRepository, actor_id_for
 from gacore.companion.store import CompanionStore, companion_db_path
 from gacore.companion.summary import minimize_user_message
@@ -1150,7 +1151,7 @@ class QQApp:
 
             store = _companion_store(Config.default())
 
-            await asyncio.to_thread(
+            result = await asyncio.to_thread(
 
                 store.append_event,
 
@@ -1167,6 +1168,12 @@ class QQApp:
                 idempotency_key=f"qq-user:{msg_id}",
 
             )
+
+            # Only a newly inserted event may schedule a reflection check; a replay
+            # of the same message must not spend a second model call.
+            if result.inserted:
+
+                schedule_reflection_check(actor_id, "owner")
 
         except Exception:  # noqa: BLE001 — memory write must never break the chat path
 
@@ -1221,7 +1228,7 @@ class QQApp:
 
             store = _companion_store(Config.default())
 
-            await asyncio.to_thread(
+            result = await asyncio.to_thread(
 
                 store.append_event,
 
@@ -1238,6 +1245,10 @@ class QQApp:
                 idempotency_key=f"qq-agent:{msg_id}" if msg_id else f"qq-agent:{source_id}",
 
             )
+
+            if result.inserted:
+
+                schedule_reflection_check(actor_id, "owner")
 
         except Exception:  # noqa: BLE001 — memory write must never break the chat path
 
@@ -2929,7 +2940,14 @@ async def _boot() -> None:
 
     logger.info("QQ frontend starting")
 
-    await QQApp(graph).start()
+    try:
+
+        await QQApp(graph).start()
+
+    finally:
+
+        # Stop accepting reflection checks and wait a bounded time for a running one.
+        shutdown_reflection_coordinator()
 
 
 

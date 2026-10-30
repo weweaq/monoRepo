@@ -362,6 +362,72 @@ class CompanionStore:
             last_reflected_at_ms=row["last_reflected_at_ms"],
         )
 
+    def begin_reflection_batch(
+        self, actor_id: str, principal_id: str, batch_end_seq: int
+    ) -> None:
+        """Pin the oldest unreflected batch so a failed run retries exactly this range."""
+        with self._transaction() as conn:
+            conn.execute(
+                f"""
+                INSERT INTO companion_cursor (
+                    actor_id, principal_id, retry_batch_end_seq, failure_count, last_error
+                ) VALUES (?, ?, ?, 0, NULL)
+                ON CONFLICT(actor_id, principal_id) DO UPDATE SET
+                    retry_batch_end_seq = excluded.retry_batch_end_seq,
+                    failure_count = 0,
+                    last_error = NULL,
+                    updated_at = {_TIMESTAMP_DEFAULT}
+                """,
+                (actor_id, principal_id, int(batch_end_seq)),
+            )
+
+    def record_reflection_failure(
+        self,
+        *,
+        actor_id: str,
+        principal_id: str,
+        batch_end_seq: int,
+        failure_count: int,
+        last_error: str,
+        advance: bool,
+    ) -> None:
+        """Persist a failed reflection run.
+
+        ``advance=False`` keeps the pinned batch for a same-batch retry;
+        ``advance=True`` skips it (``last_reflected_seq`` moves past the batch).
+        """
+        with self._transaction() as conn:
+            if advance:
+                conn.execute(
+                    f"""
+                    INSERT INTO companion_cursor (
+                        actor_id, principal_id, last_reflected_seq,
+                        retry_batch_end_seq, failure_count, last_error
+                    ) VALUES (?, ?, ?, NULL, 0, ?)
+                    ON CONFLICT(actor_id, principal_id) DO UPDATE SET
+                        last_reflected_seq = excluded.last_reflected_seq,
+                        retry_batch_end_seq = NULL,
+                        failure_count = 0,
+                        last_error = excluded.last_error,
+                        updated_at = {_TIMESTAMP_DEFAULT}
+                    """,
+                    (actor_id, principal_id, int(batch_end_seq), last_error),
+                )
+            else:
+                conn.execute(
+                    f"""
+                    INSERT INTO companion_cursor (
+                        actor_id, principal_id, retry_batch_end_seq, failure_count, last_error
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(actor_id, principal_id) DO UPDATE SET
+                        retry_batch_end_seq = excluded.retry_batch_end_seq,
+                        failure_count = excluded.failure_count,
+                        last_error = excluded.last_error,
+                        updated_at = {_TIMESTAMP_DEFAULT}
+                    """,
+                    (actor_id, principal_id, int(batch_end_seq), int(failure_count), last_error),
+                )
+
     def commit_reflection_batch(
         self,
         *,
