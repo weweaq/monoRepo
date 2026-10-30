@@ -5785,3 +5785,51 @@ Block（仅表达偏好），并在发送层用 `plan_final_reply()` 做语义�
 - [x] V2-Step 1 数据层 + 生成链路（migration v2、两本日记、private→reflection）
 - [ ] V2-Step 6 接线：`generate_due_journals` 进后台循环（次日首次空闲写昨天）
 - [ ] V2-Step 2：relationship / open_thread（migration v3）
+
+## 2026-10-30 · Companion V2-Step 1 收尾：两本日记接线 + V1 稳定性缺口关闭
+
+**背景**：接续 opencode 会话留下的 V2-Step 1 半成品。工作树当时有 23 个测试挂红（proactive 侧
+签名与 prompt 契约未跟随），且两本日记只有库 API、没有任何触发入口；V2 计划 §1.1 列的 8 个
+V1 稳定性缺口里，1/2/3/4/5/6/7 也在同一批未提交改动里。
+
+**已完成**：
+
+- 测试修绿（23 → 0）：`_headless_run` 的 fake 全部接受 `owner_openid`；问题类断言从「数 [Qn]
+  文本」改为「数背景 JSON 的 open_questions 数组」（`_open_questions()` 辅助），因为指令正文
+  现在恒含 `[Q1]/[Q2]`；`save_journals` 改按 `JournalSaveResult.ids/.created` 断言。
+- 日记触发接线：`config/schedule.json` 新增 `companion-journal`（00:10，`type=journal`）；
+  `scheduler.py` 新增 `JOURNAL_POOL` / `run_journal_job()` / `run_loop` 的 journal 分支；
+  actor = owner 当前角色卡 or `assistant-default`，Companion 未启用时 0 次 LLM。
+- 缺口关闭（详见 tech §9.2.7/§9.2.9）：
+  1. 非 owner/群聊不再写 `record_last_active`/emotion/rollover/周报捕获/QA 捕获/后台归因
+     （`identity.legacy_memory_allowed`），并把 `state.memory_scope="guest"` 传给
+     `memory_maintain` 早退；
+  2. `qq_tools.pin_recipients()` 把收件人钉在工具层（越权目标直接拒绝）；
+  3. 群聊 `/角色 <id>` 拒绝切换；
+  4. Companion 轮不显示工具轨迹（即使 `QQ_TOOL_TRACE=1`）；
+  5. proactive 动态数据只保留 JSON 一份，正文改为指向 JSON key 的指令；
+  6. 反思协调器补 lost-wakeup 重跑（运行中到达的事件不会被丢）；
+  7. `agent.message.sent` summary 统一 `redact_text`，无平台 id 时把 logical turn id 纳入幂等键。
+- 缺口 8（真实 QQ 20 轮 transcript）未做，属人工灰度项，保留为待办。
+
+**实测验证**：
+
+- `uv run pytest apps/withlanggraph/tests/test_scheduler.py -q -k Journal` → **4 passed**
+- `uv run pytest`（全仓）→ **2083 passed, 4 skipped**（3 分 58 秒内）
+- `uv run ruff check apps/withlanggraph` → All checks passed
+- `node apps/mermaid-viewer/tests/check_prompt_logic.js` → ALL PASS（新增 SC→JRN 边在
+  RC/MAIN 锚点之后，行号锚点不受影响）
+
+**偏差说明**：
+
+- 日记触发选「次日 00:10 固定 job」而非「下一次空闲」：前者可复现、可观测、不引入额外空闲
+  判定状态；代价是当天结束到 00:10 之间不会有日记（可接受，日记本就是事后投影）。
+- 本轮把 V2 计划 §1.1 的 7 条 V1 缺口与 Step 1 收尾合并提交（5 个提交按主题拆分），没有按
+  「一步两提交」的 V1 节奏逐条走：这些改动同源同批，硬拆反而制造互相依赖的半成品提交。
+
+**待办更新**：
+
+- [x] 两本日记生成接线（00:10 journal job）
+- [x] V1 稳定性缺口 1–7
+- [ ] 缺口 8：真实 QQ 20 轮 transcript 灰度验收
+- [ ] V2-Step 2：关系与 Open Threads（migration v3）

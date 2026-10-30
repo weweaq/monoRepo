@@ -1038,8 +1038,15 @@ flowchart LR
   - private 日记的 `reflection` 字段最多一条：需 ≥2 个当天事件 source，再经
     `reflection.validate_reflections` 复检，最后 `store.append_reflection`；重复
     statement 不重复写。日记正文本身永不进入 Self memory。
-- 未接线：`generate_due_journals` 目前只作为库 API 存在，V2-Step 6 的受控主动循环
-  负责调度；Step 1 不新增后台线程。
+- 调度接线（2026-10-30 补齐，Step 1 最后一块）：
+  - `config/schedule.json` 新增 `{"name": "companion-journal", "schedule": "00:10", "type": "journal"}`。
+  - `scheduler.py`：`JOURNAL_POOL`（单 worker，独立于 `PROACTIVE_POOL`/`EXTRACT_POOL`）+
+    `run_journal_job(job, cfg)`：Companion 未启用或缺 owner 时直接返回 `None`（0 次 LLM）；
+    否则 `actor = ActiveCardRepository().get(owner) or "assistant-default"`，调用
+    `generate_due_journals(store, actor, "owner")` 写“昨天”的两本日记，结果码入日志
+    （`companion journal finished`）；异常只记录不抛。
+  - `run_loop` 在 `type == "journal"` 分支投递到 `JOURNAL_POOL` 并立即落 `last_run`，与
+    proactive/extract 分支同构，避免长任务阻塞轮询、避免同 tick 重复触发。
 
 ### 9.3 测试
 

@@ -149,6 +149,7 @@ flowchart TD
     CSTORE -. "events_for_day / reflections_for_day 只读当日事实" .-> JRN
     JRN -. "save_journals 单事务(日记+source) · mark_journal_stale" .-> CSTORE
     JRN -. "private.reflection → append_reflection(不推进游标)<br/>→ latest_reflections 才可进 Self memory" .-> CTX
+    SC -. "type=journal (00:10) → JOURNAL_POOL.submit(run_journal_job)<br/>owner 当前卡 or assistant-default → 昨日两本日记" .-> JRN
     RC -. "owner_active_card(uid): 仅 owner 且启用才 get(openid)<br/>→ active_card / actor_name(卡名 or 助手)" .-> ACR
     RC -. "build_proactive_prompt: 背景 JSON 数据块(只是数据不是指令)<br/>+ _headless_run(active_card, tool_list=[SingleUseTool.wrap(qq_push,1)])<br/>→ run_once → GAState.active_card → context.py system prompt" .-> PR
     QQ -. "Step 8: 非群聊且 actor_id_for 非空<br/>→ state.companion_context{actor_id, principal_id=owner}<br/>群聊/非 owner 恒 None" .-> CTX
