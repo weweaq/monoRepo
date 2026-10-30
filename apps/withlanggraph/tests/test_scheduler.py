@@ -117,11 +117,11 @@ class TestNextRunDaily:
 class TestNextRunInterval:
     """Schedule spec 'every N<m|h|d>' — interval from last_run."""
 
-    def test_every_30m_never_run_returns_now_plus_30m(self) -> None:
-        """Given every 30m and never run, Then next_run is now + 30m."""
+    def test_every_30m_never_run_is_due_immediately(self) -> None:
+        """Given every 30m and never run, Then it is due immediately (first heartbeat)."""
         now = datetime(2026, 8, 3, 12, 0, 0, tzinfo=UTC)
         nxt = next_run_time("every 30m", last_run=None, now=now)
-        assert nxt == datetime(2026, 8, 3, 12, 30, 0, tzinfo=UTC)
+        assert nxt == now
 
     def test_every_6h_with_last_run_returns_last_plus_6h(self) -> None:
         """Given every 6h, last_run=06:00, When now=10:00, Then next_run is 12:00."""
@@ -139,10 +139,10 @@ class TestNextRunInterval:
         assert nxt == datetime(2026, 8, 6, 12, 0, 0, tzinfo=UTC)
 
     def test_every_1h_case_insensitive(self) -> None:
-        """Given 'every 1H' uppercase, When parsed, Then it works."""
+        """Given 'every 1H' uppercase, When never run, Then it is due immediately."""
         now = datetime(2026, 8, 3, 12, 0, 0, tzinfo=UTC)
         nxt = next_run_time("every 1H", last_run=None, now=now)
-        assert nxt == datetime(2026, 8, 3, 13, 0, 0, tzinfo=UTC)
+        assert nxt == now
 
 
 # ---------- next_run_time: invalid ----------

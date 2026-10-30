@@ -513,7 +513,11 @@ def next_run_time(schedule: str, last_run: str | None, now: datetime) -> datetim
         n = int(m.group(1))
         unit = m.group(2).lower()
         delta = {"m": timedelta(minutes=n), "h": timedelta(hours=n), "d": timedelta(days=n)}[unit]
-        base = _parse_iso(last_run) if last_run else now
+        if not last_run:
+            # Never run before: an interval job (e.g. the 2h life tick) must start now,
+            # otherwise the first dispatch can never happen (candidate would be now+delta).
+            return now
+        base = _parse_iso(last_run) or now
         candidate = base + delta
         # If the candidate is already in the past, walk forward in delta steps until future.
         while candidate <= now:
