@@ -123,6 +123,13 @@ def refresh_mood(
     now = int(datetime.now(_TZ).timestamp() * 1000) if now_ms is None else int(now_ms)
     events = store.events_for_actor(actor_id, principal_id)
     signal = detect_signal(events, now_ms=now)
+    # The projection ran either way: stamp the version so "mood evaluated, neutral now"
+    # is distinguishable from "never computed" when reading the CLI status.
+    store.record_projection(
+        "mood",
+        projector_version=MOOD_BLOCK_VERSION,
+        cursor_seq=max((event.seq for event in events), default=0),
+    )
     if signal is None:
         store.clear_mood(actor_id, principal_id)
         return None
@@ -134,11 +141,6 @@ def refresh_mood(
         arousal=signal.arousal,
         source_event_id=signal.source_event_id,
         expires_at_ms=signal.expires_at_ms,
-    )
-    store.record_projection(
-        "mood",
-        projector_version=MOOD_BLOCK_VERSION,
-        cursor_seq=max((event.seq for event in events), default=0),
     )
     logger.info(
         "companion mood refreshed",
