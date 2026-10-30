@@ -1348,6 +1348,10 @@ owner 轮注入 / 非 owner 不注入、信任包装与 system prompt 洁净、1
   `get_time` 等），`approved → in_progress → read_action.* → goal.*`，**不发消息**。
 - `ACT_AND_TELL`：同样执行，**成功后才**发送；执行失败只记 `read_action.failed` 并保持沉默。
 
+**静默时段**：`derive_day_phase()` 判 `quiet` 为 **23:00–08:00**（比旧 proactive 的
+23:30–07:30 更宽，保证 08:00 前绝不说话）；`decide()` 的 gate 之外，`_tell()` 与
+`ACT_AND_TELL` 的投递前还有第二道 `_quiet_now()` 检查——即使决策已经算出，静默时段也拒绝发送。
+
 **边界**：日主动上限 3 条（`MAX_SENDS_PER_DAY`）、每次 tick ≤1 次 LLM、活动预算
 `max_read_actions=1` + 30 分钟 deadline、`cancel_on_user_message=True`（主人开口即取消）。
 投递复用 `qq_push` 工具，回执与短消息节奏与 V1 相同。

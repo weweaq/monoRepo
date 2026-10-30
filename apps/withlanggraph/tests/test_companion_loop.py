@@ -292,3 +292,61 @@ class TestGateAndDryRun:
         assert result.action == "TELL_ONLY" and result.sent_text == "在吗"
         assert sent == []
         assert len(store.events_for_actor("linwan", "owner")) == before
+
+class TestNeverAtNight:
+    """半夜绝不发消息：gate 与 delivery 两道闸都要成立。"""
+
+    def test_night_tick_never_sends(self, tmp_path: Path) -> None:
+        store = _store(tmp_path)
+        _open_thread(store)
+        sent: list[str] = []
+
+        result = run_life_tick(
+            store,
+            "linwan",
+            "owner",
+            now_ms=_ms(_DAY, 2),
+            runner=lambda _c: {"action": "TELL_ONLY", "message": "睡了吗"},
+            sender=sent.append,
+        )
+
+        assert result.reason == "QUIET_HOURS"
+        assert sent == []
+
+    def test_before_eight_is_still_quiet(self, tmp_path: Path) -> None:
+        store = _store(tmp_path)
+        _open_thread(store)
+        sent: list[str] = []
+
+        result = run_life_tick(
+            store,
+            "linwan",
+            "owner",
+            now_ms=_ms(_DAY, 7, 30),
+            runner=lambda _c: {"action": "TELL_ONLY", "message": "早"},
+            sender=sent.append,
+        )
+
+        assert result.reason == "QUIET_HOURS" and sent == []
+
+    def test_delivery_layer_refuses_at_night(self, tmp_path: Path) -> None:
+        """Even a pre-computed decision cannot be delivered inside quiet hours."""
+        from gacore.companion.loop import _tell
+        from gacore.companion.outreach import Decision
+
+        store = _store(tmp_path)
+        sent: list[str] = []
+        decision = Decision(action="TELL_ONLY", message="睡了吗", llm_calls=1)
+
+        result = _tell(
+            store,
+            "linwan",
+            "owner",
+            decision,
+            sender=sent.append,
+            now=_ms(_DAY, 2),
+            dry_run=False,
+        )
+
+        assert result.action == "STAY_SILENT" and result.reason == "QUIET_HOURS"
+        assert sent == []

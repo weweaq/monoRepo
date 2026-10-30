@@ -34,8 +34,10 @@ _DAY_MS: Final = 24 * _HOUR_MS
 DAY_PHASES: Final = frozenset({"quiet", "morning", "daytime", "evening"})
 AVAILABILITY: Final = frozenset({"free", "chatting", "working", "cooldown", "resting"})
 
+# Quiet hours are deliberately wider than the old proactive guard (23:30-07:30): the life
+# tick never speaks before 08:00, so "半夜不会收到消息" holds without relying on the window.
 QUIET_START_HOUR: Final = 23
-QUIET_END_HOUR: Final = 7
+QUIET_END_HOUR: Final = 8
 CHATTING_WINDOW_MS: Final = 5 * 60 * 1000
 
 

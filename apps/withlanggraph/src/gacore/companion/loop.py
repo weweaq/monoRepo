@@ -22,7 +22,13 @@ from dataclasses import dataclass
 from datetime import timedelta, timezone
 from typing import Final
 
-from gacore.companion.activity import ActivityBudget, start_activity, spend, complete_activity
+from gacore.companion.activity import (
+    ActivityBudget,
+    complete_activity,
+    derive_day_phase,
+    spend,
+    start_activity,
+)
 from gacore.companion.goal import (
     ALLOWED_TOOLS,
     MAX_DEADLINE_DAYS,
@@ -182,6 +188,10 @@ def _tell(
     now: int,
     dry_run: bool,
 ) -> TickResult:
+    if _quiet_now(now):
+        return TickResult(
+            action="STAY_SILENT", reason="QUIET_HOURS", llm_calls=decision.llm_calls
+        )
     text = _expression(decision)
     if not text:
         return TickResult(
@@ -414,6 +424,11 @@ def _goal_text(candidate: OutreachCandidate | None) -> str:
     if candidate.kind == "owner_concern":
         return "回看对方最近的状态记录"
     return "回看最近的记录"
+
+
+def _quiet_now(now_ms: int) -> bool:
+    """Second gate: delivery is refused inside quiet hours no matter who decided to talk."""
+    return derive_day_phase(now_ms) == "quiet"
 
 
 def _expression(decision: Decision) -> str:
