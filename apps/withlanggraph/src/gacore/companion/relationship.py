@@ -162,6 +162,11 @@ def refresh_relationship(
         last_interaction_at_ms=projection.last_interaction_at_ms,
     )
     _sync_open_threads(store, actor_id, principal_id, events, projection.open_threads)
+    store.record_projection(
+        "relationship",
+        projector_version=RELATIONSHIP_PROJECTION_VERSION,
+        cursor_seq=max((event.seq for event in events), default=0),
+    )
     logger.info(
         "companion relationship refreshed",
         actor_id=actor_id,

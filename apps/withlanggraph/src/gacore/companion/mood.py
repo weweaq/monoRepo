@@ -135,6 +135,11 @@ def refresh_mood(
         source_event_id=signal.source_event_id,
         expires_at_ms=signal.expires_at_ms,
     )
+    store.record_projection(
+        "mood",
+        projector_version=MOOD_BLOCK_VERSION,
+        cursor_seq=max((event.seq for event in events), default=0),
+    )
     logger.info(
         "companion mood refreshed",
         actor_id=actor_id,

@@ -346,3 +346,45 @@ def _default_model() -> object:
     from gacore.llm import get_llm
 
     return get_llm([], bind_tools=False)
+
+# ------------------------------------------------------------------ lifecycle
+
+
+def mark_stale(store: CompanionStore, reflection_id: str, *, reason: str) -> None:
+    """A statement that no longer holds (its source changed) stops being injected."""
+    store.set_reflection_status(reflection_id, status="stale", reason=reason)
+
+
+def retract(store: CompanionStore, reflection_id: str, *, reason: str = "retracted") -> None:
+    """The owner explicitly asked to forget this statement."""
+    store.set_reflection_status(reflection_id, status="retracted", reason=reason)
+
+
+def refute(
+    store: CompanionStore, reflection_id: str, *, refuting_event_ids: Sequence[str], reason: str
+) -> None:
+    """A newer piece of evidence contradicts the statement: keep it, mark it contradicted."""
+    if not refuting_event_ids:
+        raise ValueError("refuting a reflection requires at least one event")
+    store.set_reflection_status(
+        reflection_id, status="contradicted", reason=reason, refutes_id=refuting_event_ids[0]
+    )
+
+
+def supersede(
+    store: CompanionStore, old_reflection_id: str, new_reflection_id: str
+) -> None:
+    """A newer statement replaces an older one; the old row is kept as ``stale``."""
+    store.set_reflection_status(
+        old_reflection_id,
+        status="stale",
+        reason=f"superseded_by:{new_reflection_id}",
+        supersedes_id=new_reflection_id,
+    )
+
+
+def affected_reflections(
+    store: CompanionStore, event_ids: Sequence[str]
+) -> list[str]:
+    """Reflections that cite any of these events — the blast radius of a correction."""
+    return [row.reflection_id for row in store.reflections_for_events(event_ids)]

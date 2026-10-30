@@ -255,6 +255,32 @@ def _self_memory_block(cfg: Config, companion_context: dict) -> str:
     return _companion_blocks(cfg, companion_context)[0]
 
 
+def _companion_state_block(cfg: Config, companion_context: dict) -> str:
+    """Bounded relationship / threads / commitments / goal block; fail-open.
+
+    Reads only derived tables, so a turn costs a few indexed queries and never a model
+    call. Caps live in ``companion.prompt_blocks`` (300/300/400 chars).
+    """
+    try:
+        from gacore.companion.prompt_blocks import build_companion_state_block
+        from gacore.companion.store import CompanionStore
+
+        store = CompanionStore.from_config(cfg)
+        actor_id = str(companion_context.get("actor_id") or "")
+        principal_id = str(companion_context.get("principal_id") or "")
+        if not actor_id or not principal_id:
+            return ""
+        return build_companion_state_block(
+            store.relationship(actor_id, principal_id),
+            store.open_threads(actor_id, principal_id),
+            store.commitments(actor_id, principal_id, open_only=True),
+            store.goals(actor_id, principal_id, status="in_progress")
+            or store.goals(actor_id, principal_id, status="approved"),
+        )
+    except Exception:  # noqa: BLE001 - companion state is optional background
+        return ""
+
+
 def build_system_prompt(state: GAState, cfg: Config) -> str:
     """Build the per-turn system prompt: L0 rules, daily recap, working checkpoint, and periodic hints."""
     fast_reply = bool(state.get("fast_reply"))
@@ -293,6 +319,12 @@ def build_system_prompt(state: GAState, cfg: Config) -> str:
                     version=SELF_MEMORY_BLOCK_VERSION,
                     actor_id=str(companion_context.get("actor_id") or ""),
                 )
+        # Derived state (V2-Step 7): relationship / threads / commitments / goal, each
+        # hard-capped. Data only — never instructions.
+        state_block = _companion_state_block(cfg, companion_context)
+        if state_block:
+            prompt += f"\n\n{state_block}"
+            injected_bg = True
         # Mood (V2-Step 3): one bounded line, only when the state is still live. An
         # expired mood is neutral, so nothing is injected at all.
         if mood_line:

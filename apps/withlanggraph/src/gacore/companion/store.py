@@ -25,8 +25,11 @@ from pathlib import Path
 from typing import Final
 
 from gacore.config import Config
+from gacore.jsonl_logger import get_logger
 
-SCHEMA_VERSION: Final = 7
+SCHEMA_VERSION: Final = 8
+
+logger = get_logger("companion.store")
 DEFAULT_BUSY_TIMEOUT_MS: Final = 5000
 
 # Versioned registry: V1/V2 allow the three message events only. Journal data is a
@@ -70,8 +73,13 @@ EVENT_KINDS: Final[dict[int, frozenset[str]]] = {
     5: _EVENT_KINDS_V1,
     6: _EVENT_KINDS_V6,
     7: _EVENT_KINDS_V7,
+    8: _EVENT_KINDS_V7,
 }
 SUPPORTED_EVENT_KINDS: Final = EVENT_KINDS[SCHEMA_VERSION]
+
+# Reflection lifecycle (V2-Step 7). A statement below this confidence is never injected.
+MIN_INJECT_CONFIDENCE: Final = 0.5
+REFLECTION_STATUSES: Final = frozenset({"active", "stale", "contradicted", "retracted"})
 
 # Relationship vocabulary (V2-Step 2). The projector is the only writer, and stage is
 # derived by rules — a model may never set it directly.
@@ -149,6 +157,8 @@ class CompanionEvent:
 
 @dataclass(frozen=True, slots=True)
 class ReflectionRecord:
+    """One self-knowledge statement plus its lifecycle (V2-Step 7)."""
+
     reflection_id: str
     actor_id: str
     principal_id: str
@@ -157,6 +167,14 @@ class ReflectionRecord:
     prompt_version: str
     created_at: str
     updated_at: str
+    status: str = "active"
+    topic_tags: tuple[str, ...] = ()
+    valid_from_ms: int | None = None
+    valid_to_ms: int | None = None
+    expires_at_ms: int | None = None
+    supersedes_id: str | None = None
+    refutes_id: str | None = None
+    projector_version: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -714,6 +732,27 @@ MIGRATION_V7: Final[tuple[str, ...]] = (
     """,
 )
 
+MIGRATION_V8: Final[tuple[str, ...]] = (
+    # Reflection lifecycle: a statement can go stale, be contradicted or retracted, and
+    # every projection records which projector version produced it.
+    "ALTER TABLE companion_reflection ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
+    "ALTER TABLE companion_reflection ADD COLUMN topic_tags_json TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE companion_reflection ADD COLUMN valid_from_ms INTEGER",
+    "ALTER TABLE companion_reflection ADD COLUMN valid_to_ms INTEGER",
+    "ALTER TABLE companion_reflection ADD COLUMN expires_at_ms INTEGER",
+    "ALTER TABLE companion_reflection ADD COLUMN supersedes_id TEXT",
+    "ALTER TABLE companion_reflection ADD COLUMN refutes_id TEXT",
+    "ALTER TABLE companion_reflection ADD COLUMN projector_version TEXT",
+    f"""
+    CREATE TABLE IF NOT EXISTS companion_projection_state (
+        projection        TEXT PRIMARY KEY,
+        projector_version TEXT NOT NULL,
+        cursor_seq        INTEGER NOT NULL DEFAULT 0,
+        updated_at        TEXT NOT NULL DEFAULT ({_TIMESTAMP_DEFAULT})
+    )
+    """,
+)
+
 MIGRATIONS: Final[dict[int, tuple[str, ...]]] = {
     1: MIGRATION_V1,
     2: MIGRATION_V2,
@@ -722,6 +761,7 @@ MIGRATIONS: Final[dict[int, tuple[str, ...]]] = {
     5: MIGRATION_V5,
     6: MIGRATION_V6,
     7: MIGRATION_V7,
+    8: MIGRATION_V8,
 }
 
 
@@ -916,20 +956,36 @@ class CompanionStore:
         return [_row_to_event(row) for row in rows]
 
     def latest_reflections(
-        self, actor_id: str, principal_id: str, *, limit: int = 3
+        self,
+        actor_id: str,
+        principal_id: str,
+        *,
+        limit: int = 3,
+        now_ms: int | None = None,
+        min_confidence: float = MIN_INJECT_CONFIDENCE,
+        status: str = "active",
     ) -> list[ReflectionRecord]:
-        """Most recent reflections of one actor, newest first."""
+        """Inject-eligible reflections, ranked by confidence x recency.
+
+        Lifecycle filtering happens here so no caller can accidentally inject a stale,
+        retracted or expired statement: only ``active`` rows with enough confidence and a
+        live ``expires_at_ms`` are returned, newest-first as a tie-break.
+        """
         if limit <= 0:
             return []
+        now = int(time.time() * 1000) if now_ms is None else int(now_ms)
         with self._connect() as conn:
             rows = conn.execute(
                 """
                 SELECT * FROM companion_reflection
                 WHERE actor_id = ? AND principal_id = ?
-                ORDER BY created_at DESC, rowid DESC
+                  AND status = ?
+                  AND confidence >= ?
+                  AND (expires_at_ms IS NULL OR expires_at_ms > ?)
+                ORDER BY confidence DESC, created_at DESC, rowid DESC
                 LIMIT ?
                 """,
-                (actor_id, principal_id, int(limit)),
+                (actor_id, principal_id, status, float(min_confidence), now, int(limit)),
             ).fetchall()
         return [_row_to_reflection(row) for row in rows]
 
@@ -1259,10 +1315,19 @@ class CompanionStore:
             conn.execute(
                 """
                 INSERT INTO companion_reflection (
-                    reflection_id, actor_id, principal_id, statement, confidence, prompt_version
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    reflection_id, actor_id, principal_id, statement, confidence,
+                    prompt_version, projector_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
-                (reflection_id, actor_id, principal_id, draft.statement, draft.confidence, prompt_version),
+                (
+                    reflection_id,
+                    actor_id,
+                    principal_id,
+                    draft.statement,
+                    draft.confidence,
+                    prompt_version,
+                    prompt_version,
+                ),
             )
             for event_id in draft.source_event_ids:
                 conn.execute(
@@ -1383,10 +1448,18 @@ class CompanionStore:
                     """
                     INSERT INTO companion_reflection (
                         reflection_id, actor_id, principal_id,
-                        statement, confidence, prompt_version
-                    ) VALUES (?, ?, ?, ?, ?, ?)
+                        statement, confidence, prompt_version, projector_version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (reflection_id, actor_id, principal_id, draft.statement, draft.confidence, prompt_version),
+                    (
+                        reflection_id,
+                        actor_id,
+                        principal_id,
+                        draft.statement,
+                        draft.confidence,
+                        prompt_version,
+                        prompt_version,
+                    ),
                 )
                 for event_id in dict.fromkeys(draft.source_event_ids):
                     conn.execute(
@@ -1423,6 +1496,117 @@ class CompanionStore:
             )
         return tuple(reflection_ids)
 
+
+    # ---------------------------------------------------- reflection lifecycle
+
+    def set_reflection_status(
+        self,
+        reflection_id: str,
+        *,
+        status: str,
+        reason: str | None = None,
+        supersedes_id: str | None = None,
+        refutes_id: str | None = None,
+    ) -> None:
+        """Move one reflection through its lifecycle (never silently deleted)."""
+        if status not in REFLECTION_STATUSES:
+            raise ValueError(f"unknown reflection status: {status!r}")
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT reflection_id FROM companion_reflection WHERE reflection_id = ?",
+                (reflection_id,),
+            ).fetchone()
+            if row is None:
+                raise CompanionStoreError(f"unknown reflection: {reflection_id!r}")
+            conn.execute(
+                f"""
+                UPDATE companion_reflection
+                SET status = ?, supersedes_id = COALESCE(?, supersedes_id),
+                    refutes_id = COALESCE(?, refutes_id),
+                    updated_at = {_TIMESTAMP_DEFAULT}
+                WHERE reflection_id = ?
+                """,
+                (status, supersedes_id, refutes_id, reflection_id),
+            )
+        logger.info(
+            "companion reflection status changed",
+            reflection_id=reflection_id,
+            status=status,
+            reason=reason,
+        )
+
+    def reflection_sources(self, reflection_id: str) -> tuple[str, ...]:
+        """Event ids backing one reflection (the audit trail for corrections)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT source.event_id
+                FROM companion_reflection_source AS source
+                JOIN companion_event AS event ON event.event_id = source.event_id
+                WHERE source.reflection_id = ?
+                ORDER BY event.seq ASC
+                """,
+                (reflection_id,),
+            ).fetchall()
+        return tuple(row["event_id"] for row in rows)
+
+    def reflections_for_events(self, event_ids: Sequence[str]) -> list[ReflectionRecord]:
+        """Reflections that cite any of the given events (correction propagation)."""
+        ids = [event_id for event_id in dict.fromkeys(event_ids) if event_id]
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT DISTINCT reflection.*
+                FROM companion_reflection AS reflection
+                JOIN companion_reflection_source AS source
+                  ON source.reflection_id = reflection.reflection_id
+                WHERE source.event_id IN ({placeholders})
+                ORDER BY reflection.created_at DESC, reflection.rowid DESC
+                """,
+                tuple(ids),
+            ).fetchall()
+        return [_row_to_reflection(row) for row in rows]
+
+    # ------------------------------------------------------- projection state
+
+    def projection_state(self, projection: str) -> dict[str, object] | None:
+        """Recorded projector version + cursor for one derived projection."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM companion_projection_state WHERE projection = ?",
+                (projection,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "projection": row["projection"],
+            "projector_version": row["projector_version"],
+            "cursor_seq": int(row["cursor_seq"]),
+            "updated_at": row["updated_at"],
+        }
+
+    def record_projection(
+        self, projection: str, *, projector_version: str, cursor_seq: int = 0
+    ) -> None:
+        """Stamp which projector version produced one derived table (rebuild auditing)."""
+        _require_non_empty("projection", projection)
+        _require_non_empty("projector_version", projector_version)
+        with self._transaction() as conn:
+            conn.execute(
+                f"""
+                INSERT INTO companion_projection_state (
+                    projection, projector_version, cursor_seq
+                ) VALUES (?, ?, ?)
+                ON CONFLICT(projection) DO UPDATE SET
+                    projector_version = excluded.projector_version,
+                    cursor_seq = excluded.cursor_seq,
+                    updated_at = {_TIMESTAMP_DEFAULT}
+                """,
+                (projection, projector_version, int(cursor_seq)),
+            )
 
     # ---------------------------------------------------------------- relationship
 
@@ -2338,6 +2522,15 @@ def _row_to_event(row: sqlite3.Row) -> CompanionEvent:
 
 
 def _row_to_reflection(row: sqlite3.Row) -> ReflectionRecord:
+    keys = set(row.keys())
+
+    def _opt(name: str) -> object | None:
+        return row[name] if name in keys else None
+
+    try:
+        tags = tuple(json.loads(_opt("topic_tags_json") or "[]"))
+    except (TypeError, ValueError):
+        tags = ()
     return ReflectionRecord(
         reflection_id=row["reflection_id"],
         actor_id=row["actor_id"],
@@ -2347,7 +2540,19 @@ def _row_to_reflection(row: sqlite3.Row) -> ReflectionRecord:
         prompt_version=row["prompt_version"],
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        status=str(_opt("status") or "active"),
+        topic_tags=tags,
+        valid_from_ms=_maybe_int(_opt("valid_from_ms")),
+        valid_to_ms=_maybe_int(_opt("valid_to_ms")),
+        expires_at_ms=_maybe_int(_opt("expires_at_ms")),
+        supersedes_id=_opt("supersedes_id"),
+        refutes_id=_opt("refutes_id"),
+        projector_version=_opt("projector_version"),
     )
+
+
+def _maybe_int(value: object | None) -> int | None:
+    return None if value is None else int(value)
 
 
 def _assert_journal_sources_in_day(
