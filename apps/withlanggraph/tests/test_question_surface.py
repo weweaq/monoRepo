@@ -139,7 +139,7 @@ def test_t_s3_asof_ignores_future(tmp_path: Path, monkeypatch):
 
 # 缺库诚实：langTrack.db 不存在 → 该路留空，不抛
 def test_missing_db_honest_empty(tmp_path: Path, monkeypatch):
-    # 桩掉 git 计数：--basetemp 指向仓库内 tmp_pytest_run，tmp_path 向上探测会命中 mono 历史
+    # 桩掉 git 计数：basetemp 位于仓库内（data/pytest-tmp），tmp_path 向上探测会命中 mono 历史
     monkeypatch.setattr(
         "gacore.question_surface._git_commit_counts",
         lambda cfg, s, e: {},

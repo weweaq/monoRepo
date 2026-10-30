@@ -34,8 +34,6 @@ ignore = ["RUF001", "RUF002", "RUF003", "UP031"]
 [tool.pytest.ini_options]
 testpaths = ["tests", "apps", "packages"]
 asyncio_mode = "auto"
-# 独立 basetemp：绕开共享 %TEMP%\pytest-of-* 目录（其中遗留的 ACL 拒绝符号链接
-# 会让 pytest 启动即崩溃，WinError 5）。每次运行自动清空该目录。
-# 目录名带 _run 后缀：旧的 tmp_pytest 残留已被 ACL 锁死（需管理员权限才能删除），
-# 继续沿用会让 `uv run pytest` 一启动就 WinError 5；换名即可绕过，无需提权。
-addopts = "--basetemp=tmp_pytest_run"
+# basetemp 不在 addopts 里固定：根 conftest.py 的 pytest_configure 每次运行分配
+# data/pytest-tmp/run-<pid>-<ns>（data/ 已 gitignore）。固定名字会被本机另一身份
+# 运行创建的私有 ACL 目录锁死（rm_rf 抛 WinError 5），原因见 conftest 注释。

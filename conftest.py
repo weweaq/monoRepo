@@ -6,7 +6,16 @@ to their upstream repos as possible (subtree sync friendly).
 
 from __future__ import annotations
 
+import os
+import shutil
+import time
+
 import pytest
+
+# 每次运行独立 basetemp 的父目录（位于被 gitignore 的 data/ 下）
+_BASETEMP_ROOT = "data/pytest-tmp"
+# 只保留最近若干天的运行目录，避免 data/ 无限增长
+_BASETEMP_KEEP_SECONDS = 7 * 24 * 3600
 
 # 上游（WithLangGraph 原仓库 HEAD b127a2e）即失败的用例。test_qq.py 的角色卡切换用例
 # 已在 mono 侧修好（MagicMock checkpointer + AsyncMock adelete_thread，2026-10-29 实测通过），
@@ -19,6 +28,28 @@ _KNOWN_UPSTREAM_FAILURES = {
     "apps/checkself/tests/test_topic.py::test_analyze_returns_top_words",
     "apps/checkself/tests/test_topic.py::test_analyze_categorizes",
 }
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_configure(config: pytest.Config) -> None:
+    """给每次运行分配独立 basetemp，避开跨身份残留的私有 ACL 目录。
+
+    固定 basetemp 名字（原 addopts 里的 tmp_pytest_run）会被本机另一身份启动的
+    运行（凌晨 00:00 的定时任务）创建成私有 ACL 目录：之后本用户连列举都被拒绝，
+    pytest 在 getbasetemp 的 rm_rf 处抛 WinError 5，所有 tmp_path 用例 setup 即失败。
+    每次运行用独立路径，互不碰撞；trylast 保证在 pytest 内置 tmpdir 插件之后覆写。
+    """
+    factory = config._tmp_path_factory
+    root = config.rootpath / _BASETEMP_ROOT
+    root.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    for stale in root.iterdir():
+        try:
+            if stale.is_dir() and now - stale.stat().st_mtime > _BASETEMP_KEEP_SECONDS:
+                shutil.rmtree(stale, ignore_errors=True)
+        except OSError:
+            continue
+    factory._given_basetemp = root / f"run-{os.getpid()}-{time.time_ns()}"
 
 
 def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
