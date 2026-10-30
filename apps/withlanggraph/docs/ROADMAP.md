@@ -5833,3 +5833,29 @@ V1 稳定性缺口里，1/2/3/4/5/6/7 也在同一批未提交改动里。
 - [x] V1 稳定性缺口 1–7
 - [ ] 缺口 8：真实 QQ 20 轮 transcript 灰度验收
 - [ ] V2-Step 2：关系与 Open Threads（migration v3）
+## 2026-10-30 · companion-journal 实机首启排查（缺 prompt 被静默跳过）
+
+**背景**：Step 1 接线重启后查日志，发现每 30 秒刷一条
+`Skipping malformed job {'name': 'companion-journal', ...}`——`Job.prompt` 是必填字段，
+新加的 job 没写 `prompt` 就被 `load_jobs` 整条丢弃，两本日记永远不会生成。单测只测了
+`run_journal_job()` 本身，没测"仓库自带 schedule.json 能否解析"，所以没挡住。
+
+**已完成**：`config/schedule.json` 的 companion-journal 补 `"prompt": ""`；新增
+`tests/test_scheduler.py::TestShippedSchedule`，直接拿仓库自带 `config/schedule.json`
+断言每个 enabled job 都能被 `load_jobs` 解析，并断言 `companion-journal` 在列表里。
+
+**实测验证**（重启 gacore 后）：
+
+- `scheduler job registered {"job": "companion-journal", "type": "journal"}`
+- 因 00:10 已过且无历史 run，启动即补跑一次：
+  `companion journal finished {"actor_id": "hanli", "code": "no_events", "ok": false, "journals": 0, "duration_seconds": 0.02}`
+  —— 昨天（10-29）没有 Companion 事件（库是今天 11:36 才建的），所以 **0 次 LLM**，符合
+  "无实质事件不调用模型"。
+- 实机库 `PRAGMA user_version = 2`，`companion_journal` / `_event_source` /
+  `_reflection_source` 三表已由 migration v2 建好（当前均 0 行，等今晚 00:10 写 10-30）。
+- `uv run pytest apps/withlanggraph/tests/test_scheduler.py -q -k "Shipped or Journal"` → 5 passed
+
+**待办更新**：
+
+- [x] schedule.json 缺 prompt 修复 + 自带配置可解析性守卫
+- [ ] 今晚 00:10 观察首篇真实日记（预计 `code=written`，`journals=2`）
