@@ -1135,7 +1135,7 @@ flowchart LR
 | 快速轮入口 | `qq.py:on_message` 第 4 步 | `fast = fast_reply_detect(content)` 随 `_enqueue_agent_turn(..., fast=fast)` 进入合并循环；**不再有独立的轻回应实现** |
 | 快速轮图 | `qq.py:_fast_graph` | 首次使用时 `build_graph(cfg, checkpointer=self.graph.checkpointer, tool_list=[])` 并缓存；与主图同一 middleware、同一 checkpointer，仅工具为空 |
 | 快速轮提示 | `context.py:_rag_recall_block` | `state.fast_reply=True` 时直接返回空串（跳过 embedding 召回），其余 prompt（角色卡/Self memory/daily/事实卡/时间锚/Style Block）完全一致 |
-| 发送与记账 | `qq.py:_stream_agent → _plan_final_reply → _deliver_reply_batch` | 快速轮与普通轮同一条发送/回执/`agent.message.sent` 链路；快速轮不发「思考中…」占位气泡 |
+| 发送与记账 | `qq.py:_stream_agent → _plan_final_reply → _deliver_reply_batch` | 快速轮与普通轮同一条发送/回执/`agent.message.sent` 链路；**任何轮次都不再发「思考中…」占位气泡**（2026-10-30，聊天里只留角色自己的话） |
 | A0 提示兜底 | `context.py:_RESPONSE_LAYER_RULES` | `build_system_prompt` 恒注入 `[回应分层铁律]`：随口话 → 一句话带过；明确提问 → 全力作答 |
 | 决策类判定 | `qq.py:proposal_detect` | 命中 `_PROPOSAL_KEYWORDS`（推荐/哪个好/怎么选/方案/对比/帮我决定/建议/选择…）→ True |
 | 模式注入 | `qq.py:_run_agent` → `state["output_mode"]="proposal"` | 仅首轮；`context.py` 在 `output_mode=="proposal"` 时追加 `=== 多方案输出模式 ===`（`_PROPOSAL_HEADER/_PROPOSAL_RULE`） |
@@ -1157,7 +1157,7 @@ flowchart LR
 |---|---|
 | 现象 | 一次带工具的轮次会向私聊发出约 20+ 条 `[agent] -> code_run(...)` / `[tools] <- {...}`，含完整 SQL、绝对路径、命令正文与原始 stderr |
 | 根因 | `_stream_agent` 渲染工具调用/结果时无条件 `send_text`；PowerShell 的 GBK 输出被按 UTF-8 解码，中文变 `��` 后照样外发并回喂模型 |
-| 改法 | 新增 `_trace_tool_event()`：**恒定写 JSONL 日志**（`tool trace`），仅当 `QQ_TOOL_TRACE=1` 时才发到聊天；`"思考中..."` 占位在快速轮不再发送 |
+| 改法 | 新增 `_trace_tool_event()`：**恒定写 JSONL 日志**（`tool trace`），仅当 `QQ_TOOL_TRACE=1` 时才发到聊天；`"思考中..."` 占位气泡已整体删除（所有轮次都不发，长轮次在首条回复就绪前保持安静） |
 | 边界 | 轨迹不是角色说的话，因此不进 `agent.message.sent`、不进 Companion 事件；`ask_user` 的真实提问消息（`[ask_user] …`）不受影响，照常发送 |
 
 ## 9.8 聊天护栏：注入勿念 / 禁复述与断言 / 时间权威

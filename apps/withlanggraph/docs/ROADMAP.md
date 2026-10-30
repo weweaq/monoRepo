@@ -5707,3 +5707,30 @@ Block（仅表达偏好），并在发送层用 `plan_final_reply()` 做语义�
 - [x] 工具轨迹默认只进日志（`QQ_TOOL_TRACE` 可开）
 - [ ] `code_run` powershell 分支编码自适应（utf-8 严格失败回退 cp936），修复中文 stderr 乱码
 - [ ] 真实 QQ 灰度：观察快速轮延迟、分段节奏与「随口话也进自我记忆」的实际观感
+
+## 2026-10-30 · 删除「思考中…」占位气泡
+
+**背景**：用户反馈「回复前先出现『思考中…』」不可接受——聊天窗口里应当只出现角色自己说的话。
+
+**已完成**：
+
+- `src/gacore/frontends/qq.py::_stream_agent`：删除开头那条 `send_text("思考中...")`，连同只为它服务的
+  `fast_reply` 局部变量一并移除。任何轮次（快速轮/完整轮/续跑）都不再发送占位气泡；长轮次在首条
+  回复段就绪前保持安静。
+- `tests/test_qq.py`：新增 `test_normal_turn_sends_no_placeholder_bubble`（完整轮同样断言无占位）；
+  原快速轮端到端用例继续覆盖快速轮路径。
+
+**实测验证**：
+
+- `uv run pytest apps/withlanggraph/tests/test_qq.py -q` → **49 passed**
+- `uv run ruff check`（qq.py + test_qq.py）→ All checks passed
+
+**偏差说明**：
+
+- 代价是完整轮（实测 49–66 秒）期间聊天窗口完全无反馈。若之后觉得"卡住了"，可改为**延迟提示**
+  （仅当轮次超过 N 秒才发一次），或接入 QQ 的"正在输入"状态；本次严格按用户要求不加任何气泡。
+
+**待办更新**：
+
+- [x] 删除「思考中…」占位气泡（所有轮次）
+- [ ] 视观感决定是否需要延迟提示 / 正在输入状态（当前不做）
