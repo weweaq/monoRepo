@@ -9,12 +9,20 @@ semantics apply: the latest update replaces the previous value.
 
 from __future__ import annotations
 
-from typing import Any, Final
+from typing import Any, Final, TypedDict
 
 from langchain.agents.middleware import AgentState
 from langchain_core.messages import HumanMessage
 
 from gacore.config import Config
+
+
+class CompanionTurnContext(TypedDict):
+    """Companion identity for the current turn: which actor is speaking, to whom."""
+
+    actor_id: str
+    principal_id: str
+
 
 EXIT_REASONS: Final = (
     "CURRENT_TASK_DONE",
@@ -46,6 +54,7 @@ class GAState(AgentState[Any], total=False):
     rollover_context: str | None  # one-shot cross-day memory injection (from onboard_pack.json); cleared after first turn
     output_mode: str | None  # per-turn output formatting mode ("proposal" = multi-option reply); cleared by cleanup_images after the turn
     target_day: str | None  # scheduled/rerun: historical target day for fact-card time-slicing; None = real-time today
+    companion_context: CompanionTurnContext | None  # owner C2C only; enables the Self memory block
 
 
 def new_state(
@@ -53,11 +62,15 @@ def new_state(
     cfg: Config,
     active_card: str | None = None,
     target_day: str | None = None,
+    companion_context: CompanionTurnContext | None = None,
 ) -> GAState:
     """Seed a fresh GAState for a new conversation with the user's first message.
 
     target_day: historical day (YYYY-MM-DD) for scheduled/rerun runs so the per-turn
     context time-slices langTrack facts to that day; None = real-time today.
+
+    companion_context: set only for owner C2C turns so the system prompt can inject
+    that actor's verified self-memory; group chats and non-owners keep it None.
     """
     return GAState(
         messages=[HumanMessage(content=user_input)],
@@ -70,5 +83,6 @@ def new_state(
         exit_reason=None,
         active_card=active_card,
         target_day=target_day,
+        companion_context=companion_context,
         pending_images=[],
     )

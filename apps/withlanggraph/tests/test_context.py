@@ -373,3 +373,104 @@ def test_fact_card_injected_logged(
     assert hits
     assert hits[0]["outlet"] == "prompt"
     assert hits[0]["injected"] is True
+
+
+def _companion_state(actor_id: str = "linwan") -> dict:
+    state = _state([HumanMessage(content="hi")])
+    state["active_card"] = "hanli"
+    state["companion_context"] = {"actor_id": actor_id, "principal_id": "owner"}
+    return state
+
+
+def test_self_memory_injected_after_role_card_before_daily(
+    monkeypatch: pytest.MonkeyPatch, cfg_with_assets: Config
+) -> None:
+    """The Self memory block must sit after the role card and before daily background."""
+    monkeypatch.setattr(ctx, "card_prompt", lambda cfg_, card_id: "ROLE-SENTINEL")
+    monkeypatch.setattr(ctx, "_self_memory_block", lambda cfg_, cc: "SELF-MEMORY-SENTINEL")
+    monkeypatch.setattr(
+        ctx, "load_recent_daily_summaries", lambda cfg_, as_of=None: "DAILY-SENTINEL"
+    )
+
+    prompt = build_system_prompt(_companion_state(), cfg_with_assets)
+
+    assert (
+        prompt.index("ROLE-SENTINEL")
+        < prompt.index("SELF-MEMORY-SENTINEL")
+        < prompt.index("DAILY-SENTINEL")
+    )
+
+
+def test_self_memory_skipped_without_companion_context(
+    monkeypatch: pytest.MonkeyPatch, cfg_with_assets: Config
+) -> None:
+    """Group chats and non-owners carry no companion_context, so the block is never built."""
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        ctx, "_self_memory_block", lambda cfg_, cc: calls.append(cc) or "SELF-MEMORY-SENTINEL"
+    )
+
+    prompt = build_system_prompt(_state([HumanMessage(content="hi")]), cfg_with_assets)
+
+    assert calls == []
+    assert "SELF-MEMORY-SENTINEL" not in prompt
+
+
+def test_self_memory_empty_block_is_not_injected(
+    monkeypatch: pytest.MonkeyPatch, cfg_with_assets: Config
+) -> None:
+    """An empty block (no reflections) must leave no header behind."""
+    monkeypatch.setattr(ctx, "_self_memory_block", lambda cfg_, cc: "")
+
+    prompt = build_system_prompt(_companion_state(), cfg_with_assets)
+
+    assert "=== Self memory" not in prompt
+
+
+def test_self_memory_store_failure_is_fail_open(
+    monkeypatch: pytest.MonkeyPatch, cfg_with_assets: Config
+) -> None:
+    """A store error must omit the block and never break prompt assembly."""
+    from gacore.companion import store as companion_store
+
+    def _boom(cls: object, cfg_: object) -> object:
+        raise RuntimeError("companion db unavailable")
+
+    monkeypatch.setattr(companion_store.CompanionStore, "from_config", classmethod(_boom))
+
+    prompt = build_system_prompt(_companion_state(), cfg_with_assets)
+
+    assert "=== Self memory" not in prompt
+    assert "探测优先" in prompt
+
+
+def test_self_memory_reads_the_actor_reflections_from_the_store(
+    cfg_with_assets: Config,
+) -> None:
+    """Owner C2C turns must surface this actor's persisted reflections in the system prompt."""
+    from gacore.companion.store import CompanionStore, ReflectionDraft
+
+    store = CompanionStore.from_config(cfg_with_assets)
+    events = [
+        store.append_event(
+            kind="user.message.received",
+            actor_id="linwan",
+            principal_id="owner",
+            source_id=f"src-{i}",
+            summary=f"event {i}",
+            idempotency_key=f"ctx-{i}",
+        ).event_id
+        for i in range(2)
+    ]
+    store.commit_reflection_batch(
+        actor_id="linwan",
+        principal_id="owner",
+        reflections=[ReflectionDraft("技术分享更容易得到回应", 0.78, tuple(events))],
+        prompt_version="companion-self-memory@v1",
+        last_reflected_seq=2,
+    )
+
+    prompt = build_system_prompt(_companion_state(), cfg_with_assets)
+
+    assert "=== Self memory" in prompt
+    assert "技术分享更容易得到回应" in prompt

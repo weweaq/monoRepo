@@ -204,6 +204,21 @@ def stamp_daily_history(daily: str) -> str:
     )
 
 
+def _self_memory_block(cfg: Config, companion_context: dict) -> str:
+    """Build the Self memory block for one companion actor; any failure returns ``""``."""
+    try:
+        from gacore.companion.context import build_self_memory_block
+        from gacore.companion.store import CompanionStore
+
+        return build_self_memory_block(
+            CompanionStore.from_config(cfg),
+            actor_id=str(companion_context.get("actor_id") or ""),
+            principal_id=str(companion_context.get("principal_id") or ""),
+        )
+    except Exception:  # noqa: BLE001 - self memory is optional background
+        return ""
+
+
 def build_system_prompt(state: GAState, cfg: Config) -> str:
     """Build the per-turn system prompt: L0 rules, daily recap, working checkpoint, and periodic hints."""
     path = cfg.asset_dir / "sys_prompt.txt"
@@ -223,8 +238,17 @@ def build_system_prompt(state: GAState, cfg: Config) -> str:
         role_text = card_prompt(cfg, card_id)
         if role_text:
             prompt += f"\n\n{ROLE_HEADER}\n{role_text}{_ROLE_TOOL_BRIDGE}"
-    daily = load_recent_daily_summaries(cfg, as_of=as_of_day())
     injected_bg = False
+    # Self memory (Step 8): verified reflections of this actor only, placed right after
+    # the role card and before daily/RAG/fact-card background. Missing/empty/failed
+    # lookups omit the block entirely.
+    companion_context = state.get("companion_context")
+    if companion_context:
+        self_memory = _self_memory_block(cfg, companion_context)
+        if self_memory:
+            prompt += f"\n\n{self_memory}"
+            injected_bg = True
+    daily = load_recent_daily_summaries(cfg, as_of=as_of_day())
     if daily:
         prompt += f"\n{DAILY_HEADER}\n{stamp_daily_history(daily)}"
         injected_bg = True

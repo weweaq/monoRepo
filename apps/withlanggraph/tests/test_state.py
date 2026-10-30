@@ -112,3 +112,36 @@ def test_max_turns_comes_from_cfg(tmp_path: object) -> None:
     state = new_state("hi", cfg)
 
     assert state["max_turns"] == 7
+
+
+def test_new_state_defaults_companion_context_to_none(tmp_path: object) -> None:
+    """Without an explicit companion identity (group chat / non-owner), the channel stays None."""
+    cfg = Config.for_tests(tmp_path)  # type: ignore[arg-type]
+
+    state = new_state("hi", cfg)
+
+    assert state["companion_context"] is None
+
+
+def test_new_state_keeps_the_given_companion_context(tmp_path: object) -> None:
+    """Owner C2C seeds carry the actor/principal pair through to the prompt layer."""
+    cfg = Config.for_tests(tmp_path)  # type: ignore[arg-type]
+    companion = {"actor_id": "linwan", "principal_id": "owner"}
+
+    state = new_state("hi", cfg, companion_context=companion)  # type: ignore[arg-type]
+
+    assert state["companion_context"] == companion
+
+
+def test_companion_context_survives_checkpoint_resume(compiled: Pregel) -> None:
+    """A later turn that seeds no companion_context must inherit it from the checkpoint."""
+    config = {"configurable": {"thread_id": "companion-resume"}}
+    companion = {"actor_id": "linwan", "principal_id": "owner"}
+
+    compiled.invoke(
+        {"messages": [HumanMessage(content="first")], "companion_context": companion},
+        config=config,
+    )
+    result = compiled.invoke({"messages": [HumanMessage(content="second")]}, config=config)
+
+    assert result["companion_context"] == companion

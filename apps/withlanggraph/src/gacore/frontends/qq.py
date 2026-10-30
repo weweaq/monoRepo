@@ -2182,7 +2182,21 @@ class QQApp:
 
         config = {"configurable": {"thread_id": thread_id}, "recursion_limit": DEFAULT_RECURSION_LIMIT}
 
-        state = new_state(_with_message_timestamp(text), Config.default(), active_card=_user_card.get(user_id))  # 进入图前贴上当前真实时间
+        current_card = _user_card.get(user_id)
+        # Self memory is owner C2C only: group chats and non-owners never carry a
+        # companion identity into the graph, so they cannot read the owner's reflections.
+        companion_context = None
+        if not is_group:
+            actor_id = actor_id_for(user_id, load_companion_config(), current_card)
+            if actor_id:
+                companion_context = {"actor_id": actor_id, "principal_id": "owner"}
+
+        state = new_state(
+            _with_message_timestamp(text),
+            Config.default(),
+            active_card=current_card,
+            companion_context=companion_context,
+        )  # 进入图前贴上当前真实时间
 
         # Consume the staged cross-day rollover injection on this first turn.
         rollover_text = self._pending_rollover.pop(user_id, None)

@@ -8,11 +8,18 @@ Modules land step by step per ``docs/companion-self-memory-v1-plan.md``:
 - ``summary`` — redacted, bounded event summaries (Step 4)
 - ``reflection`` — evidence-bound 0-2 takeaways from a fixed batch (Step 7)
 - ``coordinator`` — single-flight background reflection checks (Step 7)
+- ``context`` — the bounded Self memory block injected into owner C2C prompts (Step 8)
 """
 
 from __future__ import annotations
 
 from gacore.companion.config import CompanionConfig, load_companion_config
+from gacore.companion.context import (
+    MAX_SELF_MEMORY_CHARS,
+    MAX_SELF_MEMORY_REFLECTIONS,
+    SELF_MEMORY_BLOCK_VERSION,
+    build_self_memory_block,
+)
 from gacore.companion.coordinator import (
     ReflectionCoordinator,
     schedule_reflection_check,
@@ -43,10 +50,14 @@ __all__ = [
     "ActiveCardRepository",
     "CompanionConfig",
     "DEFAULT_ACTOR_ID",
+    "MAX_SELF_MEMORY_CHARS",
+    "MAX_SELF_MEMORY_REFLECTIONS",
     "ReflectionCoordinator",
     "ReflectionOutcome",
+    "SELF_MEMORY_BLOCK_VERSION",
     "active_cards_path",
     "actor_id_for",
+    "build_self_memory_block",
     "default_active_cards_path",
     "is_owner",
     "load_companion_config",

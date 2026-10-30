@@ -523,3 +523,41 @@ async def test_merge_cancel_sends_no_stop_notice(tmp_cfg) -> None:
 async def test_explicit_stop_still_notifies(tmp_cfg) -> None:
     texts = await _cancelled_turn(tmp_cfg, merge_cancel=False)
     assert "⏹️ 任务已停止" in texts
+
+
+async def _run_agent_state(monkeypatch, *, is_group: bool, actor: str | None) -> dict:
+    """Run _run_agent with a mocked stream and return the GAState it handed to the graph."""
+    app = QQApp(MagicMock())
+    app._stream_agent = AsyncMock()
+    calls: list[tuple] = []
+
+    def _actor_id_for(openid, companion, card):
+        calls.append((openid, companion, card))
+        return actor
+
+    monkeypatch.setattr(qq, "actor_id_for", _actor_id_for)
+
+    await app._run_agent("chat", "hi", "user-1", msg_id=None, is_group=is_group)
+
+    return app._stream_agent.await_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_run_agent_sets_companion_context_for_owner_c2c(monkeypatch) -> None:
+    state = await _run_agent_state(monkeypatch, is_group=False, actor="linwan")
+
+    assert state["companion_context"] == {"actor_id": "linwan", "principal_id": "owner"}
+
+
+@pytest.mark.asyncio
+async def test_run_agent_omits_companion_context_for_group(monkeypatch) -> None:
+    state = await _run_agent_state(monkeypatch, is_group=True, actor="linwan")
+
+    assert state["companion_context"] is None
+
+
+@pytest.mark.asyncio
+async def test_run_agent_omits_companion_context_for_non_owner(monkeypatch) -> None:
+    state = await _run_agent_state(monkeypatch, is_group=False, actor=None)
+
+    assert state["companion_context"] is None
