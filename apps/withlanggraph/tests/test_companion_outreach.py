@@ -476,3 +476,10 @@ class TestGateCounting:
 
         assert gate.daily_count == 2
         assert gate.last_outreach_ms == _ms(_DAY, 8) + 60_000
+
+def test_prompt_prefers_a_question_for_observations() -> None:
+    import gacore.companion.outreach as module
+
+    prompt = module._SYSTEM_PROMPT
+    assert "就事论事地问一句" in prompt
+    assert "recent_activity" in prompt and "open_thread" in prompt

@@ -87,6 +87,8 @@ _SYSTEM_PROMPT: Final = """你是角色主动联系决策器。给定候选与�
 只能从这些动作里选一个：
 - STAY_SILENT：不打扰（价值低/重复/时机不对）。
 - TELL_ONLY：以角色口吻发一条短消息（≤200 字）。
+  若候选是 recent_activity 或 open_thread，优先**就事论事地问一句**（例如"在追这部？"
+  "上次说的事后来怎么样了？"），不要写成空泛的关心或客套；问句要能接住候选里的具体内容。
 - ASK_PERMISSION：为一个具体只读目标征得主人同意（必须给 goal_id）。
 - ACT_READ_ONLY：执行已批准的只读目标（必须给 goal_id）。
 - ACT_SILENTLY：自己做一件只读小事，不打扰主人（可选 goal_id）。

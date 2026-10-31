@@ -8,7 +8,7 @@
     },
     {
       "name": "companion-tick",
-      "schedule": "every 2h",
+      "schedule": "every 1h",
       "type": "life",
       "enabled": true,
       "prompt": ""

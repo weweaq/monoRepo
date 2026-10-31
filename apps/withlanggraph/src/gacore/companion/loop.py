@@ -78,9 +78,11 @@ _CANDIDATE_ACTIVITY: Final = {
 # When no candidate points at a specific tool, the character rotates through cheap read-only
 # views of its own life so consecutive ticks do not all look at the same thing.
 _ROTATION: Final = (
+    # Ordered by signal value: what the owner is actually watching/browsing beats a
+    # daily-note replay (which is mostly ops lines and rarely worth telling anyone).
     ("bili_history", {"limit": 5}),
-    ("read_daily", {"date": "yesterday"}),
     ("browser_history", {"limit": 20, "days": 1}),
+    ("read_daily", {"date": "yesterday"}),
 )
 
 
