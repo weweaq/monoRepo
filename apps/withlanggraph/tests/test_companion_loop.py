@@ -439,3 +439,122 @@ class TestOwnLifeMaterial:
 
         assert result.action == "ACT_AND_TELL"
         assert sent and "凡人修仙传" in sent[0]
+
+class TestMaintenanceActivity:
+    """P2 修正：没有候选时也要能自己过日子（确定性只读活动，0 LLM）。"""
+
+    def _invoker(self, calls: list[tuple[str, dict]]):
+        def invoke(tool: str, args: dict) -> str:
+            calls.append((tool, args))
+            return "看到你在追凡人修仙传"
+
+        return invoke
+
+    def test_empty_tick_still_does_one_readonly_thing(self, tmp_path: Path) -> None:
+        store = _store(tmp_path)
+        _event(store, "u1")
+        calls: list[tuple[str, dict]] = []
+        sent: list[str] = []
+
+        result = run_life_tick(
+            store,
+            "linwan",
+            "owner",
+            now_ms=_ms(_DAY, 15),
+            runner=lambda _c: {"action": "STAY_SILENT", "reason": "LOW_VALUE"},
+            sender=sent.append,
+            invoker=self._invoker(calls),
+        )
+
+        assert result.action == "ACT_SILENTLY" and result.reason == "MAINTENANCE"
+        assert calls, "it must actually look at something"
+        assert sent == [], "a silent activity must not talk"
+        assert "read_action.succeeded" in _kinds(store)
+
+    def test_it_tells_after_doing_something(self, tmp_path: Path) -> None:
+        store = _store(tmp_path)
+        _event(store, "u1")
+        sent: list[str] = []
+
+        result = run_life_tick(
+            store,
+            "linwan",
+            "owner",
+            now_ms=_ms(_DAY, 15),
+            runner=lambda _c: {"action": "TELL_ONLY", "message": "刚看到你在追凡人修仙传"},
+            sender=sent.append,
+            invoker=self._invoker([]),
+        )
+
+        assert result.action == "TELL_ONLY"
+        assert sent == ["刚看到你在追凡人修仙传"]
+        assert "read_action.succeeded" in _kinds(store)
+
+    def test_three_hour_gap_is_respected(self, tmp_path: Path) -> None:
+        store = _store(tmp_path)
+        _event(store, "u1")
+        store.append_event(
+            kind="read_action.succeeded",
+            actor_id="linwan",
+            principal_id="owner",
+            source_id="recent",
+            summary="刚看过",
+            idempotency_key="recent",
+            occurred_at_ms=_ms(_DAY, 14),
+        )
+        calls: list[tuple[str, dict]] = []
+
+        result = run_life_tick(
+            store,
+            "linwan",
+            "owner",
+            now_ms=_ms(_DAY, 15),
+            runner=lambda _c: {"action": "STAY_SILENT"},
+            invoker=self._invoker(calls),
+        )
+
+        assert calls == []
+        assert result.action in {"STAY_SILENT", "TELL_ONLY"}
+
+    def test_daily_activity_cap(self, tmp_path: Path) -> None:
+        store = _store(tmp_path)
+        _event(store, "u1")
+        for index in range(3):
+            store.append_event(
+                kind="read_action.succeeded",
+                actor_id="linwan",
+                principal_id="owner",
+                source_id=f"old{index}",
+                summary="之前看过",
+                idempotency_key=f"old{index}",
+                occurred_at_ms=_ms(_DAY, 6) + index * 4 * _HOUR_MS,
+            )
+        calls: list[tuple[str, dict]] = []
+
+        run_life_tick(
+            store,
+            "linwan",
+            "owner",
+            now_ms=_ms(_DAY, 22),
+            runner=lambda _c: {"action": "STAY_SILENT"},
+            invoker=self._invoker(calls),
+        )
+
+        assert calls == []
+
+    def test_no_activity_at_night(self, tmp_path: Path) -> None:
+        store = _store(tmp_path)
+        _event(store, "u1")
+        calls: list[tuple[str, dict]] = []
+
+        result = run_life_tick(
+            store,
+            "linwan",
+            "owner",
+            now_ms=_ms(_DAY, 2),
+            runner=lambda _c: {"action": "STAY_SILENT"},
+            invoker=self._invoker(calls),
+        )
+
+        assert calls == []
+        assert result.action == "STAY_SILENT"

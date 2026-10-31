@@ -1392,6 +1392,37 @@ owner 轮注入 / 非 owner 不注入、信任包装与 system prompt 洁净、1
 **测试**：`test_companion_loop.py::TestOwnLifeMaterial`（4 例）：新观察成为最高优先级候选、
 说过的观察不再候选、`ACT_SILENTLY` 走轮换工具且参数正确、`ACT_AND_TELL` 用结果片段兜底。
 
+### 9.2.19 Companion 自主动作与间隔调度修复（2026-10-31）
+
+> 事故现象：08:30 之后一整天没有任何主动消息，`companion-tick.last_run` 停在 00:26。
+> 根因两个，且是叠加的。
+
+**根因 1（调度）：间隔型 job 过期后永不触发。** `next_run_time()` 对 `every Nh` 会把
+候选时间一路 walk 到未来，而 `is_due()` 判定是 `now >= next_run` —— 于是第一次跑完后
+`next_run` 永远是未来，job 再也不会到期。修复：直接返回 `base + delta`（可能是过去），
+与每日 `HH:MM` 的"迟到补跑"语义对齐；`is_due` 因此在过期后立即为真，跑一次即归位。
+
+**根因 2（循环）：没有候选就永远不行动，而行动才是候选的来源。**
+`collect_candidates()` 的 `recent_activity` 依赖 `read_action.succeeded`，但 `ACT_*`
+又必须由候选触发 → 死锁，角色从不"过日子"。
+
+修复（`loop._maintenance_activity`）：`NO_CANDIDATE` 的 tick 仍可做**一件**确定性只读小事：
+
+| 约束 | 值 |
+|---|---|
+| 时段 | 仅 `08:00–23:00`（quiet 不做事） |
+| 主人空闲 | 最近 10 分钟没说话 |
+| 频率 | 与上次活动间隔 ≥3h |
+| 每日上限 | 3 次只读活动 |
+| 成本 | **0 次 LLM**（工具与参数由轮换决定，不问模型） |
+| 表达 | 默认不说；做完后在同一次 tick 里再跑一次 `decide()`（≤1 次 LLM），值得说才说 |
+
+这样"自己看点什么 → 产生 `read_action.succeeded` → 下一轮成为 `recent_activity` 候选 →
+也许告诉你"形成闭环，同时保住"空 tick 不烧钱、不打扰"的原则。
+
+**测试**：`test_companion_loop.py::TestMaintenanceActivity`（5 例：空 tick 仍做一件只读事、
+做完能接着说、3h 间隔、每日 3 次上限、夜间不做）+ `test_scheduler.py` 间隔语义更新。
+
 ### 9.3 测试
 
 `tests/test_character.py`(7)、`tests/test_character_system_prompt.py`(4)、`tests/test_qq.py` `/角色` 相关 3 条、

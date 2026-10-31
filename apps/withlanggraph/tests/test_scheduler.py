@@ -130,13 +130,13 @@ class TestNextRunInterval:
         nxt = next_run_time("every 6h", last_run=last_run, now=now)
         assert nxt == datetime(2026, 8, 3, 12, 0, 0, tzinfo=UTC)
 
-    def test_every_2d_walks_forward_when_overdue(self) -> None:
-        """Given every 2d, last_run=3 days ago, When now, Then next_run walks forward to future."""
+    def test_every_2d_overdue_returns_the_missed_slot(self) -> None:
+        """Given every 2d, last_run=3 days ago, Then the due slot is in the past (catch up)."""
         now = datetime(2026, 8, 5, 12, 0, 0, tzinfo=UTC)
         last_run = datetime(2026, 8, 2, 12, 0, 0, tzinfo=UTC).isoformat()
         nxt = next_run_time("every 2d", last_run=last_run, now=now)
-        # last + 2d = Aug 4 (past), + 2d again = Aug 6 (future)
-        assert nxt == datetime(2026, 8, 6, 12, 0, 0, tzinfo=UTC)
+        # last + 2d = Aug 4 <= now -> due (is_due 为 true，补跑一次后 last_run 归位)
+        assert nxt == datetime(2026, 8, 4, 12, 0, 0, tzinfo=UTC)
 
     def test_every_1h_case_insensitive(self) -> None:
         """Given 'every 1H' uppercase, When never run, Then it is due immediately."""

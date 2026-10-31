@@ -154,11 +154,34 @@ def _tick(
         now_ms=now,
     )
     if decision.action == "STAY_SILENT":
-        return TickResult(
-            action="STAY_SILENT",
-            reason=decision.reason,
-            llm_calls=decision.llm_calls,
-        )
+        if decision.reason == "NO_CANDIDATE":
+            # Chicken-and-egg fix: acting is what creates "recent activity" candidates, so
+            # a tick with nothing to say may still do one small read-only thing by itself
+            # (deterministic, 0 LLM). Only then does telling become possible.
+            maintenance = _maintenance_activity(
+                store, actor_id, principal_id, gate=gate, now=now, invoker=invoker, dry_run=dry_run
+            )
+            if maintenance is None:
+                return TickResult(
+                    action="STAY_SILENT", reason="NO_CANDIDATE", llm_calls=decision.llm_calls
+                )
+            decision = decide(
+                store,
+                actor_id,
+                principal_id,
+                gate=build_gate_input(store, actor_id, principal_id, now_ms=now),
+                model=model,
+                runner=runner,
+                now_ms=now,
+            )
+            if decision.action == "STAY_SILENT":
+                return maintenance
+        else:
+            return TickResult(
+                action="STAY_SILENT",
+                reason=decision.reason,
+                llm_calls=decision.llm_calls,
+            )
 
     # ACT.
     if decision.action in {"TELL_ONLY", "ASK_PERMISSION"}:
@@ -184,6 +207,73 @@ def _tick(
         )
     return TickResult(
         action="STAY_SILENT", reason="POLICY_BLOCKED", llm_calls=decision.llm_calls
+    )
+
+
+# --------------------------------------------------------------- own life (P2)
+
+MAX_SILENT_ACTIVITIES_PER_DAY: Final = 3
+MIN_ACTIVITY_GAP_MS: Final = 3 * 60 * 60 * 1000
+OWNER_IDLE_BEFORE_ACT_MS: Final = 10 * 60 * 1000
+
+
+def _maintenance_activity(
+    store: CompanionStore,
+    actor_id: str,
+    principal_id: str,
+    *,
+    gate: object,
+    now: int,
+    invoker: object | None,
+    dry_run: bool,
+) -> TickResult | None:
+    """Do one small read-only thing when there is nothing to talk about.
+
+    This is the "living" half of the loop: it still respects quiet hours, the owner being
+    busy, a 3h minimum gap and 3 activities/day, and it never calls the model or speaks.
+    """
+    if invoker is None:
+        return None
+    if derive_day_phase(now) == "quiet":
+        return None
+    last_owner = getattr(gate, "last_owner_message_ms", None)
+    if last_owner is not None and now - int(last_owner) < OWNER_IDLE_BEFORE_ACT_MS:
+        return None
+
+    history = [
+        event
+        for event in store.events_for_actor(actor_id, principal_id)
+        if event.kind == "read_action.succeeded"
+    ]
+    if len([e for e in history if e.occurred_at_ms >= now - 24 * 60 * 60 * 1000]) >= (
+        MAX_SILENT_ACTIVITIES_PER_DAY
+    ):
+        return None
+    if history and now - history[-1].occurred_at_ms < MIN_ACTIVITY_GAP_MS:
+        return None
+
+    tool, args = _ROTATION[int(now // (6 * 60 * 60 * 1000)) % len(_ROTATION)]
+    goal = _propose_small_goal(
+        store, actor_id, principal_id, Decision(action="ACT_SILENTLY"), now
+    )
+    if goal is None:
+        return None
+    if dry_run:
+        return TickResult(action="ACT_SILENTLY", reason="MAINTENANCE", goal_id=goal.goal_id)
+    finished, detail = _execute(store, actor_id, principal_id, goal, tool, args, invoker, now)
+    if finished.status != "succeeded":
+        return None
+    logger.info(
+        "companion silent activity",
+        goal_id=finished.goal_id,
+        tool=tool,
+        chars=len(detail),
+    )
+    return TickResult(
+        action="ACT_SILENTLY",
+        reason="MAINTENANCE",
+        goal_id=finished.goal_id,
+        events=("read_action.succeeded",),
     )
 
 

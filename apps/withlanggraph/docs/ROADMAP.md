@@ -6307,3 +6307,36 @@ tick、每天最多 3 条主动消息、五种动作全开）**补齐。
 - [x] P2：自主生活素材（轮换工具 + recent_activity + 结果兜底）
 - [ ] 观察 P2 效果：轮换是否真的产生"看得出生活"的话术
 - [ ] 视效果决定是否把 `web_scan` 纳入 ACT_*
+
+### 2026-10-31 · 修复"一整天没有主动消息"（间隔调度 + 循环死锁）
+
+**现象**：08:30 的 daily-questions 正常发了一条，但之后到 13:57 没有任何主动消息；
+`companion-tick` 的 `last_run` 停在 00:26、`run_count=1`。
+
+**根因（两个叠加）**：
+
+1. `next_run_time()` 对 `every Nh` 把候选时间 walk 到未来，而 `is_due` 判 `now >= next_run`
+   → 首次跑完后**永不触发**。已改为返回真实到期槽位（可能在过去，迟到补跑一次）。
+2. 循环死锁：`recent_activity` 候选依赖 `read_action.succeeded`，但 `ACT_*` 又必须由候选
+   触发 → 角色从不自主活动，永远 `NO_CANDIDATE`。
+
+**已完成**：
+
+- `scheduler.next_run_time()`：间隔型返回 `last_run + delta`（不再 walk 到未来）。
+- `loop._maintenance_activity()`：`NO_CANDIDATE` 时仍可做一件只读小事——08:00–23:00、
+  主人 10 分钟空闲、与上次活动间隔 ≥3h、每天 ≤3 次、**0 次 LLM**；做完在同一次 tick
+  再 `decide()` 一次（≤1 次 LLM），值得说才说。
+- 测试：`TestMaintenanceActivity` 5 例 + 间隔语义测试更新。
+- R5：本文件 + tech §9.2.19。
+
+**实测验证**：
+
+- 全仓 → **2260 passed, 4 skipped**；ruff 全绿
+- 重启后 `companion-tick` 应立即补跑一次（overdue catch-up），并在白天产生一条
+  `read_action.succeeded`；下一轮 tick 才会出现 `recent_activity` 候选
+
+**偏差说明**：
+
+- 维护活动不写入 `activity` 表之外的预算记录：活动行仍由 `ACT_*` 路径创建，
+  维护路径只写 `goal.*` / `read_action.*` 事件，避免为"看一眼"多开一条活动记录。
+- 每日 3 次活动与每日 3 条消息是两套独立上限，互不占用。

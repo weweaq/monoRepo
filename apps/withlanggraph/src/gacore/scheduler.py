@@ -518,11 +518,10 @@ def next_run_time(schedule: str, last_run: str | None, now: datetime) -> datetim
             # otherwise the first dispatch can never happen (candidate would be now+delta).
             return now
         base = _parse_iso(last_run) or now
-        candidate = base + delta
-        # If the candidate is already in the past, walk forward in delta steps until future.
-        while candidate <= now:
-            candidate += delta
-        return candidate
+        # Return the slot that just became due, even if it is already in the past: that is
+        # what makes an overdue interval job fire (catch-up once), exactly like the daily
+        # branch. Walking forward to a future slot would make is_due(now >= next)永远为假.
+        return base + delta
 
     # Weekday form: "Sun 20:30" / "周日 20:30" — 该weekday的 HH:MM（P4 周报）
     m = _WEEKDAY_TIME_RE.match(schedule)
