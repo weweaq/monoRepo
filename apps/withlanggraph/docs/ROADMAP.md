@@ -6340,3 +6340,18 @@ tick、每天最多 3 条主动消息、五种动作全开）**补齐。
 - 维护活动不写入 `activity` 表之外的预算记录：活动行仍由 `ACT_*` 路径创建，
   维护路径只写 `goal.*` / `read_action.*` 事件，避免为"看一眼"多开一条活动记录。
 - 每日 3 次活动与每日 3 条消息是两套独立上限，互不占用。
+
+### 2026-10-31 · 修复：普通对话吃掉主动配额
+
+**现象**：修好间隔调度后，14:02 的补跑 tick 返回 `POLICY_BLOCKED`（`llm_calls=0`），
+仍然不说话、不行动。
+
+**根因**：`build_gate_input()` 把 `agent.message.sent`（对主人消息的普通回答）也算作
+"触达"。今天近 24h 有 15 条回答 + 1 条主动 → `daily_count=16 ≥ 3`，主动配额被日常聊天
+瞬间吃光；`last_outreach_ms` 也被回答刷新，"最小间隔"永远刚过。
+
+**修复**：`_OUTBOUND_KINDS` 只保留 `proactive.message.sent`。配额与间隔只统计**真正的主动
+触达**，普通对话不再计入。
+
+**验证**：`TestGateCounting` 2 例（5 条 agent 回答 → daily_count=0；2 条主动 → 2）；
+全仓 **2262 passed, 4 skipped**；ruff 全绿。

@@ -618,9 +618,9 @@ def _now(now_ms: int | None) -> int:
 
 
 _OWNER_KINDS: Final = frozenset({"user.message.received"})
-_OUTBOUND_KINDS: Final = frozenset(
-    {"proactive.message.sent", "agent.message.sent"}
-)
+# Only proactive sends count as outreach. Answering the owner (agent.message.sent) is normal
+# conversation and must never consume the proactive quota or reset the outreach gap.
+_OUTBOUND_KINDS: Final = frozenset({"proactive.message.sent"})
 
 
 def build_gate_input(

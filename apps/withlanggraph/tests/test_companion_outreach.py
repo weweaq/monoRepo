@@ -441,3 +441,38 @@ class TestShadowMode:
         assert (
             log_shadow_decision(store, "linwan", "owner", job_name="daily-questions") is None
         )
+
+class TestGateCounting:
+    """普通对话不能吃掉主动配额。"""
+
+    def test_agent_replies_do_not_consume_the_proactive_quota(self, tmp_path: Path) -> None:
+        store = _store(tmp_path)
+        for index in range(5):
+            _event(
+                store,
+                f"a{index}",
+                kind="agent.message.sent",
+                summary="回答",
+                at_ms=_ms(_DAY, 9) + index * 60_000,
+            )
+
+        gate = build_gate_input(store, "linwan", "owner", now_ms=_ms(_DAY, 10))
+
+        assert gate.daily_count == 0
+        assert gate.last_outreach_ms is None
+
+    def test_proactive_sends_do_count(self, tmp_path: Path) -> None:
+        store = _store(tmp_path)
+        for index in range(2):
+            _event(
+                store,
+                f"p{index}",
+                kind="proactive.message.sent",
+                summary="主动",
+                at_ms=_ms(_DAY, 8) + index * 60_000,
+            )
+
+        gate = build_gate_input(store, "linwan", "owner", now_ms=_ms(_DAY, 10))
+
+        assert gate.daily_count == 2
+        assert gate.last_outreach_ms == _ms(_DAY, 8) + 60_000
