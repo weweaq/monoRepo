@@ -173,7 +173,7 @@ class TaskRunner:
 
     def _run_task(self, task_id: int, task_type: str, params: dict):
         """在后台线程中执行任务。"""
-        from profile.log import setup
+        from profile.log import get_log_file, setup
         from profile.config import LOG_DIR
         from profile.db.init_db import init_db
 
@@ -187,8 +187,10 @@ class TaskRunner:
 
             init_db()
 
+            log_file = get_log_file()
             update_task_run(task_id, status="running",
-                            started_at=datetime.now().isoformat(timespec="seconds"))
+                            started_at=datetime.now().isoformat(timespec="seconds"),
+                            log_dir=str(log_file) if log_file else None)
 
             steps = TASK_STEPS.get(task_type, [])
 
