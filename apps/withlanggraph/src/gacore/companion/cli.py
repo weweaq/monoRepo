@@ -176,6 +176,17 @@ def cmd_goals(store: CompanionStore, args: argparse.Namespace) -> dict[str, obje
     }
 
 
+def cmd_intents(store: CompanionStore, args: argparse.Namespace) -> dict[str, object]:
+    """Every self-initiated intent card: promises, actions and watches."""
+    from gacore.companion import intent as intent_api
+
+    actor = args.actor or DEFAULT_ACTOR
+    cards = intent_api.view(store, actor, "owner")
+    if args.kind:
+        cards = [card for card in cards if card["kind"] == args.kind]
+    return {"actor": actor, "count": len(cards), "intents": cards}
+
+
 def cmd_export(store: CompanionStore, args: argparse.Namespace) -> dict[str, object]:
     actor = args.actor or DEFAULT_ACTOR
     day = args.day or day_key(_now_ms())
@@ -307,6 +318,11 @@ def build_parser() -> argparse.ArgumentParser:
     goals = sub.add_parser("goals", help="goals and their outcomes")
     with_actor(goals)
     goals.set_defaults(func=cmd_goals)
+
+    intents = sub.add_parser("intents", help="self-initiated intent cards")
+    with_actor(intents)
+    intents.add_argument("--kind", default=None)
+    intents.set_defaults(func=cmd_intents)
 
     export = sub.add_parser("export", help="one actor/day export as JSON")
     with_actor(export)
