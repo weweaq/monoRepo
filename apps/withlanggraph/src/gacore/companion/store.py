@@ -27,7 +27,7 @@ from typing import Final
 from gacore.config import Config
 from gacore.jsonl_logger import get_logger
 
-SCHEMA_VERSION: Final = 8
+SCHEMA_VERSION: Final = 9
 
 logger = get_logger("companion.store")
 DEFAULT_BUSY_TIMEOUT_MS: Final = 5000
@@ -74,6 +74,7 @@ EVENT_KINDS: Final[dict[int, frozenset[str]]] = {
     6: _EVENT_KINDS_V6,
     7: _EVENT_KINDS_V7,
     8: _EVENT_KINDS_V7,
+    9: _EVENT_KINDS_V7,
 }
 SUPPORTED_EVENT_KINDS: Final = EVENT_KINDS[SCHEMA_VERSION]
 
@@ -101,6 +102,34 @@ ACTIVITY_TERMINAL_STATUSES: Final = frozenset({"completed", "failed", "cancelled
 OUTREACH_KINDS: Final = frozenset(
     {"positive", "negative", "boundary", "topic_shift", "no_response"}
 )
+
+# Intent lifecycle (V3 unify): one card for every self-initiated intent — a promise to
+# fulfil, an action to run, or a watch that turns into a question at a given time.
+INTENT_KINDS: Final = frozenset({"promise", "act", "watch", "speak"})
+INTENT_STATUSES: Final = frozenset(
+    {"planned", "armed", "running", "done", "failed", "expired", "cancelled"}
+)
+INTENT_TERMINAL_STATUSES: Final = frozenset({"done", "failed", "expired", "cancelled"})
+
+# The V2 goal API stays as a thin view over ``act`` intents, so existing call sites keep
+# their vocabulary while storage has one card box.
+_GOAL_TO_INTENT_STATUS: Final = {
+    "proposed": "planned",
+    "approved": "armed",
+    "in_progress": "running",
+    "succeeded": "done",
+    "failed": "failed",
+    "cancelled": "cancelled",
+}
+_INTENT_TO_GOAL_STATUS: Final = {
+    "planned": "proposed",
+    "armed": "approved",
+    "running": "in_progress",
+    "done": "succeeded",
+    "failed": "failed",
+    "expired": "failed",
+    "cancelled": "cancelled",
+}
 
 # Goal lifecycle (V2-Step 5). One goal at a time may be in_progress (partial unique
 # index); execution is restricted to the read-only tool whitelist below.
@@ -343,6 +372,28 @@ class OutreachFeedback:
     reply_event_id: str | None
     kind: str
     response_delay_ms: int | None
+    created_at: str
+    updated_at: str
+
+
+@dataclass(frozen=True, slots=True)
+class Intent:
+    """One self-initiated intent: who asked for it, when it fires, what it may do."""
+
+    intent_id: str
+    actor_id: str
+    principal_id: str
+    kind: str
+    title: str
+    provenance: str
+    source_event_id: str | None
+    trigger_at_ms: int | None
+    expires_at_ms: int | None
+    status: str
+    authority: dict[str, object]
+    payload: dict[str, object]
+    result_event_id: str | None
+    commitment_id: str | None
     created_at: str
     updated_at: str
 
@@ -753,6 +804,74 @@ MIGRATION_V8: Final[tuple[str, ...]] = (
     """,
 )
 
+MIGRATION_V9: Final[tuple[str, ...]] = (
+    f"""
+    CREATE TABLE IF NOT EXISTS companion_intent (
+        intent_id       TEXT PRIMARY KEY,
+        actor_id        TEXT NOT NULL,
+        principal_id    TEXT NOT NULL,
+        kind            TEXT NOT NULL CHECK (kind IN ('promise', 'act', 'watch', 'speak')),
+        title           TEXT NOT NULL,
+        provenance      TEXT NOT NULL CHECK (provenance IN
+                          ('character_send', 'owner_statement', 'reflection')),
+        source_event_id TEXT REFERENCES companion_event(event_id),
+        trigger_at_ms   INTEGER,
+        expires_at_ms   INTEGER,
+        status          TEXT NOT NULL CHECK (status IN
+                          ('planned', 'armed', 'running',
+                           'done', 'failed', 'expired', 'cancelled')),
+        authority_json  TEXT NOT NULL DEFAULT '{{}}'
+                          CHECK (json_valid(authority_json)),
+        payload_json    TEXT NOT NULL DEFAULT '{{}}'
+                          CHECK (json_valid(payload_json)),
+        result_event_id TEXT REFERENCES companion_event(event_id),
+        commitment_id   TEXT,
+        created_at      TEXT NOT NULL DEFAULT ({_TIMESTAMP_DEFAULT}),
+        updated_at      TEXT NOT NULL DEFAULT ({_TIMESTAMP_DEFAULT})
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_intent_source
+    ON companion_intent(actor_id, principal_id, source_event_id, kind, title)
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS ux_one_running_act
+    ON companion_intent(actor_id, principal_id)
+    WHERE kind = 'act' AND status = 'running'
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_intent_due
+    ON companion_intent(actor_id, principal_id, status, trigger_at_ms)
+    """,
+    # Copy the V2 goal table into the unified card box (old table stays read-only for a week).
+    """
+    INSERT INTO companion_intent (
+        intent_id, actor_id, principal_id, kind, title, provenance,
+        source_event_id, trigger_at_ms, expires_at_ms, status,
+        authority_json, payload_json, result_event_id, commitment_id,
+        created_at, updated_at
+    )
+    SELECT
+        'gint_' || goal_id, actor_id, principal_id, 'act', text, 'character_send',
+        NULL, NULL, NULL,
+        CASE status
+            WHEN 'proposed' THEN 'planned'
+            WHEN 'approved' THEN 'armed'
+            WHEN 'in_progress' THEN 'running'
+            WHEN 'succeeded' THEN 'done'
+            WHEN 'failed' THEN 'failed'
+            WHEN 'cancelled' THEN 'cancelled'
+            ELSE 'planned'
+        END,
+        json_object('tools', json(allowed_tools_json)),
+        json_object('deadline_ms', deadline_ms),
+        result_event_id, commitment_id, created_at, updated_at
+    FROM companion_goal
+    WHERE 1 = 1
+    ON CONFLICT DO NOTHING
+    """,
+)
+
 MIGRATIONS: Final[dict[int, tuple[str, ...]]] = {
     1: MIGRATION_V1,
     2: MIGRATION_V2,
@@ -762,6 +881,7 @@ MIGRATIONS: Final[dict[int, tuple[str, ...]]] = {
     6: MIGRATION_V6,
     7: MIGRATION_V7,
     8: MIGRATION_V8,
+    9: MIGRATION_V9,
 }
 
 
@@ -2061,35 +2181,268 @@ class CompanionStore:
             ).fetchall()
         return [_row_to_commitment(row) for row in rows]
 
+    # -------------------------------------------------------------------- intent
+
+    def add_intent(
+        self,
+        *,
+        actor_id: str,
+        principal_id: str,
+        kind: str,
+        title: str,
+        provenance: str,
+        source_event_id: str | None = None,
+        trigger_at_ms: int | None = None,
+        expires_at_ms: int | None = None,
+        status: str = "planned",
+        authority: dict[str, object] | None = None,
+        payload: dict[str, object] | None = None,
+        commitment_id: str | None = None,
+    ) -> Intent:
+        """Insert one intent card; the (actor, source, kind, title) key makes it idempotent."""
+        for name, value in (
+            ("actor_id", actor_id),
+            ("principal_id", principal_id),
+            ("title", title),
+            ("provenance", provenance),
+        ):
+            _require_non_empty(name, value)
+        if kind not in INTENT_KINDS:
+            raise ValueError(f"unknown intent kind: {kind!r}")
+        if status not in INTENT_STATUSES:
+            raise ValueError(f"unknown intent status: {status!r}")
+        with self._transaction() as conn:
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO companion_intent (
+                        intent_id, actor_id, principal_id, kind, title, provenance,
+                        source_event_id, trigger_at_ms, expires_at_ms, status,
+                        authority_json, payload_json, commitment_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    (
+                        f"int_{uuid.uuid4().hex}",
+                        actor_id,
+                        principal_id,
+                        kind,
+                        title,
+                        provenance,
+                        source_event_id,
+                        None if trigger_at_ms is None else int(trigger_at_ms),
+                        None if expires_at_ms is None else int(expires_at_ms),
+                        status,
+                        json.dumps(authority or {}, ensure_ascii=False),
+                        json.dumps(payload or {}, ensure_ascii=False),
+                        commitment_id,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:  # ux_one_running_act
+                raise CompanionStoreError(
+                    "another action is already running for this actor"
+                ) from exc
+            row = self._select_intent(
+                conn,
+                actor_id=actor_id,
+                principal_id=principal_id,
+                kind=kind,
+                title=title,
+                source_event_id=source_event_id,
+            )
+        if row is None:  # pragma: no cover - the insert above always leaves a row
+            raise CompanionStoreError("intent vanished after insert")
+        return _row_to_intent(row)
+
+    @staticmethod
+    def _select_intent(
+        conn: sqlite3.Connection,
+        *,
+        actor_id: str,
+        principal_id: str,
+        kind: str,
+        title: str,
+        source_event_id: str | None,
+    ) -> sqlite3.Row | None:
+        if source_event_id is None:
+            return conn.execute(
+                """
+                SELECT * FROM companion_intent
+                WHERE actor_id = ? AND principal_id = ? AND kind = ? AND title = ?
+                  AND source_event_id IS NULL
+                ORDER BY rowid DESC LIMIT 1
+                """,
+                (actor_id, principal_id, kind, title),
+            ).fetchone()
+        return conn.execute(
+            """
+            SELECT * FROM companion_intent
+            WHERE actor_id = ? AND principal_id = ? AND kind = ? AND title = ?
+              AND source_event_id = ?
+            """,
+            (actor_id, principal_id, kind, title, source_event_id),
+        ).fetchone()
+
+    def get_intent(self, intent_id: str) -> Intent | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM companion_intent WHERE intent_id = ?", (intent_id,)
+            ).fetchone()
+        return _row_to_intent(row) if row is not None else None
+
+    def intents(
+        self,
+        actor_id: str,
+        principal_id: str,
+        *,
+        kind: str | None = None,
+        status: str | None = None,
+    ) -> list[Intent]:
+        """Intent cards of one actor, oldest first, optionally filtered."""
+        clauses = ["actor_id = ?", "principal_id = ?"]
+        params: list[object] = [actor_id, principal_id]
+        if kind is not None:
+            clauses.append("kind = ?")
+            params.append(kind)
+        if status is not None:
+            clauses.append("status = ?")
+            params.append(status)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM companion_intent WHERE {' AND '.join(clauses)} "
+                "ORDER BY created_at ASC, rowid ASC",
+                tuple(params),
+            ).fetchall()
+        return [_row_to_intent(row) for row in rows]
+
+    def set_intent_status(
+        self,
+        intent_id: str,
+        *,
+        status: str,
+        result_event_id: str | None = None,
+    ) -> Intent:
+        """Move one intent forward; terminal states are final."""
+        if status not in INTENT_STATUSES:
+            raise ValueError(f"unknown intent status: {status!r}")
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM companion_intent WHERE intent_id = ?", (intent_id,)
+            ).fetchone()
+            if row is None:
+                raise CompanionStoreError(f"unknown intent: {intent_id!r}")
+            if row["status"] in INTENT_TERMINAL_STATUSES:
+                raise CompanionStoreError(
+                    f"intent {intent_id!r} is already {row['status']!r}"
+                )
+            try:
+                conn.execute(
+                    f"""
+                    UPDATE companion_intent
+                    SET status = ?, result_event_id = COALESCE(?, result_event_id),
+                        updated_at = {_TIMESTAMP_DEFAULT}
+                    WHERE intent_id = ?
+                    """,
+                    (status, result_event_id, intent_id),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise CompanionStoreError(
+                    "another action is already running for this actor"
+                ) from exc
+            updated = conn.execute(
+                "SELECT * FROM companion_intent WHERE intent_id = ?", (intent_id,)
+            ).fetchone()
+        assert updated is not None  # pragma: no cover
+        return _row_to_intent(updated)
+
+    def set_intent_trigger(
+        self, intent_id: str, *, trigger_at_ms: int, status: str = "armed"
+    ) -> Intent:
+        """Reschedule one card without losing its identity."""
+        if status not in INTENT_STATUSES:
+            raise ValueError(f"unknown intent status: {status!r}")
+        with self._transaction() as conn:
+            row = conn.execute(
+                "SELECT status FROM companion_intent WHERE intent_id = ?", (intent_id,)
+            ).fetchone()
+            if row is None:
+                raise CompanionStoreError(f"unknown intent: {intent_id!r}")
+            if row["status"] in INTENT_TERMINAL_STATUSES:
+                raise CompanionStoreError(
+                    f"intent {intent_id!r} is already {row['status']!r}"
+                )
+            conn.execute(
+                f"""
+                UPDATE companion_intent
+                SET trigger_at_ms = ?, status = ?, updated_at = {_TIMESTAMP_DEFAULT}
+                WHERE intent_id = ?
+                """,
+                (int(trigger_at_ms), status, intent_id),
+            )
+            updated = conn.execute(
+                "SELECT * FROM companion_intent WHERE intent_id = ?", (intent_id,)
+            ).fetchone()
+        assert updated is not None  # pragma: no cover
+        return _row_to_intent(updated)
+
+    def due_intents(
+        self, actor_id: str, principal_id: str, *, now_ms: int
+    ) -> list["Intent"]:
+        """Armed/planned cards whose trigger has passed and which have not expired."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM companion_intent
+                WHERE actor_id = ? AND principal_id = ?
+                  AND status IN ('planned', 'armed')
+                  AND (trigger_at_ms IS NULL OR trigger_at_ms <= ?)
+                  AND (expires_at_ms IS NULL OR expires_at_ms > ?)
+                ORDER BY COALESCE(trigger_at_ms, 0) ASC, created_at ASC
+                """,
+                (actor_id, principal_id, int(now_ms), int(now_ms)),
+            ).fetchall()
+        return [_row_to_intent(row) for row in rows]
+
+    def expire_intents(self, actor_id: str, principal_id: str, *, now_ms: int) -> int:
+        """Mark overdue cards expired; returns how many were closed."""
+        with self._transaction() as conn:
+            cur = conn.execute(
+                f"""
+                UPDATE companion_intent
+                SET status = 'expired', updated_at = {_TIMESTAMP_DEFAULT}
+                WHERE actor_id = ? AND principal_id = ?
+                  AND status IN ('planned', 'armed')
+                  AND expires_at_ms IS NOT NULL AND expires_at_ms <= ?
+                """,
+                (actor_id, principal_id, int(now_ms)),
+            )
+            return int(cur.rowcount or 0)
+
     # --------------------------------------------------------------------- goal
 
     def goals(
         self, actor_id: str, principal_id: str, *, status: str | None = None
     ) -> list[Goal]:
-        """Goals of one actor, oldest first; ``status=None`` returns every state."""
-        with self._connect() as conn:
-            if status is None:
-                rows = conn.execute(
-                    """
-                    SELECT * FROM companion_goal
-                    WHERE actor_id = ? AND principal_id = ?
-                    ORDER BY created_at ASC, rowid ASC
-                    """,
-                    (actor_id, principal_id),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """
-                    SELECT * FROM companion_goal
-                    WHERE actor_id = ? AND principal_id = ? AND status = ?
-                    ORDER BY created_at ASC, rowid ASC
-                    """,
-                    (actor_id, principal_id, status),
-                ).fetchall()
-        return [_row_to_goal(row) for row in rows]
+        """Action cards (``kind='act'``) in the legacy :class:`Goal` shape."""
+        intent_status = _GOAL_TO_INTENT_STATUS.get(status) if status else None
+        return [
+            _intent_to_goal(item)
+            for item in self.intents(
+                actor_id, principal_id, kind="act", status=intent_status
+            )
+        ]
 
     def get_goal(self, goal_id: str) -> Goal | None:
-        """Load one goal by id (``None`` when it does not exist)."""
+        """Load one action card by id; also accepts a legacy ``goal_*`` id."""
+        card = self.get_intent(goal_id)
+        if card is None and goal_id.startswith("goal_"):
+            card = self.get_intent(f"gint_{goal_id}")
+        if card is not None and card.kind == "act":
+            return _intent_to_goal(card)
+        return self._legacy_goal(goal_id)
+
+    def _legacy_goal(self, goal_id: str) -> Goal | None:
+        """Read-only fallback to the V2 table (kept until the shim is retired)."""
         with self._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM companion_goal WHERE goal_id = ?", (goal_id,)
@@ -2097,9 +2450,9 @@ class CompanionStore:
         return _row_to_goal(row) if row is not None else None
 
     def active_goal(self, actor_id: str, principal_id: str) -> Goal | None:
-        """The single ``in_progress`` goal (guaranteed by the partial unique index)."""
-        goals = self.goals(actor_id, principal_id, status="in_progress")
-        return goals[0] if goals else None
+        """The single running action card."""
+        cards = self.intents(actor_id, principal_id, kind="act", status="running")
+        return _intent_to_goal(cards[0]) if cards else None
 
     def add_goal(
         self,
@@ -2112,46 +2465,19 @@ class CompanionStore:
         status: str = "proposed",
         commitment_id: str | None = None,
     ) -> Goal:
-        """Insert one goal; a second ``in_progress`` goal is rejected by the index."""
-        _require_non_empty("actor_id", actor_id)
-        _require_non_empty("principal_id", principal_id)
-        _require_non_empty("text", text)
-        if status not in GOAL_STATUSES:
-            raise ValueError(f"unknown goal status: {status!r}")
-        with self._transaction() as conn:
-            try:
-                conn.execute(
-                    """
-                    INSERT INTO companion_goal (
-                        goal_id, actor_id, principal_id, commitment_id, text,
-                        status, allowed_tools_json, deadline_ms
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        f"goal_{uuid.uuid4().hex}",
-                        actor_id,
-                        principal_id,
-                        commitment_id,
-                        text,
-                        status,
-                        json.dumps(list(allowed_tools), ensure_ascii=False),
-                        int(deadline_ms),
-                    ),
-                )
-            except sqlite3.IntegrityError as exc:  # ux_one_active_goal
-                raise CompanionStoreError(
-                    "another goal is already in progress for this actor"
-                ) from exc
-            row = conn.execute(
-                """
-                SELECT * FROM companion_goal
-                WHERE actor_id = ? AND principal_id = ?
-                ORDER BY rowid DESC LIMIT 1
-                """,
-                (actor_id, principal_id),
-            ).fetchone()
-        assert row is not None  # pragma: no cover
-        return _row_to_goal(row)
+        """Create one action card (legacy signature, unified storage)."""
+        card = self.add_intent(
+            actor_id=actor_id,
+            principal_id=principal_id,
+            kind="act",
+            title=text,
+            provenance="character_send",
+            status=_GOAL_TO_INTENT_STATUS.get(status, "planned"),
+            authority={"tools": list(allowed_tools)},
+            payload={"deadline_ms": int(deadline_ms)},
+            commitment_id=commitment_id,
+        )
+        return _intent_to_goal(card)
 
     def set_goal_status(
         self,
@@ -2160,38 +2486,19 @@ class CompanionStore:
         status: str,
         result_event_id: str | None = None,
     ) -> Goal:
-        """Move one goal forward; terminal states are final."""
-        if status not in GOAL_STATUSES:
+        """Move one action card; terminal states stay final."""
+        intent_status = _GOAL_TO_INTENT_STATUS.get(status)
+        if intent_status is None:
             raise ValueError(f"unknown goal status: {status!r}")
-        with self._transaction() as conn:
-            row = conn.execute(
-                "SELECT * FROM companion_goal WHERE goal_id = ?", (goal_id,)
-            ).fetchone()
-            if row is None:
-                raise CompanionStoreError(f"unknown goal: {goal_id!r}")
-            if row["status"] in GOAL_TERMINAL_STATUSES:
-                raise CompanionStoreError(
-                    f"goal {goal_id!r} is already {row['status']!r}"
-                )
-            try:
-                conn.execute(
-                    f"""
-                    UPDATE companion_goal
-                    SET status = ?, result_event_id = COALESCE(?, result_event_id),
-                        updated_at = {_TIMESTAMP_DEFAULT}
-                    WHERE goal_id = ?
-                    """,
-                    (status, result_event_id, goal_id),
-                )
-            except sqlite3.IntegrityError as exc:  # second in_progress
-                raise CompanionStoreError(
-                    "another goal is already in progress for this actor"
-                ) from exc
-            updated = conn.execute(
-                "SELECT * FROM companion_goal WHERE goal_id = ?", (goal_id,)
-            ).fetchone()
-        assert updated is not None  # pragma: no cover
-        return _row_to_goal(updated)
+        card = self.get_intent(goal_id)
+        if card is None and goal_id.startswith("goal_"):
+            card = self.get_intent(f"gint_{goal_id}")
+        if card is None:
+            raise CompanionStoreError(f"unknown goal: {goal_id!r}")
+        updated = self.set_intent_status(
+            card.intent_id, status=intent_status, result_event_id=result_event_id
+        )
+        return _intent_to_goal(updated)
 
     # ----------------------------------------------------------------- activity
 
@@ -2815,4 +3122,54 @@ def _row_to_outreach(row: sqlite3.Row) -> OutreachFeedback:
         ),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+    )
+
+
+def _row_to_intent(row: sqlite3.Row) -> Intent:
+    return Intent(
+        intent_id=row["intent_id"],
+        actor_id=row["actor_id"],
+        principal_id=row["principal_id"],
+        kind=row["kind"],
+        title=row["title"],
+        provenance=row["provenance"],
+        source_event_id=row["source_event_id"],
+        trigger_at_ms=(
+            None if row["trigger_at_ms"] is None else int(row["trigger_at_ms"])
+        ),
+        expires_at_ms=(
+            None if row["expires_at_ms"] is None else int(row["expires_at_ms"])
+        ),
+        status=row["status"],
+        authority=_json_dict(row["authority_json"]),
+        payload=_json_dict(row["payload_json"]),
+        result_event_id=row["result_event_id"],
+        commitment_id=row["commitment_id"],
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+    )
+
+
+def _json_dict(raw: object) -> dict[str, object]:
+    try:
+        value = json.loads(str(raw or "{}"))
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _intent_to_goal(card: Intent) -> Goal:
+    """Project an ``act`` intent onto the legacy :class:`Goal` shape."""
+    return Goal(
+        goal_id=card.intent_id,
+        actor_id=card.actor_id,
+        principal_id=card.principal_id,
+        commitment_id=card.commitment_id,
+        text=card.title,
+        status=_INTENT_TO_GOAL_STATUS.get(card.status, card.status),
+        allowed_tools=tuple(card.authority.get("tools") or ()),
+        deadline_ms=int(card.payload.get("deadline_ms") or 0),
+        result_event_id=card.result_event_id,
+        created_at=card.created_at,
+        updated_at=card.updated_at,
     )

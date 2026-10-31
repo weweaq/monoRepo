@@ -6409,3 +6409,26 @@ TrustedContext 接线，以及 6 项次级问题（详见 tech 表）。
 2. 每 tick 新建活动撞唯一约束；改为整 tick 复用同一预算活动。
 
 **验证**：全仓 **2276 passed, 4 skipped**；ruff 全绿；新增 5 例测试。
+
+### 2026-10-31 · V3：统一意图卡（promise / act / watch 一张表）
+
+**背景**：`goal`（要做事）与待做的 `follow_up`（到点说话）字段几乎一样，却是两套状态机。
+统一为「角色被允许自己生成的一条意图」，执行器按 `kind` 插拔。
+
+**已完成**：
+
+- `store.py`：`SCHEMA_VERSION=9` + `MIGRATION_V9`（`companion_intent` + 两个唯一索引 + 从
+  `companion_goal` 复制并映射状态）；新增 `Intent` 与 `add_intent/get_intent/intents/
+  set_intent_status/set_intent_trigger/due_intents/expire_intents`。
+- goal 兼容视图：`goals/get_goal/add_goal/active_goal/set_goal_status` 全部改走意图表，
+  返回 `Goal` 形状（状态反向映射），旧调用方零改动；旧表只读保留。
+- `companion/intent.py`（新增）：`authority/create_act/create_watch/due/arm/start/finish/
+  fail/cancel/extend/view`。
+- `tests/test_companion_intent.py`（新增 11 例）。
+- R5 三处同步：本文件 + tech §9.2.22（架构图沿用 `GOAL` 节点，无新增模块）。
+
+**实测验证**：全仓 **2288 passed, 4 skipped**；ruff 全绿。
+迁移在测试中用 `apply_migration(target_version=8→9)` 实测：旧 goal 变成 `kind=act` 的意图卡，
+状态、工具白名单、截止时间、commitment 关联全部保留。
+
+**下一步**：`watch`（关注点）——从"我六点下班"抽时间、写卡、到点变候选。

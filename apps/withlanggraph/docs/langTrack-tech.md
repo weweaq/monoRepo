@@ -1496,6 +1496,34 @@ result_event_id=...)`，失败 `succeeded=False`。已取消/已兑现的承诺�
 **测试**：`TestCommitmentSettlement`（2 例：成功兑现带 result event、失败标 failed）+
 `TestTickBudget`（3 例：每 tick ≤1 次模型、token 超限停、每日上限前置拦截）。
 
+### 9.2.22 统一意图卡（V3，migration v9，2026-10-31）
+
+> 设计动机：承诺、目标、关注点本质是同一件事——**角色被允许自己生成的一条意图**。
+> 统一后"自主权"只有一个可审计对象，执行器按 `kind` 插拔。
+
+**表 `companion_intent`**（v9）：`kind`（promise/act/watch/speak）、`title`、`provenance`
+（character_send/owner_statement/reflection）、`source_event_id`、`trigger_at_ms`、
+`expires_at_ms`、`status`（planned/armed/running/done/failed/expired/cancelled）、
+`authority_json`（工具白名单 / 是否可开口 / LLM 上限）、`payload_json`、`result_event_id`、
+`commitment_id`。
+
+- `ux_intent_source`：同一来源同一标题不重复建；
+- `ux_one_running_act`：`WHERE kind='act' AND status='running'`，同时只能跑一个动作。
+
+**迁移**：`MIGRATION_V9` 把 `companion_goal` 复制为 `kind='act'`，状态映射
+`proposed→planned / approved→armed / in_progress→running / succeeded→done`，旧表此后只读。
+
+**goal 兼容视图**：`store.goals/get_goal/add_goal/active_goal/set_goal_status` 改为操作意图表，
+返回仍是 `Goal` 形状（状态反向映射回旧词），因此 loop/outreach/CLI/旧测试无需改动；
+`get_goal` 对 `goal_*` 旧 id 走 `gint_` 前缀，最后回退只读旧表。
+
+**`companion/intent.py`**：`authority()` / `create_act()` / `create_watch()` / `due()`（先过期再取到期）/
+`arm/start/finish/fail/cancel/extend` / `view()`（CLI 用）。
+
+**测试**：`tests/test_companion_intent.py`（11 例）：v9 建表与索引、旧 goal 复制（状态/工具/截止）、
+planned→armed→running→done、watch 带 trigger、终态保护、同时只跑一个 act、同源幂等、
+到期前后查询、过期自动关闭、extend 原地改时间。
+
 ### 9.3 测试
 
 `tests/test_character.py`(7)、`tests/test_character_system_prompt.py`(4)、`tests/test_qq.py` `/角色` 相关 3 条、
