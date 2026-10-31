@@ -558,3 +558,24 @@ class TestMaintenanceActivity:
 
         assert calls == []
         assert result.action == "STAY_SILENT"
+
+    def test_silent_verdict_still_lives_a_little(self, tmp_path: Path) -> None:
+        """有候选但模型判"不值得说"时，仍做一件只读小事（不额外烧 LLM）。"""
+        store = _store(tmp_path)
+        _open_thread(store)
+        calls: list[tuple[str, dict]] = []
+        sent: list[str] = []
+
+        result = run_life_tick(
+            store,
+            "linwan",
+            "owner",
+            now_ms=_ms(_DAY, 15),
+            runner=lambda _c: {"action": "STAY_SILENT", "reason": "LOW_VALUE"},
+            sender=sent.append,
+            invoker=self._invoker(calls),
+        )
+
+        assert calls, "silence must not mean doing nothing all day"
+        assert result.action == "ACT_SILENTLY" and result.reason == "MAINTENANCE"
+        assert sent == []

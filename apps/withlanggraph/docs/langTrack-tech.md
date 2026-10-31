@@ -1406,7 +1406,8 @@ owner 轮注入 / 非 owner 不注入、信任包装与 system prompt 洁净、1
 `collect_candidates()` 的 `recent_activity` 依赖 `read_action.succeeded`，但 `ACT_*`
 又必须由候选触发 → 死锁，角色从不"过日子"。
 
-修复（`loop._maintenance_activity`）：`NO_CANDIDATE` 的 tick 仍可做**一件**确定性只读小事：
+修复（`loop._maintenance_activity`）：**任何 `STAY_SILENT` 的 tick**（`NO_CANDIDATE` 或
+`LOW_VALUE`）仍可做**一件**确定性只读小事：
 
 | 约束 | 值 |
 |---|---|
@@ -1415,7 +1416,7 @@ owner 轮注入 / 非 owner 不注入、信任包装与 system prompt 洁净、1
 | 频率 | 与上次活动间隔 ≥3h |
 | 每日上限 | 3 次只读活动 |
 | 成本 | **0 次 LLM**（工具与参数由轮换决定，不问模型） |
-| 表达 | 默认不说；做完后在同一次 tick 里再跑一次 `decide()`（≤1 次 LLM），值得说才说 |
+| 表达 | 默认不说；仅当本轮还没调过模型（`NO_CANDIDATE`）时，做完再 `decide()` 一次（≤1 次 LLM）；模型判 `LOW_VALUE` 的 tick 只做不说 |
 
 这样"自己看点什么 → 产生 `read_action.succeeded` → 下一轮成为 `recent_activity` 候选 →
 也许告诉你"形成闭环，同时保住"空 tick 不烧钱、不打扰"的原则。

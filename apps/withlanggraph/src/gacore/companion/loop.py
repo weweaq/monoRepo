@@ -154,17 +154,21 @@ def _tick(
         now_ms=now,
     )
     if decision.action == "STAY_SILENT":
-        if decision.reason == "NO_CANDIDATE":
-            # Chicken-and-egg fix: acting is what creates "recent activity" candidates, so
-            # a tick with nothing to say may still do one small read-only thing by itself
-            # (deterministic, 0 LLM). Only then does telling become possible.
-            maintenance = _maintenance_activity(
-                store, actor_id, principal_id, gate=gate, now=now, invoker=invoker, dry_run=dry_run
+        # A silent verdict — whether "nothing to say" or "not worth saying" — is still a
+        # chance to live a little: one deterministic read-only activity (0 LLM), bounded by
+        # its own 3h gap / 3-a-day cap. Material it creates feeds the next tick.
+        maintenance = _maintenance_activity(
+            store, actor_id, principal_id, gate=gate, now=now, invoker=invoker, dry_run=dry_run
+        )
+        if maintenance is None:
+            return TickResult(
+                action="STAY_SILENT",
+                reason=decision.reason,
+                llm_calls=decision.llm_calls,
             )
-            if maintenance is None:
-                return TickResult(
-                    action="STAY_SILENT", reason="NO_CANDIDATE", llm_calls=decision.llm_calls
-                )
+        if decision.llm_calls == 0 and decision.reason == "NO_CANDIDATE":
+            # No model has been consulted yet: spend the tick's single LLM call on the
+            # material we just produced, so "I did something" can become "let me tell you".
             decision = decide(
                 store,
                 actor_id,
@@ -177,11 +181,7 @@ def _tick(
             if decision.action == "STAY_SILENT":
                 return maintenance
         else:
-            return TickResult(
-                action="STAY_SILENT",
-                reason=decision.reason,
-                llm_calls=decision.llm_calls,
-            )
+            return maintenance
 
     # ACT.
     if decision.action in {"TELL_ONLY", "ASK_PERMISSION"}:

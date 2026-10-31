@@ -6355,3 +6355,15 @@ tick、每天最多 3 条主动消息、五种动作全开）**补齐。
 
 **验证**：`TestGateCounting` 2 例（5 条 agent 回答 → daily_count=0；2 条主动 → 2）；
 全仓 **2262 passed, 4 skipped**；ruff 全绿。
+
+### 2026-10-31 · 静默也不等于什么都不做
+
+**现象**：真机 tick 返回 `STAY_SILENT / LOW_VALUE`（模型判"不值得说"），但因为没有触发
+维护活动，一整天依然零动作、零素材。
+
+**修复**：`_maintenance_activity` 的触发条件从"`NO_CANDIDATE`"放宽到"任何 `STAY_SILENT`"；
+只有当本轮还没花过模型调用（`NO_CANDIDATE`）时，才允许活动后再 `decide()` 一次（≤1 次 LLM/
+tick 不变）。模型已判 `LOW_VALUE` 的 tick 只做不说，素材留给下一轮。
+
+**验证**：`test_silent_verdict_still_lives_a_little`（有候选但静默 → 仍执行只读活动、不发消息）；
+全仓 **2263 passed, 4 skipped**；ruff 全绿。
