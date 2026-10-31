@@ -1620,21 +1620,46 @@ class CompanionStore:
         return _row_to_relationship(row) if row is not None else None
 
     def events_for_actor(
-        self, actor_id: str, principal_id: str, *, limit: int = 500
+        self, actor_id: str, principal_id: str, *, limit: int | None = None
     ) -> list[CompanionEvent]:
-        """All events of one actor, oldest first (the projection's input)."""
-        if limit <= 0:
+        """Events of one actor, oldest first.
+
+        ``limit=None`` (default) returns the whole history — projections must see every
+        event, otherwise counters freeze once the table grows past the window. An explicit
+        limit returns the **newest** N events (still oldest-first), never the oldest N.
+        """
+        if limit is not None and limit <= 0:
             return []
         with self._connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM companion_event
-                WHERE actor_id = ? AND principal_id = ?
-                ORDER BY seq ASC LIMIT ?
-                """,
-                (actor_id, principal_id, int(limit)),
-            ).fetchall()
+            if limit is None:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM companion_event
+                    WHERE actor_id = ? AND principal_id = ?
+                    ORDER BY seq ASC
+                    """,
+                    (actor_id, principal_id),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    """
+                    SELECT * FROM (
+                        SELECT * FROM companion_event
+                        WHERE actor_id = ? AND principal_id = ?
+                        ORDER BY seq DESC LIMIT ?
+                    ) ORDER BY seq ASC
+                    """,
+                    (actor_id, principal_id, int(limit)),
+                ).fetchall()
         return [_row_to_event(row) for row in rows]
+
+    def get_event(self, event_id: str) -> CompanionEvent | None:
+        """Load one event by id (``None`` when it does not exist)."""
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM companion_event WHERE event_id = ?", (event_id,)
+            ).fetchone()
+        return _row_to_event(row) if row is not None else None
 
     def save_relationship(
         self,

@@ -579,3 +579,42 @@ class TestMaintenanceActivity:
         assert calls, "silence must not mean doing nothing all day"
         assert result.action == "ACT_SILENTLY" and result.reason == "MAINTENANCE"
         assert sent == []
+
+
+class TestGoalLifecycleInLoop:
+    def test_activity_goes_through_start_goal_and_emits_goal_started(self, tmp_path: Path) -> None:
+        store = _store(tmp_path)
+        _event(store, "u1")
+
+        run_life_tick(
+            store,
+            "linwan",
+            "owner",
+            now_ms=_ms(_DAY, 15),
+            runner=lambda _c: {"action": "STAY_SILENT"},
+            invoker=lambda tool, args: "ok",
+        )
+
+        kinds = _kinds(store)
+        assert "goal.started" in kinds
+        assert "read_action.succeeded" in kinds
+
+    def test_failed_tool_fails_the_activity(self, tmp_path: Path) -> None:
+        store = _store(tmp_path)
+        _event(store, "u1")
+
+        def boom(_tool: str, _args: dict) -> str:
+            raise RuntimeError("tool down")
+
+        run_life_tick(
+            store,
+            "linwan",
+            "owner",
+            now_ms=_ms(_DAY, 15),
+            runner=lambda _c: {"action": "STAY_SILENT"},
+            invoker=boom,
+        )
+
+        activities = store.activities("linwan", "owner")
+        assert activities and activities[-1].status == "failed"
+        assert activities[-1].reason == "read_action_failed"

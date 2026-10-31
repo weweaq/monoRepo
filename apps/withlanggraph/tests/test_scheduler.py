@@ -1235,3 +1235,40 @@ class TestOutreachShadow:
         )
 
         assert calls == [((), {})]
+
+
+class TestLifeSenderReceipt:
+    """life tick 的发送必须看 qq_push 的真实回执，不能"没抛异常就算成功"。"""
+
+    class _Tool:
+        def __init__(self, payload):
+            self.payload = payload
+            self.calls = 0
+
+        def invoke(self, _args):
+            self.calls += 1
+            return self.payload
+
+    def test_success_requires_status_and_ids(self) -> None:
+        from gacore.scheduler import _deliver_or_raise
+
+        tool = self._Tool({"status": "sent", "ok": 1, "ids": {"u": "m1"}})
+        _deliver_or_raise(tool, "hi", "u")
+        assert tool.calls == 1
+
+    def test_error_payload_raises(self) -> None:
+        from gacore.scheduler import _deliver_or_raise
+
+        with pytest.raises(RuntimeError):
+            _deliver_or_raise(self._Tool({"error": "all_failed"}), "hi", "u")
+
+    def test_missing_ids_raises(self) -> None:
+        from gacore.scheduler import _deliver_or_raise
+
+        with pytest.raises(RuntimeError):
+            _deliver_or_raise(self._Tool({"status": "sent", "ids": {}}), "hi", "u")
+
+    def test_repr_string_payload_is_parsed(self) -> None:
+        from gacore.scheduler import _deliver_or_raise
+
+        _deliver_or_raise(self._Tool("{'status': 'sent', 'ids': {'u': 'm1'}}"), "hi", "u")

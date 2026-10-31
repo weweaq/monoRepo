@@ -26,6 +26,7 @@ from gacore.companion.activity import (
     ActivityBudget,
     complete_activity,
     derive_day_phase,
+    fail_activity,
     spend,
     start_activity,
 )
@@ -33,8 +34,10 @@ from gacore.companion.goal import (
     ALLOWED_TOOLS,
     MAX_DEADLINE_DAYS,
     GoalProposal,
+    approve_goal,
     create_goal,
     finish_goal,
+    start_goal,
 )
 from gacore.companion.outreach import (
     Decision,
@@ -262,8 +265,34 @@ def _maintenance_activity(
         return None
     if dry_run:
         return TickResult(action="ACT_SILENTLY", reason="MAINTENANCE", goal_id=goal.goal_id)
+    budget = ActivityBudget(
+        max_llm_calls=MAX_TICK_LLM_CALLS,
+        max_read_actions=ACTIVITY_MAX_TOOL_CALLS,
+        deadline_ms=now + ACTIVITY_DEADLINE_MINUTES * 60 * 1000,
+        cancel_on_user_message=True,
+    )
+    activity = start_activity(
+        store,
+        actor_id,
+        principal_id,
+        kind=f"life:{tool}",
+        budget=budget,
+        source_goal_id=goal.goal_id,
+        now_ms=now,
+    )
     finished, detail = _execute(store, actor_id, principal_id, goal, tool, args, invoker, now)
-    if finished.status != "succeeded":
+    spend(store, actor_id, principal_id, activity.activity_id, read_actions=1, now_ms=now)
+    if finished.status == "succeeded":
+        complete_activity(store, actor_id, principal_id, activity.activity_id, now_ms=now)
+    else:
+        fail_activity(
+            store,
+            actor_id,
+            principal_id,
+            activity.activity_id,
+            reason="read_action_failed",
+            now_ms=now,
+        )
         return None
     logger.info(
         "companion silent activity",
@@ -385,16 +414,21 @@ def _act(
         source_goal_id=goal.goal_id,
         now_ms=now,
     )
-    try:
-        finished, detail = _execute(
-            store, actor_id, principal_id, goal, tool, args, invoker, now
+    finished, detail = _execute(
+        store, actor_id, principal_id, goal, tool, args, invoker, now
+    )
+    spend(store, actor_id, principal_id, activity.activity_id, read_actions=1, now_ms=now)
+    if finished.status == "succeeded":
+        complete_activity(store, actor_id, principal_id, activity.activity_id, now_ms=now)
+    else:
+        fail_activity(
+            store,
+            actor_id,
+            principal_id,
+            activity.activity_id,
+            reason="read_action_failed",
+            now_ms=now,
         )
-    finally:
-        if store.get_activity(activity.activity_id).status in {"active", "paused"}:
-            complete_activity(
-                store, actor_id, principal_id, activity.activity_id, now_ms=now
-            )
-        spend(store, actor_id, principal_id, activity.activity_id, read_actions=1, now_ms=now)
 
     if finished.status != "succeeded":
         # The read failed: record it, tell nobody. A failure is not the character's mood.
@@ -455,13 +489,15 @@ def _execute(
     now: int,
 ) -> tuple[Goal, str]:
     """Run the goal's single read-only tool and close it with real events."""
-    """Run the goal's single read-only tool and close it with real events."""
+    """Run the goal's single read-only tool through the standard goal lifecycle.
+
+    ``approve_goal``/``start_goal`` emit ``goal.started``, so every execution is visible
+    in the event log exactly like a goal created by any other path.
+    """
     if goal.status == "proposed":
-        store.set_goal_status(goal.goal_id, status="approved")
-    if goal.status not in {"approved", "in_progress"}:
-        store.set_goal_status(goal.goal_id, status="approved")
+        approve_goal(store, goal.goal_id)
     if store.get_goal(goal.goal_id).status == "approved":
-        store.set_goal_status(goal.goal_id, status="in_progress")
+        start_goal(store, actor_id, principal_id, goal.goal_id, occurred_at_ms=now)
     try:
         detail = invoker(tool, args)  # type: ignore[operator]
     except Exception as exc:  # noqa: BLE001 — a failed read is a real, recorded failure

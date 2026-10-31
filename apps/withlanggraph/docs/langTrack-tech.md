@@ -1424,6 +1424,44 @@ owner 轮注入 / 非 owner 不注入、信任包装与 system prompt 洁净、1
 **测试**：`test_companion_loop.py::TestMaintenanceActivity`（5 例：空 tick 仍做一件只读事、
 做完能接着说、3h 间隔、每日 3 次上限、夜间不做）+ `test_scheduler.py` 间隔语义更新。
 
+### 9.2.20 Companion P1 审计结论与修复（2026-10-31）
+
+> 外部 review 列了 11 项 P1 + 9 项次级问题。逐条对代码取证后的结论：
+
+**已修复（本批）**
+
+| # | 问题 | 取证 | 修法 |
+|---|---|---|---|
+| 1 | `events_for_actor()` 按 `seq ASC LIMIT 500` 只读最旧事件 | 确认 | 默认**全量**（投影必须看全）；显式 `limit` 时取**最新 N 条**（子查询 `ORDER BY seq DESC LIMIT n` 再正序） |
+| 2 | life tick 的 sender 不看 `qq_push` 回执 | 确认 | `_deliver_or_raise()` 解析 dict（含 repr 字符串）：`error` / `status != sent` / `ids` 为空一律抛错 → loop 记 `SYSTEM_FAILURE`，**不写** `proactive.message.sent` |
+| 3 | QQ ingress 未做回复关联与活动取消 | 确认 | `_record_companion_ingress` 在 `inserted` 后调 `match_reply()` 与 `cancel_on_owner_message()`（`store.get_event()` 取事件对象） |
+| 5 | repair 关键词过宽、最早越界掩盖新的 | 确认（`_ACK_PHRASES` 含"好的/嗯/可以/行吧/谢谢"；`_first_violation`） | 只保留显式致歉/谅解；改 `_latest_violation()`，新越界立即重新 strained |
+| 6 | `strained/repairing` 未进主动硬闸 | 确认 | `GateInput.relationship_status`（`build_gate_input` 自动填）；strained/repairing 当天已有 1 条主动即 `POLICY_BLOCKED` |
+| 9 | life loop 未走 `start_goal()`；工具失败仍 completed | 确认 | `_execute()` 改走 `approve_goal` → `start_goal`（写 `goal.started`）；`_act`/维护活动在失败时 `fail_activity(reason="read_action_failed")` |
+
+**核实后不成立**
+
+| # | 说法 | 实际 |
+|---|---|---|
+| 7 | 普通 `agent.message.sent` 计入主动 quota | 已在本日 `_OUTBOUND_KINDS = {"proactive.message.sent"}` 修复（同日提交） |
+| 次级 | Companion 仍外显"思考中"与工具轨迹 | 代码已无"思考中"占位；轨迹仅 `QQ_TOOL_TRACE=1` 时外发，`.env` 未开 |
+| 次级 | reflection coordinator 有 lost-wakeup | 已有 `_rerun`：运行中到达的事件会在同一 worker 里补跑一次 |
+
+**已登记、本批未修（附修法）**
+
+| # | 问题 | 计划 |
+|---|---|---|
+| 4 | permission token 未持久化、无审批解析/过期/防重放 | 新增 `companion_permission`（v9）：token 行 + `expires_at_ms` + `used_at`；QQ ingress 解析"同意/可以"并校验 hash 与过期 |
+| 8 | commitment 不可靠生成 goal；goal 成功不兑现 commitment | 候选带 `commitment_id` → 建 goal 时写入；`finish_goal` 成功后回调 `complete_commitment(result_event_id)` |
+| 10 | 预算无前置拦截（LLM/token/cost/deadline） | 每次模型调用前 `check_budget()`；tick 级 `max_llm_calls` 计入 activity.spent；超限直接 `failed(budget_exhausted)` |
+| 11 | TrustedContext/UntrustedData 只定义未接线 | Companion 状态块（含话题原文）从 system 移到独立数据消息，用 `wrap_untrusted()` 包裹 |
+| 次级 | 迟回复重复建 open thread | 建前先按 `topic` 模糊匹配未关闭线程；命中则续期而非新建 |
+| 次级 | journal 只处理午夜时的 active card | job 记录 `actor_id` 到状态文件，补跑按当时 actor |
+| 次级 | 给主人的信未成为 TELL_ONLY 候选 | `journals_for_day(visibility="to_owner")` 未读时作为候选（优先级低于 recent_activity） |
+| 次级 | projection metadata 未按 actor 隔离 | `companion_projection_state` 主键加 `actor_id, principal_id` |
+| 次级 | CLI reset/export 覆盖不完整 | export 支持全量（不限单日）；reset 增加按表选择 |
+| 次级 | goal 丢失 success_criteria | `companion_goal` 增加 `success_criteria TEXT`（v9） |
+
 ### 9.3 测试
 
 `tests/test_character.py`(7)、`tests/test_character_system_prompt.py`(4)、`tests/test_qq.py` `/角色` 相关 3 条、

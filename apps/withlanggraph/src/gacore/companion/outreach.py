@@ -124,6 +124,7 @@ class GateInput:
     no_response_streak: int = 0
     last_owner_message_ms: int | None = None
     has_running_activity: bool = False
+    relationship_status: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,6 +243,10 @@ def evaluate_gate(gate: GateInput) -> GateResult:
         return GateResult(False, "TOO_REPETITIVE")
     if gate.no_response_streak >= 3:
         return GateResult(False, "LOW_VALUE")
+    # A strained/repairing relationship gets at most one proactive contact a day: the
+    # character must not paper over a conflict with chatter (design §14 / V2-Step 2).
+    if gate.relationship_status in {"strained", "repairing"} and gate.daily_count >= 1:
+        return GateResult(False, "POLICY_BLOCKED")
     return GateResult(True, None)
 
 
@@ -654,8 +659,10 @@ def build_gate_input(
         if row.kind != "no_response":
             break
         streak += 1
+    relationship = store.relationship(actor_id, principal_id)
     return GateInput(
         now_ms=now_ms,
+        relationship_status=getattr(relationship, "status", None),
         daily_count=daily_count,
         max_daily=max_daily,
         last_outreach_ms=last_outreach,

@@ -111,8 +111,10 @@ from gacore.companion.identity import (
     legacy_memory_allowed,
 )
 from gacore.companion.reply_batch import ReplyBatch, plan_final_reply
+from gacore.companion.activity import cancel_on_owner_message
 from gacore.companion.commitment import schedule_commitment_extraction
 from gacore.companion.mood import refresh_mood
+from gacore.companion.outreach import match_reply
 from gacore.companion.relationship import refresh_relationship
 from gacore.companion.store import CompanionStore, companion_db_path
 from gacore.companion.summary import minimize_user_message
@@ -1303,6 +1305,17 @@ class QQApp:
             if result.inserted:
 
                 await _refresh_companion_state_quietly(store, actor_id)
+
+                # V2 收尾：主人的回复既可能接上一次主动触达，也可能取消正在进行中的活动。
+                # 两者都只做归因/取消，不发送任何消息；失败由外层 except 吞掉。
+                event = await asyncio.to_thread(store.get_event, result.event_id)
+                if event is not None:
+                    await asyncio.to_thread(
+                        match_reply, store, actor_id, "owner", owner_event=event
+                    )
+                    await asyncio.to_thread(
+                        cancel_on_owner_message, store, actor_id, "owner", event
+                    )
 
                 schedule_reflection_check(actor_id, "owner")
 

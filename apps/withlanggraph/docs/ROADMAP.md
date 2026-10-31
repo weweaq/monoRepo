@@ -6370,3 +6370,25 @@ tick 不变）。模型已判 `LOW_VALUE` 的 tick 只做不说，素材留给�
 
 **补充（同日）**：自主活动来源改为按 **3h** 轮换（原为 6h 分桶，同一天只有 3 个槽位，
 连续两次维护可能看同一处）。B站 / 浏览历史 / 昨日日记交替出现，素材不重样。
+
+### 2026-10-31 · P1 审计：6 项修复 · 3 项不成立 · 4 项登记
+
+**背景**：外部 review 列了 11 项 P1 + 9 项次级问题。逐条对代码取证，结果见 tech §9.2.20。
+
+**已修（带回归测试）**：
+
+1. `events_for_actor()` 默认全量、显式 limit 取最新 N 条（原来只读最旧 500 条，超过后投影看不到新事件）；
+2. life tick sender 解析 `qq_push` 回执，`error`/无 `ids` 一律失败，不写 sent；
+3. QQ ingress 接入 `match_reply()` 与 `cancel_on_owner_message()`；
+4. relationship 修复词窄化 + 取最近越界（旧的修复不再掩盖新的越界）；
+5. `strained/repairing` 进主动硬闸（当天 ≤1 条）；
+6. life loop 走 `approve_goal → start_goal`（写 `goal.started`），工具失败时 `fail_activity`。
+
+**核实不成立**：quota 口径（本日已修）、"思考中"/工具轨迹（代码已无，`.env` 未开）、
+coordinator lost-wakeup（已有 `_rerun` 补跑）。
+
+**已登记未修**：permission token 持久化与审批、commitment→goal→兑现闭环、预算前置拦截、
+TrustedContext 接线，以及 6 项次级问题（详见 tech 表）。
+
+**实测验证**：全仓 **2271 passed, 4 skipped**；ruff 全绿。
+新增测试：事件窗口 2 例、sender 回执 4 例、goal 生命周期 2 例、strained 闸 1 例。

@@ -329,6 +329,41 @@ def run_journal_job(job: Job, cfg: Config) -> object | None:
         return None
 
 
+def _parse_tool_payload(raw: object) -> dict[str, object]:
+    """qq_push returns a dict; as a tool its ``.invoke`` may hand back a repr string."""
+    if isinstance(raw, dict):
+        return raw
+    text = str(raw)
+    try:
+        import json
+
+        parsed = json.loads(text)
+        return parsed if isinstance(parsed, dict) else {"error": "bad_result"}
+    except ValueError:
+        pass
+    try:
+        import ast
+
+        parsed = ast.literal_eval(text)
+        return parsed if isinstance(parsed, dict) else {"error": "bad_result"}
+    except (ValueError, SyntaxError):
+        return {"error": "bad_result", "raw": text[:200]}
+
+
+def _deliver_or_raise(tool: object, text: str, owner_openid: str | None) -> None:
+    """Send via qq_push and raise unless the platform really returned message ids.
+
+    A push that reports ``error``/no ids is a **failure**: nothing may be recorded as
+    ``proactive.message.sent`` on the strength of "the call did not throw".
+    """
+    raw = tool.invoke({"message": text, "to": owner_openid})  # type: ignore[attr-defined]
+    payload = _parse_tool_payload(raw)
+    if payload.get("error"):
+        raise RuntimeError(f"qq_push failed: {payload.get('error')}")
+    if payload.get("status") != "sent" or not payload.get("ids"):
+        raise RuntimeError(f"qq_push did not confirm delivery: {str(payload)[:200]}")
+
+
 def run_life_tick_job(job: Job, cfg: Config) -> object | None:
     """One Companion life tick (design §16): sense → decide → act → record.
 
@@ -353,7 +388,7 @@ def run_life_tick_job(job: Job, cfg: Config) -> object | None:
         tools = {tool.name: tool for tool in build_tool_list(cfg)}
 
         def sender(text: str) -> None:
-            tools["qq_push"].invoke({"message": text, "to": companion.owner_openid})
+            _deliver_or_raise(tools["qq_push"], text, companion.owner_openid)
 
         def invoker(tool_name: str, args: dict[str, object] | None = None) -> str:
             tool = tools.get(tool_name)

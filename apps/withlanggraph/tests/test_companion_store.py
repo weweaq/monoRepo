@@ -339,3 +339,40 @@ class TestConfigPaths:
 
         assert store.db_path == tmp_path / "data" / "companion.db"
         assert store.db_path.parent.is_dir()
+
+
+class TestEventWindow:
+    def test_default_returns_every_event(self, tmp_path: Path) -> None:
+        store = CompanionStore(tmp_path / "c.db")
+        for index in range(600):
+            store.append_event(
+                kind="user.message.received",
+                actor_id="a",
+                principal_id="owner",
+                source_id=str(index),
+                summary=f"m{index}",
+                idempotency_key=f"k{index}",
+            )
+
+        events = store.events_for_actor("a", "owner")
+
+        assert len(events) == 600
+        assert events[-1].summary == "m599"
+
+    def test_limit_returns_the_newest_not_the_oldest(self, tmp_path: Path) -> None:
+        store = CompanionStore(tmp_path / "c.db")
+        for index in range(600):
+            store.append_event(
+                kind="user.message.received",
+                actor_id="a",
+                principal_id="owner",
+                source_id=str(index),
+                summary=f"m{index}",
+                idempotency_key=f"k{index}",
+            )
+
+        recent = store.events_for_actor("a", "owner", limit=500)
+
+        assert len(recent) == 500
+        assert recent[0].summary == "m100"
+        assert recent[-1].summary == "m599"

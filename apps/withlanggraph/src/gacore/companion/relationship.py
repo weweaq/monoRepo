@@ -73,7 +73,18 @@ _BOUNDARY_PHRASES: Final = (
     "不提这个",
     "别问了",
 )
-_ACK_PHRASES: Final = ("没关系", "没事", "好的", "好", "可以", "行吧", "嗯", "谢谢")
+# Only explicit acknowledgements/forgiveness count as repair. Generic agreement
+# ("好的"/"嗯"/"可以") is ordinary conversation and must not silently clear a boundary.
+_ACK_PHRASES: Final = (
+    "没关系",
+    "没事",
+    "抱歉",
+    "对不起",
+    "不好意思",
+    "我错了",
+    "以后不问",
+    "以后不说",
+)
 _QUESTION_MARKERS: Final = ("？", "?", "吗", "呢", "怎么", "为什么", "什么", "哪", "多少", "几点")
 _TOPIC_TRIM: Final = re.compile(r"[\s，。！？、,.!?~～…—]+")
 # Generic tails that describe *that it is a topic*, not which topic: keeping them would
@@ -270,7 +281,7 @@ def _derive_status(
     boundary topic. Silence never counts as conflict (plan: "无回复不算冲突"), and a
     repair is only claimed after the owner acknowledges **and** follows up.
     """
-    negative = _first_violation(sent, boundaries)
+    negative = _latest_violation(sent, boundaries)
     if negative is None:
         return "stable", None, None
 
@@ -303,10 +314,14 @@ def _derive_status(
     return "stable", negative.event_id, follow_up.event_id
 
 
-def _first_violation(
+def _latest_violation(
     sent: Sequence[CompanionEvent], boundaries: Sequence[BoundaryHit]
 ) -> CompanionEvent | None:
-    """Earliest character send that revisits a named boundary topic after it was stated."""
+    """Most recent character send that revisits a boundary topic.
+
+    Using the latest violation (not the first) means a repaired older conflict can never
+    mask a fresh one — a new breach re-opens ``strained`` immediately.
+    """
     for boundary in boundaries:
         if not boundary.topic or boundary.topic == "unspecified":
             continue
