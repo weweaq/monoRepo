@@ -97,6 +97,18 @@
       "match": ["viewer_server.py"],
       "notes": "本地离线 mmd 查看器服务；评论持久化到 apps/mermaid-viewer/data/reviews.db。--host 0.0.0.0：允许手机/局域网访问（frontend 仍是 127.0.0.1 供本机仪表盘用；手机用 http://<电脑局域网IP>:8123/...）。--no-browser：由 dev-console 启停时不需自拉浏览器",
       "frontend": "http://127.0.0.1:8123/apps/mermaid-viewer/viewer.html"
+    },
+    {
+      "id": "face-console",
+      "name": "Face Console (DeepFace 人脸管理台)",
+      "ports": [7861],
+      "cwd": "D:\\AAAmyPrj\\github\\myrepos\\GenericAgent",
+      "env": {},
+      "interpreter": "D:\\softwares\\miniconda\\pythonw.exe",
+      "args": ["D:\\AAAmyPrj\\github\\myrepos\\GenericAgent\\face_console\\app.py"],
+      "match": ["face_console\\app.py"],
+      "notes": "本地人脸识别管理台（摄像头实时画框/认人、人脸库增删、注册、重建）；数据在 GenericAgent/face_db + PostgreSQL deepface 库。解释器必须是 base conda（envs\\deepface 缺 fastapi/psycopg）；DEEPFACE_POSTGRES_URI 由 face_console/.env 自动加载，不写这里。模型加载约 30-40s，启动后稍等再开页面",
+      "frontend": "http://127.0.0.1:7861/"
     }
   ]
 }
