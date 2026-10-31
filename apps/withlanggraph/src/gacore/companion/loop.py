@@ -522,6 +522,7 @@ def _tell(
             error="delivery_failed",
         )
     event_id = _record_sent(store, actor_id, principal_id, text, now)
+    _close_watch(store, decision, event_id)
     return TickResult(
         action=decision.action,
         reason=decision.reason,
@@ -802,6 +803,25 @@ def _goal_text(candidate: OutreachCandidate | None) -> str:
     if candidate.kind == "owner_concern":
         return "回看对方最近的状态记录"
     return "回看最近的记录"
+
+
+def _close_watch(store: CompanionStore, decision: Decision, event_id: str | None) -> None:
+    """A watch that we actually asked about is done, not pending forever."""
+    if not decision.candidates:
+        return
+    candidate = decision.candidates[0]
+    if candidate.kind != "watch_due" or not candidate.ref_id:
+        return
+    try:
+        from gacore.companion import intent as intent_api
+
+        intent_api.finish(store, candidate.ref_id, result_event_id=event_id)
+    except Exception as exc:  # noqa: BLE001 — closing the card must not break the send
+        logger.warning(
+            "companion watch close skipped",
+            intent_id=candidate.ref_id,
+            error_type=type(exc).__name__,
+        )
 
 
 def _quiet_now(now_ms: int) -> bool:

@@ -323,3 +323,12 @@ flowchart TD
     LIFE -. "TELL_ONLY / ACT_AND_TELL 经 qq_push 送达" .-> QQ
     SC -. "type=life · every 2h → LIFE_POOL" .-> LIFE
     class LIFE state
+
+    %% V3：关注点（watch）——"我六点下班"→ 到点问一句（2026-10-31）
+    WATCH[("companion/follow_up.py watch<br/>预筛：时间词 ∧ 生活事件词<br/>模型只分类(topic/time_text/confidence)<br/>parse_clock_ms 代码算时间（六点/18:00/六点半/下午三点）<br/>未来 12h 内才建 · expires=+3h<br/>写 companion_intent(kind=watch, status=armed)")]
+    WATCH -. "create_watch（统一意图卡）" .-> INTENT
+    QQ -. "主人消息 inserted 后后台抽取" .-> WATCH
+    INTENT -. "due_intents → watch_due 候选（最高优先级）" .-> OUTREACH
+    WATCH -. "说完 intent.finish（asked 即 done）" .-> INTENT
+    class WATCH state
+    class INTENT state

@@ -1524,6 +1524,33 @@ result_event_id=...)`，失败 `succeeded=False`。已取消/已兑现的承诺�
 planned→armed→running→done、watch 带 trigger、终态保护、同时只跑一个 act、同源幂等、
 到期前后查询、过期自动关闭、extend 原地改时间。
 
+### 9.2.23 关注点 watch：到点问一句（2026-10-31）
+
+> 场景：主人说"我六点下班"，角色 18:00 后问"还没下班吗？"。实现为
+> `companion_intent(kind='watch')`——统一意图卡的第二类用法。
+
+**抽取（`companion/follow_up.py`）**：
+
+1. **确定性预筛**：文本必须同时含钟点词（点/：/:/半）与生活事件词
+   （下班/上班/加班/开会/吃饭/睡觉/回家/出门/上课/健身/出差/见客户/面试/出发），否则
+   **0 次模型**。
+2. **模型只分类**：输出 `{is_watch, topic, time_text, confidence}`；confidence <0.6 丢弃。
+3. **代码算时间**：`parse_clock_ms()` 支持 `六点 / 6点 / 18:00 / 六点半 / 下午三点 / 晚上八点`；
+   有晚间语境（下班/晚上/加班/吃饭）时 1–11 点按 PM 解释；已过则该时刻顺延到明天。
+4. **边界**：只在未来 12h 内建卡；`trigger_at = 抽到的时间`，`expires_at = trigger + 3h`；
+   同一 `source_event_id + title` 幂等，不重复建。
+
+**到点发问**：`collect_candidates()` 增加 `watch_due`（优先级 5，高于 recent_activity）；
+`intent.due()` 先关闭过期卡再返回到期卡。默认 `armed`，发问成功后 `intent.finish()`
+（状态 `done` 并关联 result event），所以同一张卡不会被问第二次。
+
+**接线**：QQ ingress 在事件 `inserted` 后调用 `schedule_watch_extraction()`（后台线程，
+回复路径不等待模型）。
+
+**测试**：`tests/test_companion_watch.py`（19 例）：六种钟点写法、上午不偏移、已过顺延、
+无钟点/无生活词拒绝、建卡字段（trigger/expires/source）、低置信丢弃、超 12h 丢弃、
+到点成为最高优先级候选、未到点无候选、问完即 done、过期不再问。
+
 ### 9.3 测试
 
 `tests/test_character.py`(7)、`tests/test_character_system_prompt.py`(4)、`tests/test_qq.py` `/角色` 相关 3 条、

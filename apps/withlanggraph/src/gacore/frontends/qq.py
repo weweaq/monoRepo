@@ -113,6 +113,7 @@ from gacore.companion.identity import (
 from gacore.companion.reply_batch import ReplyBatch, plan_final_reply
 from gacore.companion.activity import cancel_on_owner_message
 from gacore.companion.commitment import schedule_commitment_extraction
+from gacore.companion.follow_up import schedule_watch_extraction
 from gacore.companion.mood import refresh_mood
 from gacore.companion.outreach import match_reply
 from gacore.companion.relationship import refresh_relationship
@@ -1315,6 +1316,15 @@ class QQApp:
                     )
                     await asyncio.to_thread(
                         cancel_on_owner_message, store, actor_id, "owner", event
+                    )
+                    # 主人说"我六点下班" → 后台写一张 watch 卡，到点再问。
+                    schedule_watch_extraction(
+                        store,
+                        actor_id,
+                        "owner",
+                        event_id=result.event_id,
+                        summary=event.summary,
+                        occurred_at_ms=event.occurred_at_ms,
                     )
 
                 schedule_reflection_check(actor_id, "owner")

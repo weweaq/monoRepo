@@ -160,6 +160,22 @@ def collect_candidates(
     candidates: list[OutreachCandidate] = []
     events = store.events_for_actor(actor_id, principal_id)
 
+    # Watches the character set for itself ("owner finishes work at six"). A due card is
+    # the highest-priority reason to speak: it is time-bound and was explicitly requested.
+    for card in store.due_intents(actor_id, principal_id, now_ms=now_ms):
+        if card.kind != "watch":
+            continue
+        hint = str(card.payload.get("question_hint") or "")
+        candidates.append(
+            OutreachCandidate(
+                kind="watch_due",
+                text=f"到点了，该问一句：{card.title}" + (f"（原话：{hint}）" if hint else ""),
+                priority=5,
+                source_ids=(card.source_event_id,) if card.source_event_id else (),
+                ref_id=card.intent_id,
+            )
+        )
+
     # What the character itself just looked at (ACT_SILENTLY). A result newer than the last
     # outbound message is a genuine "I did something, want to tell you" hook; once told it
     # stops being a candidate, so the same finding is never repeated.

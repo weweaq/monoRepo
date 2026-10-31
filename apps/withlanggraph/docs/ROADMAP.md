@@ -6432,3 +6432,26 @@ TrustedContext 接线，以及 6 项次级问题（详见 tech 表）。
 状态、工具白名单、截止时间、commitment 关联全部保留。
 
 **下一步**：`watch`（关注点）——从"我六点下班"抽时间、写卡、到点变候选。
+
+### 2026-10-31 · V3：关注点 watch（"我六点下班"→ 到点问）
+
+**背景**：统一的意图卡有了，但还没有第一类真实用法。watch 填补"到点该说话"的触发源。
+
+**已完成**：
+
+- `companion/follow_up.py`（新增）：预筛、分类 prompt、`parse_clock_ms`（六点/18:00/六点半/
+  下午三点/晚上八点，晚间语境 PM 推断，已过顺延）、`record_watch`（未来 12h、expires=+3h、
+  同源幂等）、`schedule_watch_extraction`（后台线程）。
+- `outreach.collect_candidates()`：新增 `watch_due`（优先级 5）。
+- `loop._tell()`：发问成功后 `intent.finish()`，一张卡只问一次。
+- `qq.py` ingress：事件插入后调度 watch 抽取。
+- `tests/test_companion_watch.py`（新增 19 例）。
+- R5：本文件 + tech §9.2.23 + 架构图 `WATCH` 节点。
+
+**实测验证**：全仓 **2307 passed, 4 skipped**；ruff 全绿。
+
+**偏差说明**：
+
+- 时间解析只覆盖中文钟点与 `HH:MM`；"六点一刻/快七点"这类模糊表达不抽（宁缺勿错）。
+- 只在未来 12h 内建卡：明天以后的事不记，避免"一周后突然问一句"。
+- 问过一次即 `done`，不做二次追问（no_response 衰减仍作用于整体频率）。
