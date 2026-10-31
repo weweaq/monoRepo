@@ -44,7 +44,9 @@ OUTREACH_PROMPT_VERSION: Final = "companion-outreach@v1"
 MAX_MESSAGE_CHARS: Final = 200
 MAX_CANDIDATES: Final = 3
 REPLY_WINDOW_MS: Final = 15 * 60 * 60 * 1000
-MIN_OUTREACH_GAP_MS: Final = 3 * 60 * 60 * 1000
+# 90 minutes between proactive contacts: matches the "tick every 1–2h, max 3/day" setting.
+# The old 3h value came from the daily-question job and made an hourly heartbeat pointless.
+MIN_OUTREACH_GAP_MS: Final = 90 * 60 * 1000
 NO_RESPONSE_DECAY: Final = 0.5
 MIN_MULTIPLIER: Final = 0.25
 PERMISSION_TTL_MS: Final = 30 * 60 * 1000
