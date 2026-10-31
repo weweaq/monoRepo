@@ -38,7 +38,9 @@ def test_get_time_simulated_under_fence():
     assert "模拟视角" not in get_time.func()
 
 
-def test_time_anchor_simulated_in_system_prompt(tmp_path: Path):
+def test_time_anchor_simulated_in_system_prompt(tmp_path: Path, monkeypatch):
+    # 该用例只验时间锚；RAG 召回会加载 bge 模型（约 16s），与断言无关，直接置空。
+    monkeypatch.setattr("gacore.context._rag_recall_block", lambda state: "")
     cfg = Config.for_tests(tmp_path)
     state = new_state("hi", cfg)
     with as_of_context("2026-10-23"):

@@ -119,6 +119,8 @@ def test_test_seam_never_delivers(tmp_path, monkeypatch):
     from gacore.scheduler import Job, run_job
 
     cfg = Config.for_tests(tmp_path)
+    # 测试封闭性：信息包会读真实 bili/Edge/git（约 30s），这里只验投递缝，置空即可。
+    monkeypatch.setattr("gacore.daily_info_pack.build_info_pack", lambda *a, **k: "")
     pushed: list[str] = []
     monkeypatch.setattr("gacore.scheduler._push_daily_to_qq", lambda cfg_, day, body: pushed.append(body) or 1)
     job = Job(name="daily-report", schedule="09:00", prompt="hi")

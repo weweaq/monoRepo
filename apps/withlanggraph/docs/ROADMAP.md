@@ -6476,3 +6476,19 @@ TrustedContext 接线，以及 6 项次级问题（详见 tech 表）。
 - R5：本文件 + tech §9.2.24。
 
 **实测验证**：全仓 **2311 passed, 4 skipped**；ruff 全绿；默认值即为 30 条 / 30 分钟。
+
+### 2026-10-31 · 修复"两条消息都没有响应" + 测试提速
+
+**事故**：20:03:58、20:04:09 两条消息，第二条取消第一条 turn 后，合并循环卡在
+`graph.aget_state()`（被取消的 turn 仍握着 checkpoint 锁），两条都没有回复，日志停在
+`Agent task cancelled` 之后无任何后续。
+
+**修复**：`_turn_input_in_checkpoint` 加 3s 超时（超时回放 in-flight 文本继续）；
+`_merge_watchdog` 8s 兜底重启已死的合并循环；新增 2 个回归测试。
+
+**测试提速**：全仓 2313 例从 **263s → 130s**。三个病态用例分别耗 74s/30s/22s：
+bge 模型加载（RAG 召回）、日报信息包读真实数据源 ×2；分别用 conftest 全局 stub 与用例内
+stub 消除，另把自己写的 600 条事件窗口用例缩到 20 条。
+
+**遗留**：checkself 部分用例直接读真实 `data/profile.db`，与运行中的 review 服务并发时偶发
+`sqlite locked`（既有问题，登记待修）。

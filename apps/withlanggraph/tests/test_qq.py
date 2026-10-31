@@ -738,3 +738,50 @@ async def test_normal_turn_sends_no_placeholder_bubble(tmp_cfg, message_llm, mon
     texts = [call.args[1] for call in app.send_text.call_args_list if len(call.args) > 1]
     assert "思考中..." not in texts
     assert any("好。" in t for t in texts)
+
+
+@pytest.mark.asyncio
+async def test_hanging_checkpoint_does_not_swallow_the_next_turn(monkeypatch) -> None:
+    """回归：cancel 后 aget_state 卡住时，合并循环必须继续回答缓冲的消息。
+
+    2026-10-31 实机事故：两条消息间隔 11 秒，第二条取消第一条后，合并循环永久卡在
+    checkpoint 查询上，两条都没有回复。
+    """
+    monkeypatch.setattr(qq, "_MERGE_WINDOW_SECONDS", 0.01)
+    monkeypatch.setattr(qq, "_CHECKPOINT_TIMEOUT_SECONDS", 0.05)
+    app = QQApp(MagicMock())
+    app._run_agent = AsyncMock()
+
+    async def _hangs(_config):
+        await asyncio.sleep(30)
+
+    app.graph.aget_state = _hangs
+
+    async def _forever() -> None:
+        await asyncio.sleep(30)
+
+    old = asyncio.create_task(_forever())
+    app._running_tasks["user-1"] = old
+    app._inflight_text["user-1"] = "第一条"
+
+    app._enqueue_agent_turn("chat", "第二条", "user-1", msg_id="m2", is_group=False)
+    await asyncio.sleep(0.3)
+
+    assert old.cancelled()
+    app._run_agent.assert_awaited_once()
+    assert "第一条" in app._run_agent.await_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_watchdog_restarts_a_stalled_merge_loop(monkeypatch) -> None:
+    """回归：合并任务若已死而消息仍在缓冲，看门狗要重启它。"""
+    monkeypatch.setattr(qq, "_MERGE_WATCHDOG_SECONDS", 0.05)
+    app = QQApp(MagicMock())
+    app._run_agent = AsyncMock()
+    app._pending_texts["user-1"] = ["还在等你"]
+
+    await app._merge_watchdog("chat", "user-1", msg_id="m3", is_group=False)
+    await asyncio.sleep(0.1)
+
+    app._run_agent.assert_awaited_once()
+    assert app._run_agent.await_args.args[1] == "还在等你"

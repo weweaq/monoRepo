@@ -1567,6 +1567,35 @@ planned→armed→running→done、watch 带 trigger、终态保护、同时只�
 **测试**：`TestPacingConfig`（4 例）：默认 30/30、env 覆盖、坏值回落与越界收敛、
 日上限拦截、间隔拦截。
 
+### 9.2.25 消息合并卡死修复与测试提速（2026-10-31）
+
+**事故**：20:03:58 与 20:04:09 两条主人消息，第二条取消第一条 turn 后，合并循环卡在
+`_turn_input_in_checkpoint()` 的 `graph.aget_state()`（第一个 turn 被取消时仍持有 checkpoint
+锁），之后**没有任何 turn 启动，两条消息都没有回复**。
+
+**修复（两道）**：
+
+1. `_turn_input_in_checkpoint()` 用 `asyncio.wait_for(..., _CHECKPOINT_TIMEOUT_SECONDS=3s)`；
+   超时视为"checkpoint 里没有"，回放 in-flight 文本并继续（记 `checkpoint read timed out`）。
+2. `_merge_watchdog()`：取消 in-flight turn 后挂 8s 看门狗；若缓冲仍非空且合并任务已死，
+   重启合并循环（记 `merge loop stalled, restarting`）。
+
+**回归测试**：`test_qq.py::test_hanging_checkpoint_does_not_swallow_the_next_turn`
+（aget_state 挂 30s，仍必须回答）、`test_watchdog_restarts_a_stalled_merge_loop`。
+
+**测试提速**（全仓 2313 例，263s → 130s）：
+
+| 用例 | 原耗时 | 原因 | 处理 |
+|---|---|---|---|
+| `test_as_of_fence::test_time_anchor_simulated_in_system_prompt` | 74s | `build_system_prompt` 触发 RAG 召回，首次加载 bge 模型 | `conftest.py` 全局 autouse fixture 把 `vector_store.recall_context` 置空（保留调用路径），单独用例可覆盖 |
+| `test_daily_qq_push::test_test_seam_never_delivers` | 30s | `run_job` 构建日报信息包，读真实 bili/Edge/git | 用例内 stub `daily_info_pack.build_info_pack` |
+| `test_question_composer::test_daily_prompt_injects_ladder` | 22s | 同上 | 同上 |
+| `test_companion_store::TestEventWindow` | 10s | 每个用例插 600 条事件 | 缩到 20 条 / limit 15 |
+| `test_character_system_prompt` 的图用例 | 22s→13s | `build_graph` 真实建图 | 保留（真实链路价值高于 13s） |
+
+**遗留**：`apps/checkself/tests` 部分用例直接操作真实 `data/profile.db`（conftest 自述），
+与运行中的 review 服务并发时会偶发 `sqlite locked`，属于既有测试隔离问题，另行修复。
+
 ### 9.3 测试
 
 `tests/test_character.py`(7)、`tests/test_character_system_prompt.py`(4)、`tests/test_qq.py` `/角色` 相关 3 条、

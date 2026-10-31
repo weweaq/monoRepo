@@ -344,7 +344,7 @@ class TestConfigPaths:
 class TestEventWindow:
     def test_default_returns_every_event(self, tmp_path: Path) -> None:
         store = CompanionStore(tmp_path / "c.db")
-        for index in range(600):
+        for index in range(20):
             store.append_event(
                 kind="user.message.received",
                 actor_id="a",
@@ -356,12 +356,12 @@ class TestEventWindow:
 
         events = store.events_for_actor("a", "owner")
 
-        assert len(events) == 600
-        assert events[-1].summary == "m599"
+        assert len(events) == 20
+        assert events[-1].summary == "m19"
 
     def test_limit_returns_the_newest_not_the_oldest(self, tmp_path: Path) -> None:
         store = CompanionStore(tmp_path / "c.db")
-        for index in range(600):
+        for index in range(20):
             store.append_event(
                 kind="user.message.received",
                 actor_id="a",
@@ -371,8 +371,8 @@ class TestEventWindow:
                 idempotency_key=f"k{index}",
             )
 
-        recent = store.events_for_actor("a", "owner", limit=500)
+        recent = store.events_for_actor("a", "owner", limit=15)
 
-        assert len(recent) == 500
-        assert recent[0].summary == "m100"
-        assert recent[-1].summary == "m599"
+        assert len(recent) == 15
+        assert recent[0].summary == "m5"
+        assert recent[-1].summary == "m19"

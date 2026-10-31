@@ -165,3 +165,15 @@ def _no_real_llm_calls(monkeypatch: pytest.MonkeyPatch) -> None:
         raise RuntimeError("tests must not call the real LLM (stubbed in conftest)")
 
     monkeypatch.setattr(_qc, "_call_llm", _refuse)
+
+@pytest.fixture(autouse=True)
+def _no_vector_recall(monkeypatch):
+    """测试封闭性：单测禁止加载 bge 向量模型。
+
+    ``build_system_prompt`` 会走 RAG 召回，首次调用要加载 bge-small-zh（约 16s/次，
+    换机必挂）。召回内容与绝大多数用例的断言无关，这里统一置空；需要验证召回行为的
+    用例可自行 monkeypatch 覆盖本 fixture。
+    """
+    # Patch the vector store (not the prompt block) so the call path stays intact for the
+    # tests that assert collaboration, while the bge model is never loaded.
+    monkeypatch.setattr("gacore.vector_store.recall_context", lambda *a, **k: "")

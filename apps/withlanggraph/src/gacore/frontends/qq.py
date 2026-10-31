@@ -218,6 +218,10 @@ _TOOL_TRACE_ENABLED: Final = (os.environ.get("QQ_TOOL_TRACE", "") or "").strip()
 
 # Burst messages from one user inside this window are merged into a single agent turn.
 _MERGE_WINDOW_SECONDS: Final = 1.2
+# A cancelled turn can leave the checkpoint lock busy; never let that hang the merge loop.
+_CHECKPOINT_TIMEOUT_SECONDS: Final = 3.0
+# If buffered texts are still waiting with no live merge task, a watchdog restarts it.
+_MERGE_WATCHDOG_SECONDS: Final = 8.0
 
 # --------------------------------------------------------------------------- fast-reply gate
 # Casual one-liners get a *fast* turn, not a second reply implementation: the same
@@ -2495,6 +2499,11 @@ class QQApp:
             if turn is not None and not turn.done() and user_id in self._inflight_text:
                 self._merge_cancel.add(user_id)
                 turn.cancel()
+            # Belt and braces: if the merge loop dies (deadlock/exception) the buffered
+            # text must still be answered, so a watchdog restarts it after a grace delay.
+            asyncio.create_task(
+                self._merge_watchdog(chat_id, user_id, msg_id=msg_id, is_group=is_group)
+            )
             return
 
         self._merge_task[user_id] = asyncio.create_task(
@@ -2577,10 +2586,37 @@ class QQApp:
         finally:
             self._merge_task.pop(user_id, None)
 
+    async def _merge_watchdog(
+        self,
+        chat_id: str,
+        user_id: str,
+        *,
+        msg_id: str | None,
+        is_group: bool,
+    ) -> None:
+        """Restart a stalled merge loop so buffered messages are never silently dropped."""
+        await asyncio.sleep(_MERGE_WATCHDOG_SECONDS)
+        if not self._pending_texts.get(user_id):
+            return
+        loop = self._merge_task.get(user_id)
+        if loop is not None and not loop.done():
+            return
+        logger.warning("merge loop stalled, restarting", user_id=user_id)
+        self._merge_task[user_id] = asyncio.create_task(
+            self._merge_loop(chat_id, user_id, msg_id=msg_id, is_group=is_group)
+        )
+
     async def _turn_input_in_checkpoint(self, user_id: str, text: str) -> bool:
         config = {"configurable": {"thread_id": self._thread_for(user_id)}}
         try:
-            state = await self.graph.aget_state(config)
+            state = await asyncio.wait_for(
+                self.graph.aget_state(config), timeout=_CHECKPOINT_TIMEOUT_SECONDS
+            )
+        except asyncio.TimeoutError:
+            # A just-cancelled turn may still hold the checkpoint lock. Treat it as a miss
+            # (the caller replays the text) instead of hanging the whole merge loop.
+            logger.warning("checkpoint read timed out, replaying in-flight text", user_id=user_id)
+            return False
         except Exception:  # noqa: BLE001 — unknown checkpoint must not lose the message
             return False
         messages = (getattr(state, "values", None) or {}).get("messages") or []

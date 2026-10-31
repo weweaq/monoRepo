@@ -167,6 +167,8 @@ def test_daily_prompt_injects_ladder(tmp_path, monkeypatch):
     from gacore.scheduler import Job, _build_job_prompt
 
     cfg = Config.for_tests(tmp_path)
+    # 测试封闭性：信息包读真实数据源（约 20s），本用例只验 prompt 阶梯，置空。
+    monkeypatch.setattr("gacore.daily_info_pack.build_info_pack", lambda *a, **k: "")
     job = Job(name="daily-report", schedule="23:50", prompt="日报指令")
     prompt = _build_job_prompt(job, cfg)
     assert "提问阶梯铁律" in prompt and "归因关心" in prompt
