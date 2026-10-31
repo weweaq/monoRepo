@@ -201,3 +201,45 @@
 - [ ] 补基础测试（进程探测纯函数部分）
 - [ ] services.json 模板化（去掉本机绝对路径）
 - [ ] Windows 服务化（nssm 或 Task Scheduler 常驻）
+
+### 2026-10-31 — 纳管 Face Console（DeepFace 人脸管理台）
+
+**背景**：`GenericAgent/face_console` 是本机 DeepFace 人脸管理台（摄像头实时识别 + 人脸库增删 +
+注册/重建，端口 7861），此前只能手动裸跑，进程/端口/启停没有统一入口。用户要求接入
+dev-console 变成受管服务。
+
+**已完成**：
+- `services.json` 新增 `face-console` 条目：`ports:[7861]`、`cwd=GenericAgent`、
+  `interpreter=D:\softwares\miniconda\pythonw.exe`（必须 base conda，`envs\deepface` 缺
+  fastapi/psycopg）、`args=[face_console\app.py]`、`match=["face_console\\app.py"]`、
+  `frontend=http://127.0.0.1:7861/`、notes 说明模型加载约 30–40 s
+- face_console 侧配套：`app.py` 新增 `load_local_env()`（启动时读 `face_console/.env` 或
+  `GenericAgent/.env` 补齐缺失环境变量）；新增 `face_console/.env`（gitignored，放
+  `DEEPFACE_POSTGRES_URI`）与 `start-console.vbs`（双击零窗口裸启动备用）
+- **顺带修 `start.bat` 的误杀**：原杀进程过滤 `CommandLine -match 'server\.py'` 会把
+  `viewer_server.py`（mermaid-viewer）一起杀掉；改为 `(?:^|\s)server\.py\s*$`
+- 未改 `server.py`（stdlib-only 与接口均不动）
+
+**实测验证**：
+- `services.json` JSON 解析通过，9 个服务；重启 dev-console 后 `/api/status` 出现 `face-console`
+- `POST /api/start {"service":"face-console"}` → `started (pid 34512)`；7861 监听、
+  `/api/status` ready（`detector=yunet`，模型加载约 35 s）、`GET /` 200（35 738 bytes）
+- `POST /api/restart {"service":"face-console"}` → `stopped 1 process(es)；started (pid 32912)`，
+  重启后再次 ready，状态 `running=true / ports_open=[7861]`
+- 服务日志落 `logs/2026-10-31-232426/services/face-console.log`，含 uvicorn 访问日志与 TF 初始化输出
+- 存量 6 个服务在 dev-console 重启后仍 `running=true`；被误杀的 mermaid-viewer 已用
+  `/api/start` 恢复（该误杀由旧过滤规则复现，已随上条修复）
+- 进程命令行反查：新过滤规则命中 dev-console 的 2 个 server.py 进程，不命中
+  `gacore.review_server` / `viewer_server.py`
+
+**偏差说明**：
+- `DEEPFACE_POSTGRES_URI` **不写进 services.json**（R9 密钥不落地），由 `face_console/.env`
+  在应用启动时加载；`services.local.json` 未改动
+- `services.json` 模板化（去本机绝对路径）待办仍未处理，本条沿用现状写法
+- dev-console 的 config 仍是启动时加载一次：以后改 services.json 仍需重启管理台才生效
+
+**待办更新**：
+- [x] face-console 纳入 dev-console 受管（2026-10-31）
+- [ ] 补基础测试（进程探测纯函数部分）
+- [ ] services.json 模板化（去掉本机绝对路径）
+- [ ] Windows 服务化（nssm 或 Task Scheduler 常驻）
