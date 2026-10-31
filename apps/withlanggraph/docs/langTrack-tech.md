@@ -1462,6 +1462,40 @@ owner 轮注入 / 非 owner 不注入、信任包装与 system prompt 洁净、1
 | 次级 | CLI reset/export 覆盖不完整 | export 支持全量（不限单日）；reset 增加按表选择 |
 | 次级 | goal 丢失 success_criteria | `companion_goal` 增加 `success_criteria TEXT`（v9） |
 
+### 9.2.21 承诺兑现闭环与 tick 预算（#8 / #10，2026-10-31）
+
+**#8 承诺 → 目标 → 兑现**：`OutreachCandidate` 增加 `ref_id`（`commitment_due` 携带
+`commitment_id`）→ `_propose_small_goal()` 把它写进 `companion_goal.commitment_id` →
+`_execute()` 结束后调 `_settle_commitment()`：成功 `complete_commitment(succeeded=True,
+result_event_id=...)`，失败 `succeeded=False`。已取消/已兑现的承诺不会被重复结算（异常吞掉并
+记 `commitment settlement skipped`）。
+
+**#10 tick 预算（`_TickBudget`）**：预算活动**懒创建**——只有真的要调模型或做只读动作时才建
+`life:tick` 行，空 tick 不写任何事件（避免污染日记/反思输入）。
+
+| 约束 | 值 | 何时拦 |
+|---|---|---|
+| 每 tick LLM | 1 次 | `_charge()` 前置于每次 `decide()`，超限即停 |
+| 每日 LLM | 8 次 | tick 开始前读当天 `life:tick.spent.llm_calls` 总和 |
+| 输入 token | 8000 | 模型返回 `usage_metadata` 后记账，超限失败 |
+| 输出 token | 1000 | 同上 |
+| 只读动作 | 1 次 | `spend_read()` 在动作前记账 |
+| 期限 | 5 分钟 | `check_budget` 的 `deadline_ms` |
+
+超限时活动 `failed(reason=budget_exhausted:*)`，tick 返回 `STAY_SILENT / POLICY_BLOCKED`，
+**不发送、不继续调用**。
+
+**同时修掉的两个 bug**：
+
+1. **gate 把自己拦死**：tick 的 `life:tick` 活动被 `build_gate_input()` 当成"角色在忙"
+   （availability=working → `USER_BUSY`），导致每次刚做完活动就再也说不了话。现在
+   `_has_external_activity()` 忽略 `life:*` 活动。
+2. **活动唯一约束**：每 tick 新建活动会撞 `ux_one_running_activity`；改为整个 tick 复用同一个
+   预算活动，动作路径只记账不新建。
+
+**测试**：`TestCommitmentSettlement`（2 例：成功兑现带 result event、失败标 failed）+
+`TestTickBudget`（3 例：每 tick ≤1 次模型、token 超限停、每日上限前置拦截）。
+
 ### 9.3 测试
 
 `tests/test_character.py`(7)、`tests/test_character_system_prompt.py`(4)、`tests/test_qq.py` `/角色` 相关 3 条、

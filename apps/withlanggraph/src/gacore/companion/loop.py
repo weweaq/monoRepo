@@ -54,6 +54,12 @@ logger = get_logger("companion.loop")
 LIFE_TICK_VERSION: Final = "companion-life@v1"
 MAX_SENDS_PER_DAY: Final = 3
 MAX_TICK_LLM_CALLS: Final = 1
+# Per-tick hard caps: one model call, one read-only action, token ceilings and a deadline.
+# Exceeding any of them fails the tick's activity and stops further work (design §16.4).
+MAX_TICK_INPUT_TOKENS: Final = 8000
+MAX_TICK_OUTPUT_TOKENS: Final = 1000
+TICK_DEADLINE_MINUTES: Final = 5
+MAX_LIFE_LLM_PER_DAY: Final = 8
 ACTIVITY_DEADLINE_MINUTES: Final = 30
 ACTIVITY_MAX_TOOL_CALLS: Final = 1
 MAX_EXPRESSION_CHARS: Final = 200
@@ -139,39 +145,203 @@ def _tick(
     max_sends_per_day: int,
     dry_run: bool,
 ) -> TickResult:
+    return _run_tick(
+        store,
+        actor_id,
+        principal_id,
+        now=now,
+        model=model,
+        runner=runner,
+        sender=sender,
+        invoker=invoker,
+        max_sends_per_day=max_sends_per_day,
+        dry_run=dry_run,
+    )
+
+
+def _run_tick(
+    store: CompanionStore,
+    actor_id: str,
+    principal_id: str,
+    *,
+    now: int,
+    model: object | None,
+    runner: object | None,
+    sender: object | None,
+    invoker: object | None,
+    max_sends_per_day: int,
+    dry_run: bool,
+) -> TickResult:
     # SENSE + cheap refusals (0 LLM).
     sent_today = _sent_within(store, actor_id, principal_id, now, window_ms=_DAY_MS)
     if sent_today >= max_sends_per_day:
         return TickResult(action="STAY_SILENT", reason="POLICY_BLOCKED")
     if not store.events_for_actor(actor_id, principal_id):
         return TickResult(action="STAY_SILENT", reason="NO_CANDIDATE")
+    if _llm_calls_today(store, actor_id, principal_id, now) >= MAX_LIFE_LLM_PER_DAY:
+        return TickResult(action="STAY_SILENT", reason="POLICY_BLOCKED", error="llm_budget")
 
-    gate = build_gate_input(store, actor_id, principal_id, now_ms=now)
+    budget = _TickBudget(store, actor_id, principal_id, now)
+    try:
+        return _step(
+            store,
+            actor_id,
+            principal_id,
+            gate=build_gate_input(store, actor_id, principal_id, now_ms=now),
+            budget=budget,
+            now=now,
+            model=model,
+            runner=runner,
+            sender=sender,
+            invoker=invoker,
+            dry_run=dry_run,
+        )
+    finally:
+        budget.close(now)
+
+
+class _TickBudget:
+    """Lazy per-tick budget: the activity row exists only if the tick really does work.
+
+    A pure "nothing to say, nothing to do" tick therefore writes no activity events at all
+    (design: empty ticks must not pollute the event log), while any model call or read
+    action is charged against hard caps and fails the activity when exceeded.
+    """
+
+    def __init__(
+        self, store: CompanionStore, actor_id: str, principal_id: str, now: int
+    ) -> None:
+        self.store = store
+        self.actor_id = actor_id
+        self.principal_id = principal_id
+        self.now = now
+        self.activity: object | None = None
+
+    def _ensure(self) -> object:
+        if self.activity is None:
+            self.activity = start_activity(
+                self.store,
+                self.actor_id,
+                self.principal_id,
+                kind="life:tick",
+                budget=ActivityBudget(
+                    max_llm_calls=MAX_TICK_LLM_CALLS,
+                    max_input_tokens=MAX_TICK_INPUT_TOKENS,
+                    max_output_tokens=MAX_TICK_OUTPUT_TOKENS,
+                    max_read_actions=ACTIVITY_MAX_TOOL_CALLS,
+                    deadline_ms=self.now + TICK_DEADLINE_MINUTES * 60 * 1000,
+                    cancel_on_user_message=True,
+                ),
+                now_ms=self.now,
+            )
+        return self.activity
+
+    def charge(self, decision: Decision) -> bool:
+        """Bill one decision; False means the tick must stop (budget exhausted)."""
+        if not decision.llm_calls and not decision.input_tokens and not decision.output_tokens:
+            return True
+        activity = self._ensure()
+        check = spend(
+            self.store,
+            self.actor_id,
+            self.principal_id,
+            activity.activity_id,  # type: ignore[attr-defined]
+            llm_calls=decision.llm_calls,
+            input_tokens=decision.input_tokens,
+            output_tokens=decision.output_tokens,
+            now_ms=self.now,
+        )
+        return check.allowed
+
+    def spend_read(self) -> bool:
+        """Bill one read-only action (creating the activity if this is the first work)."""
+        self._ensure()
+        check = spend(
+            self.store,
+            self.actor_id,
+            self.principal_id,
+            self.activity.activity_id,  # type: ignore[attr-defined]
+            read_actions=1,
+            now_ms=self.now,
+        )
+        return check.allowed
+
+    def fail(self, reason: str) -> None:
+        if self.activity is None:
+            return
+        current = self.store.get_activity(self.activity.activity_id)  # type: ignore[attr-defined]
+        if current is not None and current.status in {"active", "paused"}:
+            fail_activity(
+                self.store,
+                self.actor_id,
+                self.principal_id,
+                self.activity.activity_id,  # type: ignore[attr-defined]
+                reason=reason,
+                now_ms=self.now,
+            )
+
+    def close(self, now: int) -> None:
+        if self.activity is None:
+            return
+        current = self.store.get_activity(self.activity.activity_id)  # type: ignore[attr-defined]
+        if current is not None and current.status in {"active", "paused"}:
+            complete_activity(
+                self.store,
+                self.actor_id,
+                self.principal_id,
+                self.activity.activity_id,  # type: ignore[attr-defined]
+                now_ms=now,
+            )
+
+
+def _step(
+    store: CompanionStore,
+    actor_id: str,
+    principal_id: str,
+    *,
+    gate: object,
+    budget: _TickBudget,
+    now: int,
+    model: object | None,
+    runner: object | None,
+    sender: object | None,
+    invoker: object | None,
+    dry_run: bool,
+) -> TickResult:
+    """One decision + action inside the tick's lazy budget."""
     decision = decide(
         store,
         actor_id,
         principal_id,
-        gate=gate,
+        gate=gate,  # type: ignore[arg-type]
         model=model,
         runner=runner,
         now_ms=now,
     )
+    if not budget.charge(decision):
+        return TickResult(
+            action="STAY_SILENT",
+            reason="POLICY_BLOCKED",
+            llm_calls=decision.llm_calls,
+            error="budget_exhausted",
+        )
+
     if decision.action == "STAY_SILENT":
-        # A silent verdict — whether "nothing to say" or "not worth saying" — is still a
-        # chance to live a little: one deterministic read-only activity (0 LLM), bounded by
-        # its own 3h gap / 3-a-day cap. Material it creates feeds the next tick.
         maintenance = _maintenance_activity(
-            store, actor_id, principal_id, gate=gate, now=now, invoker=invoker, dry_run=dry_run
+            store,
+            actor_id,
+            principal_id,
+            gate=gate,
+            now=now,
+            invoker=invoker,
+            dry_run=dry_run,
+            budget=budget,
         )
         if maintenance is None:
             return TickResult(
-                action="STAY_SILENT",
-                reason=decision.reason,
-                llm_calls=decision.llm_calls,
+                action="STAY_SILENT", reason=decision.reason, llm_calls=decision.llm_calls
             )
         if decision.llm_calls == 0 and decision.reason == "NO_CANDIDATE":
-            # No model has been consulted yet: spend the tick's single LLM call on the
-            # material we just produced, so "I did something" can become "let me tell you".
             decision = decide(
                 store,
                 actor_id,
@@ -181,12 +351,13 @@ def _tick(
                 runner=runner,
                 now_ms=now,
             )
+            if not budget.charge(decision):
+                return maintenance
             if decision.action == "STAY_SILENT":
                 return maintenance
         else:
             return maintenance
 
-    # ACT.
     if decision.action in {"TELL_ONLY", "ASK_PERMISSION"}:
         return _tell(
             store,
@@ -207,10 +378,25 @@ def _tick(
             invoker=invoker,
             now=now,
             dry_run=dry_run,
+            budget=budget,
         )
     return TickResult(
         action="STAY_SILENT", reason="POLICY_BLOCKED", llm_calls=decision.llm_calls
     )
+
+
+def _llm_calls_today(
+    store: CompanionStore, actor_id: str, principal_id: str, now: int
+) -> int:
+    total = 0
+    for activity in store.activities(actor_id, principal_id):
+        if activity.kind != "life:tick":
+            continue
+        started = activity.started_at_ms or 0
+        if now - started > _DAY_MS:
+            continue
+        total += int(activity.spent.get("llm_calls", 0) or 0)
+    return total
 
 
 # --------------------------------------------------------------- own life (P2)
@@ -229,6 +415,7 @@ def _maintenance_activity(
     now: int,
     invoker: object | None,
     dry_run: bool,
+    budget: _TickBudget,
 ) -> TickResult | None:
     """Do one small read-only thing when there is nothing to talk about.
 
@@ -265,34 +452,11 @@ def _maintenance_activity(
         return None
     if dry_run:
         return TickResult(action="ACT_SILENTLY", reason="MAINTENANCE", goal_id=goal.goal_id)
-    budget = ActivityBudget(
-        max_llm_calls=MAX_TICK_LLM_CALLS,
-        max_read_actions=ACTIVITY_MAX_TOOL_CALLS,
-        deadline_ms=now + ACTIVITY_DEADLINE_MINUTES * 60 * 1000,
-        cancel_on_user_message=True,
-    )
-    activity = start_activity(
-        store,
-        actor_id,
-        principal_id,
-        kind=f"life:{tool}",
-        budget=budget,
-        source_goal_id=goal.goal_id,
-        now_ms=now,
-    )
+    if not budget.spend_read():
+        return None
     finished, detail = _execute(store, actor_id, principal_id, goal, tool, args, invoker, now)
-    spend(store, actor_id, principal_id, activity.activity_id, read_actions=1, now_ms=now)
-    if finished.status == "succeeded":
-        complete_activity(store, actor_id, principal_id, activity.activity_id, now_ms=now)
-    else:
-        fail_activity(
-            store,
-            actor_id,
-            principal_id,
-            activity.activity_id,
-            reason="read_action_failed",
-            now_ms=now,
-        )
+    if finished.status != "succeeded":
+        budget.fail("read_action_failed")
         return None
     logger.info(
         "companion silent activity",
@@ -376,6 +540,7 @@ def _act(
     invoker: object | None,
     now: int,
     dry_run: bool,
+    budget: _TickBudget,
 ) -> TickResult:
     goal = store.get_goal(decision.goal_id) if decision.goal_id else None
     if goal is None:
@@ -399,36 +564,18 @@ def _act(
             llm_calls=decision.llm_calls,
         )
 
-    budget = ActivityBudget(
-        max_llm_calls=MAX_TICK_LLM_CALLS,
-        max_read_actions=ACTIVITY_MAX_TOOL_CALLS,
-        deadline_ms=now + ACTIVITY_DEADLINE_MINUTES * 60 * 1000,
-        cancel_on_user_message=True,
-    )
-    activity = start_activity(
-        store,
-        actor_id,
-        principal_id,
-        kind=f"life:{tool}",
-        budget=budget,
-        source_goal_id=goal.goal_id,
-        now_ms=now,
-    )
+    if not budget.spend_read():
+        return TickResult(
+            action="STAY_SILENT",
+            reason="POLICY_BLOCKED",
+            llm_calls=decision.llm_calls,
+            error="budget_exhausted",
+        )
     finished, detail = _execute(
         store, actor_id, principal_id, goal, tool, args, invoker, now
     )
-    spend(store, actor_id, principal_id, activity.activity_id, read_actions=1, now_ms=now)
-    if finished.status == "succeeded":
-        complete_activity(store, actor_id, principal_id, activity.activity_id, now_ms=now)
-    else:
-        fail_activity(
-            store,
-            actor_id,
-            principal_id,
-            activity.activity_id,
-            reason="read_action_failed",
-            now_ms=now,
-        )
+    if finished.status != "succeeded":
+        budget.fail("read_action_failed")
 
     if finished.status != "succeeded":
         # The read failed: record it, tell nobody. A failure is not the character's mood.
@@ -510,6 +657,9 @@ def _execute(
             detail=f"只读执行失败：{type(exc).__name__}",
             occurred_at_ms=now,
         )
+        _settle_commitment(
+            store, goal, succeeded=False, result_event_id=failed.result_event_id
+        )
         return failed, ""
     snippet = redact_text(str(detail) or "ok")[:200]
     succeeded = finish_goal(
@@ -521,7 +671,44 @@ def _execute(
         detail=snippet,
         occurred_at_ms=now,
     )
+    _settle_commitment(store, goal, succeeded=True, result_event_id=succeeded.result_event_id)
     return succeeded, snippet
+
+
+def _settle_commitment(
+    store: CompanionStore,
+    goal: Goal,
+    *,
+    succeeded: bool,
+    result_event_id: str | None,
+) -> None:
+    """A goal born from a promise settles that promise with the real result event.
+
+    Only open promises are settled; an already cancelled/fulfilled one is left alone.
+    """
+    if not goal.commitment_id:
+        return
+    try:
+        from gacore.companion.commitment import complete_commitment
+
+        complete_commitment(
+            store,
+            goal.commitment_id,
+            succeeded=succeeded,
+            result_event_id=result_event_id,
+        )
+        logger.info(
+            "companion commitment settled",
+            commitment_id=goal.commitment_id,
+            goal_id=goal.goal_id,
+            succeeded=succeeded,
+        )
+    except Exception as exc:  # noqa: BLE001 — settlement must never break the tick
+        logger.warning(
+            "companion commitment settlement skipped",
+            commitment_id=goal.commitment_id,
+            error_type=type(exc).__name__,
+        )
 
 
 def _pick_tool(
@@ -593,7 +780,12 @@ def _propose_small_goal(
         ),
         success_criteria="取到一条只读结果",
     )
-    goal = create_goal(store, actor_id, principal_id, proposal)
+    commitment_id = (
+        candidate.ref_id if candidate is not None and candidate.kind == "commitment_due" else None
+    )
+    goal = create_goal(
+        store, actor_id, principal_id, proposal, commitment_id=commitment_id
+    )
     store.set_goal_status(goal.goal_id, status="approved")
     return store.get_goal(goal.goal_id)
 

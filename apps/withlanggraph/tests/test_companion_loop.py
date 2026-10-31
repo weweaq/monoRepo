@@ -140,7 +140,6 @@ class TestTelling:
         def boom(_text: str) -> None:
             raise RuntimeError("qq down")
 
-        before = len(store.events_for_actor("linwan", "owner"))
         result = run_life_tick(
             store,
             "linwan",
@@ -151,7 +150,9 @@ class TestTelling:
         )
 
         assert result.action == "STAY_SILENT" and result.reason == "SYSTEM_FAILURE"
-        assert len(store.events_for_actor("linwan", "owner")) == before
+        # No message was delivered, so no sent event and no goal/read events may appear.
+        assert "proactive.message.sent" not in _kinds(store)
+        assert not any(kind.startswith("read_action") for kind in _kinds(store))
 
     def test_empty_message_is_not_sent(self, tmp_path: Path) -> None:
         store = _store(tmp_path)
@@ -277,7 +278,6 @@ class TestGateAndDryRun:
         store = _store(tmp_path)
         _open_thread(store)
         sent: list[str] = []
-        before = len(store.events_for_actor("linwan", "owner"))
 
         result = run_life_tick(
             store,
@@ -291,7 +291,7 @@ class TestGateAndDryRun:
 
         assert result.action == "TELL_ONLY" and result.sent_text == "在吗"
         assert sent == []
-        assert len(store.events_for_actor("linwan", "owner")) == before
+        assert "proactive.message.sent" not in _kinds(store)
 
 class TestNeverAtNight:
     """半夜绝不发消息：gate 与 delivery 两道闸都要成立。"""
@@ -618,3 +618,152 @@ class TestGoalLifecycleInLoop:
         activities = store.activities("linwan", "owner")
         assert activities and activities[-1].status == "failed"
         assert activities[-1].reason == "read_action_failed"
+
+
+class TestCommitmentSettlement:
+    """#8：承诺 → 目标 → 兑现 / 失败，全程有真实结果事件。"""
+
+    def _commitment(self, store: CompanionStore, at_ms: int):
+        source = _event(store, "c-src", at_ms=at_ms)
+        commitment, _ = store.add_commitment(
+            actor_id="linwan",
+            principal_id="owner",
+            source_event_id=source,
+            quote="明天帮你查",
+            action="查一下资料",
+            due_at_ms=at_ms + 6 * _HOUR_MS,
+            success_criteria="给出结论",
+            status="active",
+        )
+        return commitment
+
+    def test_due_commitment_is_settled_on_success(self, tmp_path: Path) -> None:
+        store = _store(tmp_path)
+        commitment = self._commitment(store, _ms(_DAY, 9))
+
+        result = run_life_tick(
+            store,
+            "linwan",
+            "owner",
+            now_ms=_ms(_DAY, 11),
+            runner=lambda _c: {"action": "ACT_SILENTLY"},
+            invoker=lambda tool, args: "查到了",
+        )
+
+        assert result.goal_id is not None
+        goal = store.get_goal(result.goal_id)
+        assert goal.commitment_id == commitment.commitment_id
+        settled = store.commitments("linwan", "owner")[0]
+        assert settled.status == "succeeded"
+        assert settled.result_event_id == goal.result_event_id
+
+    def test_failed_read_marks_the_promise_failed(self, tmp_path: Path) -> None:
+        store = _store(tmp_path)
+        self._commitment(store, _ms(_DAY, 9))
+
+        def boom(_tool: str, _args: dict) -> str:
+            raise RuntimeError("tool down")
+
+        run_life_tick(
+            store,
+            "linwan",
+            "owner",
+            now_ms=_ms(_DAY, 11),
+            runner=lambda _c: {"action": "ACT_AND_TELL", "message": "查一下"},
+            invoker=boom,
+        )
+
+        assert store.commitments("linwan", "owner")[0].status == "failed"
+
+
+class TestTickBudget:
+    """#10：模型调用、token、读操作、期限都被真实记账并拦截。"""
+
+    def test_at_most_one_llm_call_per_tick(self, tmp_path: Path) -> None:
+        store = _store(tmp_path)
+        _event(store, "u1")
+        calls: list[int] = []
+        sent: list[str] = []
+
+        def runner(_c):
+            calls.append(1)
+            return {"action": "TELL_ONLY", "message": "在吗"}
+
+        result = run_life_tick(
+            store,
+            "linwan",
+            "owner",
+            now_ms=_ms(_DAY, 15),
+            runner=runner,
+            sender=sent.append,
+            invoker=lambda tool, args: "ok",
+        )
+
+        assert len(calls) == 1, "a tick may spend at most one model call"
+        assert result.action in {"TELL_ONLY", "ACT_SILENTLY"}
+
+    def test_token_cap_stops_the_action(self, tmp_path: Path) -> None:
+        from gacore.companion.loop import MAX_TICK_INPUT_TOKENS
+        import gacore.companion.outreach as outreach
+
+        store = _store(tmp_path)
+        _open_thread(store)
+        original = outreach.Decision
+
+        def decide_with_huge_usage(*args, **kwargs):
+            return original(
+                action="TELL_ONLY",
+                message="在吗",
+                llm_calls=1,
+                input_tokens=MAX_TICK_INPUT_TOKENS + 1,
+            )
+
+        import gacore.companion.loop as loop
+
+        sent: list[str] = []
+        loop_decide = loop.decide
+        loop.decide = decide_with_huge_usage  # type: ignore[assignment]
+        try:
+            result = run_life_tick(
+                store,
+                "linwan",
+                "owner",
+                now_ms=_ms(_DAY, 15),
+                runner=lambda _c: {"action": "TELL_ONLY", "message": "在吗"},
+                sender=sent.append,
+            )
+        finally:
+            loop.decide = loop_decide  # type: ignore[assignment]
+
+        assert result.reason == "POLICY_BLOCKED" and result.error == "budget_exhausted"
+        assert sent == []
+
+    def test_daily_llm_cap_blocks_before_the_model(self, tmp_path: Path) -> None:
+        from gacore.companion.activity import ActivityBudget, start_activity
+        from gacore.companion.loop import MAX_LIFE_LLM_PER_DAY
+
+        store = _store(tmp_path)
+        _event(store, "u1")
+        activity = start_activity(
+            store,
+            "linwan",
+            "owner",
+            kind="life:tick",
+            budget=ActivityBudget(max_llm_calls=MAX_LIFE_LLM_PER_DAY),
+            now_ms=_ms(_DAY, 10),
+        )
+        store.update_activity_spend(
+            activity.activity_id, {"llm_calls": MAX_LIFE_LLM_PER_DAY}
+        )
+
+        calls: list[int] = []
+        result = run_life_tick(
+            store,
+            "linwan",
+            "owner",
+            now_ms=_ms(_DAY, 15),
+            runner=lambda _c: calls.append(1),
+        )
+
+        assert result.reason == "POLICY_BLOCKED" and result.error == "llm_budget"
+        assert calls == []

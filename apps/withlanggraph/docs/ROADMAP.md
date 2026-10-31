@@ -6392,3 +6392,20 @@ TrustedContext 接线，以及 6 项次级问题（详见 tech 表）。
 
 **实测验证**：全仓 **2271 passed, 4 skipped**；ruff 全绿。
 新增测试：事件窗口 2 例、sender 回执 4 例、goal 生命周期 2 例、strained 闸 1 例。
+
+### 2026-10-31 · 修 #8（承诺兑现闭环）与 #10（tick 预算）
+
+**#8**：候选带 `commitment_id` → goal 记录 `commitment_id` → 执行结束自动结算承诺
+（成功 `succeeded` + 真实 `result_event_id`，失败 `failed`）。之前 goal 与 commitment 完全脱节。
+
+**#10**：新增 `_TickBudget`，懒创建 `life:tick` 预算活动：
+每 tick ≤1 次 LLM、每天 ≤8 次、输入 ≤8000 token、输出 ≤1000 token、≤1 次只读动作、
+5 分钟期限；超限活动 failed、tick 直接 `POLICY_BLOCKED`，不发送不继续。
+
+**顺带修的两个 bug**：
+
+1. gate 把 tick 自己的活动当成"角色在忙"→ `USER_BUSY`，做完活动就再也说不了话；
+   现在 `life:*` 活动不计入 availability。
+2. 每 tick 新建活动撞唯一约束；改为整 tick 复用同一预算活动。
+
+**验证**：全仓 **2276 passed, 4 skipped**；ruff 全绿；新增 5 例测试。

@@ -110,6 +110,7 @@ class OutreachCandidate:
     text: str
     priority: int
     source_ids: tuple[str, ...] = ()
+    ref_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,6 +145,8 @@ class Decision:
     token: dict[str, object] | None = None
     candidates: tuple[OutreachCandidate, ...] = field(default_factory=tuple)
     llm_calls: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 
 def collect_candidates(
@@ -196,6 +199,7 @@ def collect_candidates(
                     text=f"答应过的事：{commitment.action}",
                     priority=2,
                     source_ids=(commitment.source_event_id,),
+                    ref_id=commitment.commitment_id,
                 )
             )
 
@@ -279,13 +283,18 @@ def decide(
         )
 
     try:
+        usage: dict[str, int] = {}
         if runner is not None:
             payload = runner(candidates)  # type: ignore[operator]
         else:
-            payload = _ask_model(
+            payload, usage = _ask_model(
                 model, candidates, store.relationship(actor_id, principal_id), now
             )
-        decision = _validate_decision(payload, candidates)
+        decision = replace(
+            _validate_decision(payload, candidates),
+            input_tokens=int(usage.get("input_tokens", 0)),
+            output_tokens=int(usage.get("output_tokens", 0)),
+        )
     except Exception as exc:  # noqa: BLE001 — a decision failure is silent, never narrated
         logger.warning(
             "companion outreach decision failed",
@@ -477,7 +486,7 @@ def _ask_model(
     candidates: list[OutreachCandidate],
     relationship: object | None,
     now_ms: int,
-) -> object:
+) -> tuple[object, dict[str, int]]:
     if model is None:
         from gacore.llm import get_llm
 
@@ -504,7 +513,14 @@ def _ask_model(
     match = _JSON_OBJECT.search(text or "")
     if not match:
         raise ValueError("decision is not JSON")
-    return json.loads(match.group(0))
+    usage = getattr(response, "usage_metadata", None) or {}
+    return (
+        json.loads(match.group(0)),
+        {
+            "input_tokens": int(usage.get("input_tokens", 0) or 0),
+            "output_tokens": int(usage.get("output_tokens", 0) or 0),
+        },
+    )
 
 
 def _validate_decision(
@@ -669,8 +685,18 @@ def build_gate_input(
         min_gap_ms=min_gap_ms,
         no_response_streak=streak,
         last_owner_message_ms=last_owner,
-        has_running_activity=store.running_activity(actor_id, principal_id) is not None,
+        # The life tick's own budget activity must not count as "the character is busy":
+        # otherwise the tick would gate itself out of ever speaking.
+        has_running_activity=_has_external_activity(
+            store.running_activity(actor_id, principal_id)
+        ),
     )
+
+
+def _has_external_activity(activity: object | None) -> bool:
+    if activity is None:
+        return False
+    return not str(getattr(activity, "kind", "")).startswith("life:")
 
 
 def shadow_decision(
