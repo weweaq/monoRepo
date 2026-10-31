@@ -73,3 +73,50 @@ FastAPI 应用，代码包名 `profile`。上游为独立 git 仓库，通过 `g
   但代价是不产出可安装包；若未来要提炼共享代码，从 `profile/` 内迁移到 `packages/`
 
 **待办更新**：见上表（lint 债务 106 处、ruff 升级、bvid 疑似遗漏、httpx2、ga-logging）。
+
+### 2026-10-31 — 日志改为按天归档 + 测试隔离
+
+**背景**：用户发现 `apps/checkself/logs` 下一天出现几十个目录，预期是"每天一个文件夹"。
+排查结论：164 个目录 **全部是 pytest 产物**（逐目录核对 `run.jsonl`，均含
+`profile.test` 的「测试日志1/2」，真实运行目录为 0）。根因两条：
+1. `profile/log.py` 的 `setup()` 原本每次进程启动建一个 `logs/YYYY-MM-DD-HHmmss/`；
+2. `task_engine._run_task` 里 `setup(log_dir=LOG_DIR)` 用的是真实 `profile.config.LOG_DIR`，
+   测试直接调 `TaskRunner.start_task()`，于是每跑一次 pytest 就新建一个目录。
+   同一批测试还直接用真实 `data/profile.db` 并 `DELETE FROM llm_calls/task_runs`。
+
+**已完成**：
+- `profile/log.py`：改为按天归档 `logs/YYYY-MM-DD/run.jsonl`，同一天所有运行追加同一文件；
+  新增 `_DailyFileHandler`，长驻进程跨 0 点自动切到新日期目录；每条日志注入 `run_id`
+  （时间戳 + pid + uuid 片段，保证同秒同进程也不撞），每次运行开头写一条
+  `message="运行开始"`（含 run_id/pid/cwd/argv）作为运行分界，且绕过文件级别过滤，
+  设成 WARNING 也不丢；切天失败（磁盘满/权限）不向业务抛异常、状态不推进、下一条重试；
+  新增 `get_log_file()`，`get_log_dir()` 语义改为"当天目录"
+- `profile/portal/task_engine.py`：任务开始时把 `log_dir`（当天 run.jsonl 路径，未初始化
+  时不写）记进 `task_runs.log_dir`，portal 可据此定位任务日志
+- 新增 `tests/conftest.py`：autouse fixture 把 `LOG_DIR` / `DB_PATH` /
+  `OBSIDIAN_OUTPUT_DIR` 指到 `tmp_path`；由于多个模块在**导入期**绑定这些常量，
+  fixture 逐个改写绑定点（config / init_db / portal.app / output.writer /
+  refresh.reporter / portal.routes.dashboard / portal.routes.profiles / 4 个 cli 模块），
+  并在用例前后重置日志 handler 与 `_RUN_ID`
+- 新增 `tests/test_log.py`：按天目录、同日追加（run_id 不同）、跨天切换、切天失败重试、
+  WARNING 级别仍写运行分界、全部绑定点已隔离，共 6 个用例
+- 清理历史垃圾：删除 `logs/` 下 **166** 个目录（原始 164 个测试产物 + 排查期间复跑新增 2 个；
+  删除前逐个确认，无真实运行日志）
+
+**实测验证**：
+- `uv run --all-packages pytest apps/checkself/tests -q` → **56 passed, 4 skipped**；
+  连续多轮运行后 `logs/` 目录数与 `data/profile.db` mtime 均不变（0 新增）
+- 真实运行冒烟：两次 `setup(LOG_DIR)` 各写一条「运行开始」，落在同一个
+  `logs/2026-10-31/run.jsonl`，`run_id` 不同（按天归档 + 当天追加生效）
+
+**偏差说明**：
+- 全局 `AGENTS.md` 日志规范写的是「每次运行独立目录 `logs/YYYY-MM-DD-HHmmss/`」，
+  本次按用户明确要求改为按天归档，属有意偏差；如需回到按运行分目录，改
+  `profile/log.py` 的 `setup()` / `_DailyFileHandler` 两处即可
+- 「一天一个文件」的固有代价：多进程（常驻 portal + 手动 CLI）同时写当天文件时按行
+  尽力追加，Windows 下超长单行理论上可能交错；已写进 `log.py` 的 `setup()` docstring
+- `task_runs.log_dir` 现在存的是**文件路径**（`logs/YYYY-MM-DD/run.jsonl`）而非目录，
+  当前无读取方；跨 0 点的任务可能后半段日志已落入新一天文件
+
+**待办更新**：无新增；原 lint 债务等项不受影响。
+
