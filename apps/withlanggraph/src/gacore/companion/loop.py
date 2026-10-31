@@ -52,7 +52,7 @@ from gacore.redact import redact_text
 logger = get_logger("companion.loop")
 
 LIFE_TICK_VERSION: Final = "companion-life@v1"
-MAX_SENDS_PER_DAY: Final = 3
+MAX_SENDS_PER_DAY: Final = 30  # fallback only
 MAX_TICK_LLM_CALLS: Final = 1
 # Per-tick hard caps: one model call, one read-only action, token ceilings and a deadline.
 # Exceeding any of them fails the tick's activity and stops further work (design §16.4).
@@ -109,7 +109,8 @@ def run_life_tick(
     runner: object | None = None,
     sender: object | None = None,
     invoker: object | None = None,
-    max_sends_per_day: int = MAX_SENDS_PER_DAY,
+    max_sends_per_day: int | None = None,
+    min_gap_minutes: int | None = None,
     dry_run: bool = False,
 ) -> TickResult:
     """One life tick: sense → gate → decide → act → record. Never raises at the caller."""
@@ -125,6 +126,7 @@ def run_life_tick(
             sender=sender,
             invoker=invoker,
             max_sends_per_day=max_sends_per_day,
+            min_gap_minutes=min_gap_minutes,
             dry_run=dry_run,
         )
     except Exception as exc:  # noqa: BLE001 — a tick failure must never break the scheduler
@@ -144,7 +146,8 @@ def _tick(
     runner: object | None,
     sender: object | None,
     invoker: object | None,
-    max_sends_per_day: int,
+    max_sends_per_day: int | None,
+    min_gap_minutes: int | None,
     dry_run: bool,
 ) -> TickResult:
     return _run_tick(
@@ -157,6 +160,7 @@ def _tick(
         sender=sender,
         invoker=invoker,
         max_sends_per_day=max_sends_per_day,
+        min_gap_minutes=min_gap_minutes,
         dry_run=dry_run,
     )
 
@@ -171,12 +175,21 @@ def _run_tick(
     runner: object | None,
     sender: object | None,
     invoker: object | None,
-    max_sends_per_day: int,
+    max_sends_per_day: int | None,
+    min_gap_minutes: int | None,
     dry_run: bool,
 ) -> TickResult:
-    # SENSE + cheap refusals (0 LLM).
+    # SENSE + cheap refusals (0 LLM). Pacing knobs come from CompanionConfig unless the
+    # caller overrides them explicitly (tests do).
+    from gacore.companion.config import load_companion_config
+
+    companion = load_companion_config()
+    cap = companion.max_sends_per_day if max_sends_per_day is None else max_sends_per_day
+    gap_ms = (
+        companion.min_gap_minutes if min_gap_minutes is None else min_gap_minutes
+    ) * 60 * 1000
     sent_today = _sent_within(store, actor_id, principal_id, now, window_ms=_DAY_MS)
-    if sent_today >= max_sends_per_day:
+    if sent_today >= cap:
         return TickResult(action="STAY_SILENT", reason="POLICY_BLOCKED")
     if not store.events_for_actor(actor_id, principal_id):
         return TickResult(action="STAY_SILENT", reason="NO_CANDIDATE")
@@ -189,7 +202,10 @@ def _run_tick(
             store,
             actor_id,
             principal_id,
-            gate=build_gate_input(store, actor_id, principal_id, now_ms=now),
+            gate=build_gate_input(
+                store, actor_id, principal_id, now_ms=now, min_gap_ms=gap_ms
+            ),
+            min_gap_ms=gap_ms,
             budget=budget,
             now=now,
             model=model,
@@ -302,6 +318,7 @@ def _step(
     principal_id: str,
     *,
     gate: object,
+    min_gap_ms: int,
     budget: _TickBudget,
     now: int,
     model: object | None,
@@ -348,7 +365,9 @@ def _step(
                 store,
                 actor_id,
                 principal_id,
-                gate=build_gate_input(store, actor_id, principal_id, now_ms=now),
+                gate=build_gate_input(
+                    store, actor_id, principal_id, now_ms=now, min_gap_ms=min_gap_ms
+                ),
                 model=model,
                 runner=runner,
                 now_ms=now,

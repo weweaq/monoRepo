@@ -44,9 +44,9 @@ OUTREACH_PROMPT_VERSION: Final = "companion-outreach@v1"
 MAX_MESSAGE_CHARS: Final = 200
 MAX_CANDIDATES: Final = 3
 REPLY_WINDOW_MS: Final = 15 * 60 * 60 * 1000
-# 90 minutes between proactive contacts: matches the "tick every 1–2h, max 3/day" setting.
-# The old 3h value came from the daily-question job and made an hourly heartbeat pointless.
-MIN_OUTREACH_GAP_MS: Final = 90 * 60 * 1000
+# Fallback gap when no configuration is present; the live value comes from
+# ``CompanionConfig.min_gap_minutes`` (COMPANION_MIN_GAP_MINUTES, default 30).
+MIN_OUTREACH_GAP_MS: Final = 30 * 60 * 1000
 NO_RESPONSE_DECAY: Final = 0.5
 MIN_MULTIPLIER: Final = 0.25
 PERMISSION_TTL_MS: Final = 30 * 60 * 1000
@@ -125,7 +125,7 @@ class GateInput:
     daily_count: int = 0
     max_daily: int = 3
     last_outreach_ms: int | None = None
-    min_gap_ms: int = MIN_OUTREACH_GAP_MS
+    min_gap_ms: int | None = None
     no_response_streak: int = 0
     last_owner_message_ms: int | None = None
     has_running_activity: bool = False
@@ -252,18 +252,19 @@ def evaluate_gate(gate: GateInput) -> GateResult:
     """Pure gate: every refusal carries one of the plan's reason codes."""
     if derive_day_phase(gate.now_ms) == "quiet":
         return GateResult(False, "QUIET_HOURS")
+    gap = gate.min_gap_ms if gate.min_gap_ms is not None else _configured_gap_ms()
     availability = derive_availability(
         now_ms=gate.now_ms,
         last_owner_message_ms=gate.last_owner_message_ms,
         last_outreach_ms=gate.last_outreach_ms,
-        cooldown_ms=gate.min_gap_ms,
+        cooldown_ms=gap,
         running_activity=_RunningActivity(gate.has_running_activity),
     )
     if availability in {"chatting", "working"}:
         return GateResult(False, "USER_BUSY")
     if gate.daily_count >= gate.max_daily:
         return GateResult(False, "POLICY_BLOCKED")
-    if gate.last_outreach_ms is not None and gate.now_ms - gate.last_outreach_ms < gate.min_gap_ms:
+    if gate.last_outreach_ms is not None and gate.now_ms - gate.last_outreach_ms < gap:
         return GateResult(False, "TOO_REPETITIVE")
     if gate.no_response_streak >= 3:
         return GateResult(False, "LOW_VALUE")
@@ -664,14 +665,20 @@ _OWNER_KINDS: Final = frozenset({"user.message.received"})
 _OUTBOUND_KINDS: Final = frozenset({"proactive.message.sent"})
 
 
+def _configured_gap_ms() -> int:
+    from gacore.companion.config import load_companion_config
+
+    return load_companion_config().min_gap_minutes * 60 * 1000
+
+
 def build_gate_input(
     store: CompanionStore,
     actor_id: str,
     principal_id: str,
     *,
     now_ms: int,
-    max_daily: int = 3,
-    min_gap_ms: int = MIN_OUTREACH_GAP_MS,
+    max_daily: int | None = None,
+    min_gap_ms: int | None = None,
     window_ms: int = REPLY_WINDOW_MS,
 ) -> GateInput:
     """Derive the gate inputs from stored state (no model, no side effects)."""
@@ -696,13 +703,18 @@ def build_gate_input(
             break
         streak += 1
     relationship = store.relationship(actor_id, principal_id)
+    from gacore.companion.config import load_companion_config
+
+    companion = load_companion_config()
     return GateInput(
         now_ms=now_ms,
         relationship_status=getattr(relationship, "status", None),
         daily_count=daily_count,
-        max_daily=max_daily,
+        max_daily=companion.max_sends_per_day if max_daily is None else max_daily,
         last_outreach_ms=last_outreach,
-        min_gap_ms=min_gap_ms,
+        min_gap_ms=(
+            companion.min_gap_minutes * 60 * 1000 if min_gap_ms is None else min_gap_ms
+        ),
         no_response_streak=streak,
         last_owner_message_ms=last_owner,
         # The life tick's own budget activity must not count as "the character is busy":

@@ -1551,6 +1551,22 @@ planned→armed→running→done、watch 带 trigger、终态保护、同时只�
 无钟点/无生活词拒绝、建卡字段（trigger/expires/source）、低置信丢弃、超 12h 丢弃、
 到点成为最高优先级候选、未到点无候选、问完即 done、过期不再问。
 
+### 9.2.24 主动节奏可配置（2026-10-31）
+
+两个频率阈值从代码常量改成 `CompanionConfig` 字段（环境变量，坏值回落默认、越界收敛）：
+
+| 变量 | 默认 | 范围 | 作用 |
+|---|---|---|---|
+| `COMPANION_MAX_SENDS_PER_DAY` | **30** | 1–200 | 每个 actor 每 24h 主动消息上限（`_tick` 前置拦截，0 次 LLM） |
+| `COMPANION_MIN_GAP_MINUTES` | **30** | 1–1440 | 两条主动消息的最小间隔（gate 的 `TOO_REPETITIVE` 与 availability 的 `cooldown` 都用它） |
+
+读取点：`companion/config.py::load_companion_config()`（`_int_env` 容错）；`outreach.build_gate_input()`
+在未显式传参时读配置，`loop._run_tick()` 用配置解析日上限与间隔。测试可直接覆盖参数，
+生产只改 `.env`。
+
+**测试**：`TestPacingConfig`（4 例）：默认 30/30、env 覆盖、坏值回落与越界收敛、
+日上限拦截、间隔拦截。
+
 ### 9.3 测试
 
 `tests/test_character.py`(7)、`tests/test_character_system_prompt.py`(4)、`tests/test_qq.py` `/角色` 相关 3 条、

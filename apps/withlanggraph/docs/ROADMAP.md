@@ -6459,3 +6459,20 @@ TrustedContext 接线，以及 6 项次级问题（详见 tech 表）。
 **补充（同日）**：CLI 增加 `companion intents [--kind act|watch|promise]`，一条命令查看角色自己攒的
 意图卡（含触发时间、来源事件、状态）；`watch` 已用真机演示：写入"我十点下班"→ 卡 `armed`
 触发 22:00 → 演示后取消，未发送任何消息。
+
+### 2026-10-31 · 主动节奏改为配置项（日上限 30 / 间隔 30 分钟）
+
+**背景**：用户要求把"每天最多几条"和"两条之间至少多久"从代码常量改成可调配置。
+
+**已完成**：
+
+- `companion/config.py`：`CompanionConfig` 新增 `max_sends_per_day`（默认 30，1–200）与
+  `min_gap_minutes`（默认 30，1–1440），由 `COMPANION_MAX_SENDS_PER_DAY` /
+  `COMPANION_MIN_GAP_MINUTES` 读取；`_int_env()` 对坏值回落、越界收敛。
+- `outreach.build_gate_input()` / `loop._run_tick()`：未显式传参时读配置；gate 的
+  `TOO_REPETITIVE` 与 availability 的 `cooldown` 共用同一间隔值。
+- 根 `.env.example` 补两个键。
+- `tests/test_companion_loop.py::TestPacingConfig`（4 例）。
+- R5：本文件 + tech §9.2.24。
+
+**实测验证**：全仓 **2311 passed, 4 skipped**；ruff 全绿；默认值即为 30 条 / 30 分钟。

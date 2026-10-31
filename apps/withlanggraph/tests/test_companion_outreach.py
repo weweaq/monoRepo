@@ -115,7 +115,7 @@ class TestGate:
             (2, {}, "QUIET_HOURS"),
             (10, {"last_owner_message_ms": _ms(_DAY, 10)}, "USER_BUSY"),
             (10, {"daily_count": 3}, "POLICY_BLOCKED"),
-            (10, {"last_outreach_ms": _ms(_DAY, 10) - 60 * 60 * 1000}, "TOO_REPETITIVE"),
+            (10, {"last_outreach_ms": _ms(_DAY, 10) - 10 * 60 * 1000}, "TOO_REPETITIVE"),
             (10, {"no_response_streak": 3}, "LOW_VALUE"),
         ],
     )

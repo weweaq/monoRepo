@@ -104,6 +104,7 @@ class TestEmptyTick:
             "linwan",
             "owner",
             now_ms=_ms(_DAY, 15),
+            max_sends_per_day=3,
             runner=lambda _c: called.append(1),
             sender=lambda _t: None,
         )
@@ -767,3 +768,56 @@ class TestTickBudget:
 
         assert result.reason == "POLICY_BLOCKED" and result.error == "llm_budget"
         assert calls == []
+
+
+class TestPacingConfig:
+    """两个节奏阈值来自配置（COMPANION_MAX_SENDS_PER_DAY / COMPANION_MIN_GAP_MINUTES）。"""
+
+    def test_defaults_are_30_and_30_minutes(self, monkeypatch) -> None:
+        from gacore.companion.config import load_companion_config
+
+        monkeypatch.delenv("COMPANION_MAX_SENDS_PER_DAY", raising=False)
+        monkeypatch.delenv("COMPANION_MIN_GAP_MINUTES", raising=False)
+        config = load_companion_config({})
+
+        assert config.max_sends_per_day == 30
+        assert config.min_gap_minutes == 30
+
+    def test_env_overrides_and_clamps(self) -> None:
+        from gacore.companion.config import load_companion_config
+
+        assert load_companion_config({"COMPANION_MAX_SENDS_PER_DAY": "5"}).max_sends_per_day == 5
+        assert load_companion_config({"COMPANION_MIN_GAP_MINUTES": "5"}).min_gap_minutes == 5
+        # 垃圾值回落默认，越界值收敛到边界，绝不崩溃
+        assert load_companion_config({"COMPANION_MAX_SENDS_PER_DAY": "abc"}).max_sends_per_day == 30
+        assert load_companion_config({"COMPANION_MIN_GAP_MINUTES": "0"}).min_gap_minutes == 1
+        assert load_companion_config({"COMPANION_MIN_GAP_MINUTES": "9999"}).min_gap_minutes == 1440
+
+    def test_tick_uses_configured_cap(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setenv("COMPANION_MAX_SENDS_PER_DAY", "1")
+        store = _store(tmp_path)
+        _event(store, "s0", kind="proactive.message.sent", at_ms=_ms(_DAY, 9))
+        called: list[int] = []
+
+        result = run_life_tick(
+            store,
+            "linwan",
+            "owner",
+            now_ms=_ms(_DAY, 15),
+            runner=lambda _c: called.append(1),
+        )
+
+        assert result.reason == "POLICY_BLOCKED"
+        assert called == []
+
+    def test_gate_uses_configured_gap(self, tmp_path: Path, monkeypatch) -> None:
+        from gacore.companion.outreach import build_gate_input, evaluate_gate
+
+        monkeypatch.setenv("COMPANION_MIN_GAP_MINUTES", "30")
+        store = _store(tmp_path)
+        _event(store, "p1", kind="proactive.message.sent", at_ms=_ms(_DAY, 14, 45))
+
+        gate = build_gate_input(store, "linwan", "owner", now_ms=_ms(_DAY, 15))
+
+        assert gate.min_gap_ms == 30 * 60 * 1000
+        assert evaluate_gate(gate).reason == "TOO_REPETITIVE"
