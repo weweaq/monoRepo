@@ -252,7 +252,9 @@ def _maintenance_activity(
     if history and now - history[-1].occurred_at_ms < MIN_ACTIVITY_GAP_MS:
         return None
 
-    tool, args = _ROTATION[int(now // (6 * 60 * 60 * 1000)) % len(_ROTATION)]
+    # 3h rotation: three views of its own life, one per maintenance slot, so consecutive
+    # activities never look at the same source twice in a row.
+    tool, args = _ROTATION[int(now // MIN_ACTIVITY_GAP_MS) % len(_ROTATION)]
     goal = _propose_small_goal(
         store, actor_id, principal_id, Decision(action="ACT_SILENTLY"), now
     )
@@ -497,7 +499,7 @@ def _pick_tool(
     for tool in goal.allowed_tools:
         if tool in ALLOWED_TOOLS:
             return tool, _args_for(tool, decision, now)
-    rotation = _ROTATION[int(now // (6 * 60 * 60 * 1000)) % len(_ROTATION)]
+    rotation = _ROTATION[int(now // MIN_ACTIVITY_GAP_MS) % len(_ROTATION)]
     return rotation
 
 
